@@ -1,0 +1,8 @@
+# Rust build artifacts
+/target/
+
+# Cargo lock for binaries is committed; uncomment for libraries
+# Cargo.lock
+
+# Loom run directories
+.loom/
