@@ -95,15 +95,15 @@ func Parse(data []byte) (*Workflow, error) {
 	}
 
 	for _, t := range wf.Tasks {
-		r := resolveConfig(*wf, t)
+		rt, m, e := wf.Effective(t)
 		req := runtime.Request{
 			TaskID:       string(t.ID),
 			Prompt:       t.Prompt,
-			Model:        r.Model,
-			Effort:       r.Effort,
+			Model:        m,
+			Effort:       e,
 			SystemPrompt: wf.SystemPrompt,
 		}
-		if err := runtime.Validate(r.Runtime, req); err != nil {
+		if err := runtime.Validate(rt, req); err != nil {
 			return nil, fmt.Errorf("task %q: %w", t.ID, err)
 		}
 	}
@@ -249,31 +249,6 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 		}
 	}
 	return deps, nil
-}
-
-type resolvedConfig struct {
-	Runtime runtime.Name
-	Model   runtime.Model
-	Effort  runtime.Effort
-}
-
-// resolveConfig returns the routing fields the runtime sees for t: task-level
-// values win, falling back to workflow-level defaults when the task field is
-// empty. SystemPrompt has no task-level override and is taken from wf directly.
-func resolveConfig(wf Workflow, t Task) resolvedConfig {
-	r := t.Runtime
-	if r == "" {
-		r = wf.Runtime
-	}
-	m := t.Model
-	if m == "" {
-		m = wf.Model
-	}
-	e := t.Effort
-	if e == "" {
-		e = wf.Effort
-	}
-	return resolvedConfig{Runtime: r, Model: m, Effort: e}
 }
 
 // findCycle runs a DFS over the dependency graph and returns the first cycle
