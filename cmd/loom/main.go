@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -118,27 +120,37 @@ func printPlan(w io.Writer, wf *workflow.Workflow) {
 
 	for i, id := range order {
 		t := wf.ByID(id)
-		rt, m, e := wf.Effective(*t)
+		rt, m, e := wf.Effective(t)
 		fmt.Fprintf(w, "  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
 			i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
 	}
 }
 
 // hooks returns executor.Hooks that write per-task progress lines to w.
+// Under concurrent execution, OnStart and OnFinish for different tasks
+// interleave; the mutex serializes writes so a line never tears, and the
+// finish line carries the task id so output is still readable.
 func hooks(w io.Writer, total int) executor.Hooks {
-	step := 0
+	var (
+		step atomic.Int32
+		mu   sync.Mutex
+	)
 	return executor.Hooks{
 		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
-			step++
-			fmt.Fprintf(w, "[%d/%d] %s (%s/%s%s)\n", step, total, t.ID, rt, m, effortSuffix(e))
+			n := step.Add(1)
+			mu.Lock()
+			fmt.Fprintf(w, "[%d/%d] %s (%s/%s%s)\n", n, total, t.ID, rt, m, effortSuffix(e))
+			mu.Unlock()
 		},
 		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
+			mu.Lock()
+			defer mu.Unlock()
 			if err != nil {
-				fmt.Fprintf(w, "  FAIL after %s: %v\n", res.Elapsed.Round(time.Millisecond), err)
+				fmt.Fprintf(w, "  %s FAIL after %s: %v\n", t.ID, res.Elapsed.Round(time.Millisecond), err)
 				return
 			}
-			fmt.Fprintf(w, "  done %s  in=%d out=%d cache=%d  $%.6f\n",
-				res.Elapsed.Round(time.Millisecond),
+			fmt.Fprintf(w, "  %s done %s  in=%d out=%d cache=%d  $%.6f\n",
+				t.ID, res.Elapsed.Round(time.Millisecond),
 				res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CacheReadTokens, res.Usage.TotalCostUSD)
 		},
 	}

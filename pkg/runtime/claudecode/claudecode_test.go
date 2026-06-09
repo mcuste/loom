@@ -17,14 +17,14 @@ func TestRegisteredUnderExpectedName(t *testing.T) {
 	}
 }
 
-func TestSatisfiesSubprocessRuntime(t *testing.T) {
-	spec, ok := runtime.Lookup(claudecode.Name)
+func TestSatisfiesSubprocess(t *testing.T) {
+	r, ok := runtime.Lookup(claudecode.Name)
 	if !ok {
 		t.Fatalf("runtime %q not registered", claudecode.Name)
 	}
-	sub, ok := spec.(runtime.SubprocessRuntime)
+	sub, ok := r.(runtime.Subprocess)
 	if !ok {
-		t.Fatalf("registered spec does not implement runtime.SubprocessRuntime")
+		t.Fatalf("registered runner does not implement runtime.Subprocess")
 	}
 	if got := sub.Binary(); got != "claude" {
 		t.Fatalf("Binary() = %q, want %q", got, "claude")

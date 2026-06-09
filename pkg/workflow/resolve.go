@@ -6,7 +6,9 @@ import "github.com/mcuste/loom/pkg/runtime"
 // see for t. Task-level fields win when non-empty, falling back to the
 // workflow-level defaults. SystemPrompt has no task-level override and is
 // taken from Workflow.SystemPrompt directly.
-func (w *Workflow) Effective(t Task) (runtime.Name, runtime.Model, runtime.Effort) {
+//
+// t must be non-nil.
+func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effort) {
 	r := t.Runtime
 	if r == "" {
 		r = w.Runtime

@@ -8,9 +8,8 @@ import "slices"
 // reading a workflow top-to-bottom matches the order loom will execute it in).
 //
 // Plan assumes w has been produced by Parse, which guarantees the graph is a
-// DAG. If w was constructed by hand and contains a cycle, Plan returns the
-// partial order it managed to compute — callers running parse-validated
-// workflows can ignore that edge case.
+// DAG. If a cycle is present (hand-built Workflow only), Plan panics — the
+// invariant is violated and there is no defensible partial-order behavior.
 func (w *Workflow) Plan() []TaskID {
 	pos := make(map[TaskID]int, len(w.Tasks))
 	for i, t := range w.Tasks {
@@ -26,32 +25,47 @@ func (w *Workflow) Plan() []TaskID {
 		}
 	}
 
+	cmpPos := func(a, b TaskID) int { return pos[a] - pos[b] }
+
 	ready := make([]TaskID, 0, len(w.Tasks))
 	for _, t := range w.Tasks {
 		if inDeg[t.ID] == 0 {
 			ready = append(ready, t.ID)
 		}
 	}
+	slices.SortFunc(ready, cmpPos)
 
 	order := make([]TaskID, 0, len(w.Tasks))
 	for len(ready) > 0 {
-		slices.SortFunc(ready, func(a, b TaskID) int { return pos[a] - pos[b] })
 		u := ready[0]
 		ready = ready[1:]
 		order = append(order, u)
 		for _, v := range adj[u] {
 			inDeg[v]--
 			if inDeg[v] == 0 {
-				ready = append(ready, v)
+				i, _ := slices.BinarySearchFunc(ready, v, cmpPos)
+				ready = slices.Insert(ready, i, v)
 			}
 		}
+	}
+	if len(order) != len(w.Tasks) {
+		panic("workflow.Plan: cycle detected — Workflow must be produced by Parse")
 	}
 	return order
 }
 
 // ByID returns a pointer to the task with the given id, or nil if no such task
 // exists. The returned pointer is valid for the lifetime of w.
+//
+// For workflows produced by Parse this is O(1); for hand-constructed workflows
+// (no internal index) it falls back to a linear scan over Tasks.
 func (w *Workflow) ByID(id TaskID) *Task {
+	if w.byID != nil {
+		if i, ok := w.byID[id]; ok {
+			return &w.Tasks[i]
+		}
+		return nil
+	}
 	for i := range w.Tasks {
 		if w.Tasks[i].ID == id {
 			return &w.Tasks[i]

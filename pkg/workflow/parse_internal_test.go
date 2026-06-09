@@ -42,6 +42,11 @@ func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[strin
 
 	pubFields := map[string]struct{}{}
 	for f := range public.Fields() {
+		// Unexported fields are internal caches (e.g. parse-built indices), not
+		// part of the YAML-to-domain schema, and must not trigger drift alarms.
+		if !f.IsExported() {
+			continue
+		}
 		pubFields[f.Name] = struct{}{}
 	}
 

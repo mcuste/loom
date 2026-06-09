@@ -1,6 +1,7 @@
 package workflow_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -37,6 +38,10 @@ func (f fakeSpec) Validate(req runtime.Request) error {
 		return runtime.ErrUnsupportedSystemPrompt
 	}
 	return nil
+}
+
+func (fakeSpec) Run(context.Context, runtime.Request) (runtime.Response, error) {
+	return runtime.Response{}, nil
 }
 
 func init() {

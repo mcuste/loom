@@ -4,33 +4,33 @@ import "sync"
 
 var (
 	registryMu sync.RWMutex
-	registry   = map[Name]RuntimeSpec{}
+	registry   = map[Name]Runner{}
 )
 
-// Register installs spec under name. Intended for init() of runtime packages
+// Register installs r under name. Intended for init() of runtime packages
 // and for the future loom-config extension point that lets users declare
-// custom runtimes. Panics on empty name, nil spec, or duplicate registration.
-func Register(name Name, spec RuntimeSpec) {
+// custom runtimes. Panics on empty name, nil runner, or duplicate registration.
+func Register(name Name, r Runner) {
 	if name == "" {
 		panic("runtime: Register called with empty name")
 	}
-	if spec == nil {
-		panic("runtime: Register called with nil spec for " + string(name))
+	if r == nil {
+		panic("runtime: Register called with nil runner for " + string(name))
 	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	if _, dup := registry[name]; dup {
 		panic("runtime: already registered: " + string(name))
 	}
-	registry[name] = spec
+	registry[name] = r
 }
 
-// Lookup returns the spec for name and whether it is registered.
-func Lookup(name Name) (RuntimeSpec, bool) {
+// Lookup returns the runner for name and whether it is registered.
+func Lookup(name Name) (Runner, bool) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	spec, ok := registry[name]
-	return spec, ok
+	r, ok := registry[name]
+	return r, ok
 }
 
 // Registered returns the names of all registered runtimes in unspecified
@@ -44,4 +44,3 @@ func Registered() []Name {
 	}
 	return names
 }
-

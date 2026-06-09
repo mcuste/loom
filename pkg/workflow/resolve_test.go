@@ -14,7 +14,7 @@ func TestEffectiveFallsBackToWorkflow(t *testing.T) {
 		Effort:  "low",
 	}
 	t1 := workflow.Task{ID: "a"}
-	rt, m, e := wf.Effective(t1)
+	rt, m, e := wf.Effective(&t1)
 	if rt != runtime.Name("test-rt") || m != runtime.Model("m1") || e != runtime.Effort("low") {
 		t.Fatalf("Effective = (%q,%q,%q), want (test-rt, m1, low)", rt, m, e)
 	}
@@ -27,7 +27,7 @@ func TestEffectiveTaskOverrides(t *testing.T) {
 		Effort:  "low",
 	}
 	t1 := workflow.Task{ID: "a", Model: "m2", Effort: "high"}
-	rt, m, e := wf.Effective(t1)
+	rt, m, e := wf.Effective(&t1)
 	if rt != runtime.Name("test-rt") || m != runtime.Model("m2") || e != runtime.Effort("high") {
 		t.Fatalf("Effective = (%q,%q,%q), want (test-rt, m2, high)", rt, m, e)
 	}

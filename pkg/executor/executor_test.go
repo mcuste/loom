@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
@@ -48,21 +49,43 @@ func (errRuntime) Run(ctx context.Context, req runtime.Request) (runtime.Respons
 	return runtime.Response{}, errors.New("kaboom")
 }
 
-// noRunSpec is a RuntimeSpec that does not implement Runtime — exercises the
-// executor's type-assertion error path.
-type noRunSpec struct{}
+// barrierRuntime blocks every Run until the test releases it, letting a test
+// prove that independent tasks have all entered Run simultaneously.
+type barrierRuntime struct {
+	entered chan struct{}
+	release chan struct{}
+}
 
-func (noRunSpec) Validate(req runtime.Request) error {
+func (barrierRuntime) Validate(req runtime.Request) error {
 	if req.Model == "" {
 		return runtime.ErrMissingModel
 	}
 	return nil
 }
 
+func (b barrierRuntime) Run(ctx context.Context, req runtime.Request) (runtime.Response, error) {
+	select {
+	case b.entered <- struct{}{}:
+	case <-ctx.Done():
+		return runtime.Response{}, ctx.Err()
+	}
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return runtime.Response{}, ctx.Err()
+	}
+	return runtime.Response{Output: req.Prompt}, nil
+}
+
+var execBarrier = barrierRuntime{
+	entered: make(chan struct{}, 16),
+	release: make(chan struct{}),
+}
+
 func init() {
 	runtime.Register("exec-echo", echoRuntime{})
 	runtime.Register("exec-err", errRuntime{})
-	runtime.Register("exec-no-run", noRunSpec{})
+	runtime.Register("exec-barrier", execBarrier)
 }
 
 // TestRunSubstitutesUpstreamOutputs exercises the end-to-end happy path: the
@@ -172,6 +195,48 @@ tasks:
 	}
 }
 
+// TestRunIndependentTasksAreConcurrent pins the parallelism contract: three
+// tasks with no dependencies between them must all enter Run before any is
+// allowed to return. If the executor were serial, only one task would reach
+// the barrier and the test would time out.
+func TestRunIndependentTasksAreConcurrent(t *testing.T) {
+	src := `
+name: wf
+runtime: exec-barrier
+model: m1
+tasks:
+  - id: a
+    prompt: x
+  - id: b
+    prompt: x
+  - id: c
+    prompt: x
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.Run(context.Background(), wf, executor.Hooks{})
+		done <- err
+	}()
+
+	for i := range 3 {
+		select {
+		case <-execBarrier.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d/3 tasks reached Run before timeout — executor is serial", i)
+		}
+	}
+	close(execBarrier.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 // TestRunUnknownRuntime exercises the executor's lookup error path.
 func TestRunUnknownRuntime(t *testing.T) {
 	// Build a Workflow manually (Parse would reject it because the runtime is
@@ -190,26 +255,3 @@ func TestRunUnknownRuntime(t *testing.T) {
 	}
 }
 
-// TestRunSpecWithoutRunRejected pins that registering only the validation
-// surface is not enough — execution requires the full Runtime contract.
-func TestRunSpecWithoutRunRejected(t *testing.T) {
-	wf := &workflow.Workflow{
-		ID:      "wf",
-		Runtime: "exec-no-run",
-		Model:   "m1",
-		Tasks:   []workflow.Task{{ID: "a", Prompt: "x"}},
-	}
-	_, err := executor.Run(context.Background(), wf, executor.Hooks{})
-	if err == nil || !contains(err.Error(), "does not implement Run") {
-		t.Fatalf("Run err = %v, want 'does not implement Run'", err)
-	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

@@ -26,8 +26,8 @@ var (
 
 type spec struct{}
 
-// Compile-time proof that spec satisfies the SubprocessRuntime contract.
-var _ runtime.SubprocessRuntime = spec{}
+// Compile-time proof that spec satisfies the Subprocess contract.
+var _ runtime.Subprocess = spec{}
 
 func (spec) Validate(req runtime.Request) error {
 	if req.Model == "" {

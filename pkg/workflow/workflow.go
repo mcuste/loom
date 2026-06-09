@@ -21,11 +21,18 @@ type TaskID string
 
 // identifierClass is the character class that defines a valid WorkflowID or
 // TaskID, and — by extension — the alphabet for `{{id}}` placeholder names
-// recognized by the parser. Both identifierRe and the parser's placeholderRe
-// derive from this constant so the two regexes cannot drift apart.
+// recognized by the parser. identifierRe and placeholderRe both derive from
+// this constant so the two regexes cannot drift apart.
 const identifierClass = `[A-Za-z0-9_]+`
 
-var identifierRe = regexp.MustCompile(`^` + identifierClass + `$`)
+var (
+	identifierRe = regexp.MustCompile(`^` + identifierClass + `$`)
+
+	// placeholderRe matches `{{id}}` placeholders in a prompt. The captured
+	// name must satisfy identifierClass, the same alphabet as a TaskID, so a
+	// placeholder can never reference a name that could never be a valid id.
+	placeholderRe = regexp.MustCompile(`\{\{(` + identifierClass + `)\}\}`)
+)
 
 // NewWorkflowID validates s and returns it as a WorkflowID.
 //
@@ -84,6 +91,11 @@ type Workflow struct {
 	SystemPrompt string
 	// Tasks are the workflow's tasks in declaration order.
 	Tasks []Task
+
+	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
+	// nil for hand-constructed Workflow values, in which case ByID falls back
+	// to a linear scan.
+	byID map[TaskID]int
 }
 
 // Task is a single executable unit within a Workflow.

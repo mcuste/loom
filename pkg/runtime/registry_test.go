@@ -12,7 +12,7 @@ import (
 
 func TestRegisterAndLookup(t *testing.T) {
 	name := runtime.Name("test-register-and-lookup")
-	want := &fakeSpec{}
+	var want runtime.Runner = &fakeSpec{}
 
 	runtime.Register(name, want)
 
@@ -21,7 +21,7 @@ func TestRegisterAndLookup(t *testing.T) {
 		t.Fatalf("Lookup(%q) ok = false, want true", name)
 	}
 	if got != want {
-		t.Fatalf("Lookup returned %p, want the registered spec %p", got, want)
+		t.Fatalf("Lookup returned %v, want the registered runner %v", got, want)
 	}
 }
 
@@ -40,13 +40,13 @@ func TestRegisterPanicsOnEmptyName(t *testing.T) {
 	runtime.Register("", fakeSpec{})
 }
 
-func TestRegisterPanicsOnNilSpec(t *testing.T) {
+func TestRegisterPanicsOnNilRunner(t *testing.T) {
 	defer func() {
 		if recover() == nil {
 			t.Fatalf("Register(name, nil) did not panic")
 		}
 	}()
-	runtime.Register("test-nil-spec", nil)
+	runtime.Register("test-nil-runner", nil)
 }
 
 func TestRegisterPanicsOnDuplicate(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -56,6 +55,7 @@ func Parse(data []byte) (*Workflow, error) {
 		Effort:       runtime.Effort(raw.Effort),
 		SystemPrompt: raw.SystemPrompt,
 		Tasks:        make([]Task, 0, len(raw.Tasks)),
+		byID:         make(map[TaskID]int, len(raw.Tasks)),
 	}
 
 	ids := make(map[TaskID]struct{}, len(raw.Tasks))
@@ -79,6 +79,7 @@ func Parse(data []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
+		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
 			ID:          tid,
 			Prompt:      rt.Prompt,
@@ -94,7 +95,8 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, &CycleError{Cycle: cycle}
 	}
 
-	for _, t := range wf.Tasks {
+	for i := range wf.Tasks {
+		t := &wf.Tasks[i]
 		rt, m, e := wf.Effective(t)
 		req := runtime.Request{
 			TaskID:       string(t.ID),
@@ -145,13 +147,6 @@ type rawTask struct {
 	Prompt      string   `yaml:"prompt"`
 	DependsOn   []string `yaml:"depends_on"`
 }
-
-// placeholderRe matches `{{id}}` placeholders in a prompt. The captured name
-// must satisfy the same alphabet as a TaskID (identifierClass); keeping both
-// regexes in lockstep prevents a placeholder from referencing a name that
-// could never be a valid task id. The parser uses this only to validate that
-// every placeholder names an explicitly-declared depends_on entry.
-var placeholderRe = regexp.MustCompile(`\{\{(` + identifierClass + `)\}\}`)
 
 // Sentinel parse errors. Typed errors below cover structured failures with
 // fields the caller may want to inspect.
