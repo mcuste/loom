@@ -20,8 +20,13 @@ import (
 )
 
 // TaskResult is the outcome of one task execution.
+//
+// Prompt is the final text sent to the runtime, with `{{id}}` placeholders
+// already substituted; persisting it lets callers reconstruct exactly what
+// the model saw without re-running substitution.
 type TaskResult struct {
 	TaskID  workflow.TaskID
+	Prompt  string
 	Output  string
 	Usage   runtime.Usage
 	Elapsed time.Duration
@@ -111,6 +116,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks) (*Report, erro
 			resp, runErr := runner.Run(gctx, req)
 			res := TaskResult{
 				TaskID:  t.ID,
+				Prompt:  prompt,
 				Output:  resp.Output,
 				Usage:   resp.Usage,
 				Elapsed: time.Since(start),

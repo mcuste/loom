@@ -26,6 +26,7 @@ import (
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 
 	// Side-effect imports register runtimes with the runtime package.
@@ -76,7 +77,11 @@ func newCheckCmd() *cobra.Command {
 }
 
 func doRun(w io.Writer, path string) error {
-	wf, err := workflow.ParseFile(path)
+	manifest, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	wf, err := workflow.Parse(manifest)
 	if err != nil {
 		return err
 	}
@@ -86,11 +91,47 @@ func doRun(w io.Writer, path string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	rep, err := executor.Run(ctx, wf, hooks(w, len(wf.Tasks)))
+	run, err := store.Open(wf.ID, manifest, store.Config{
+		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Run file : %s\n\n", run.Path())
+
+	rep, err := executor.Run(ctx, wf, combine(hooks(w, len(wf.Tasks)), executor.Hooks{
+		OnStart:  run.OnStart(),
+		OnFinish: run.OnFinish(),
+	}))
+	if closeErr := run.Close(rep, err); closeErr != nil {
+		fmt.Fprintf(w, "  store: %v\n", closeErr)
+	}
 	if rep != nil {
 		printSummary(w, wf, rep)
 	}
 	return err
+}
+
+// combine fans an executor event out to multiple hook sets in registration
+// order. Used to layer the store's persistence hooks on top of the printer
+// hooks without coupling either implementation to the other.
+func combine(hs ...executor.Hooks) executor.Hooks {
+	return executor.Hooks{
+		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+			for _, h := range hs {
+				if h.OnStart != nil {
+					h.OnStart(t, rt, m, e)
+				}
+			}
+		},
+		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
+			for _, h := range hs {
+				if h.OnFinish != nil {
+					h.OnFinish(t, res, err)
+				}
+			}
+		},
+	}
 }
 
 // printPlan writes the workflow header and the task execution order to w. It
