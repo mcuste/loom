@@ -91,9 +91,9 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks) (*Report, erro
 			}
 
 			rt, model, effort := wf.Effective(t)
-			runner, err := lookupRunner(rt)
-			if err != nil {
-				return fmt.Errorf("task %q: %w", t.ID, err)
+			runner, ok := runtime.Lookup(rt)
+			if !ok {
+				return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 			}
 
 			mu.Lock()
@@ -147,11 +147,24 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks) (*Report, erro
 	return rep, err
 }
 
-// lookupRunner resolves a runtime name to a [runtime.Runner].
-func lookupRunner(name runtime.Name) (runtime.Runner, error) {
-	r, ok := runtime.Lookup(name)
-	if !ok {
-		return nil, fmt.Errorf("runtime %q: %w", name, runtime.ErrUnknownRuntime)
+// JoinHooks fans an event out to every hook set in registration order, so
+// independent observers (printer, store, telemetry) can be layered without
+// coupling their implementations. Nil function fields in any set are skipped.
+func JoinHooks(hs ...Hooks) Hooks {
+	return Hooks{
+		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+			for _, h := range hs {
+				if h.OnStart != nil {
+					h.OnStart(t, rt, m, e)
+				}
+			}
+		},
+		OnFinish: func(t workflow.Task, res TaskResult, err error) {
+			for _, h := range hs {
+				if h.OnFinish != nil {
+					h.OnFinish(t, res, err)
+				}
+			}
+		},
 	}
-	return r, nil
 }

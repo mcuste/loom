@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -109,8 +108,7 @@ func TestOnStartOnFinishUpdatesTaskEntry(t *testing.T) {
 
 	task := workflow.Task{ID: "alpha"}
 	run.OnStart()(task, "claude-code", "sonnet", "medium")
-	run.OnFinish()(task, executor.TaskResult{
-		TaskID:  "alpha",
+	run.OnFinish()(task, store.TaskResult{
 		Prompt:  "substituted prompt",
 		Output:  "model output",
 		Usage:   runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5},
@@ -157,7 +155,7 @@ func TestOnFinishRecordsTaskError(t *testing.T) {
 
 	task := workflow.Task{ID: "beta"}
 	run.OnStart()(task, "rt", "m", "")
-	run.OnFinish()(task, executor.TaskResult{TaskID: "beta"}, errors.New("kaboom"))
+	run.OnFinish()(task, store.TaskResult{}, errors.New("kaboom"))
 
 	tasks := readRun(t, run.Path())["tasks"].([]any)
 	got := tasks[0].(map[string]any)
@@ -179,14 +177,14 @@ func TestCloseFinalizesAndLinksLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	run.OnFinish()(workflow.Task{ID: "a"}, executor.TaskResult{TaskID: "a", Elapsed: 10 * time.Millisecond}, nil)
-	run.OnFinish()(workflow.Task{ID: "b"}, executor.TaskResult{TaskID: "b", Elapsed: 20 * time.Millisecond}, nil)
+	run.OnFinish()(workflow.Task{ID: "a"}, store.TaskResult{Elapsed: 10 * time.Millisecond}, nil)
+	run.OnFinish()(workflow.Task{ID: "b"}, store.TaskResult{Elapsed: 20 * time.Millisecond}, nil)
 
-	rep := &executor.Report{
-		Tasks: []executor.TaskResult{{TaskID: "a"}, {TaskID: "b"}},
-		Usage: runtime.Usage{InputTokens: 100, OutputTokens: 200, TotalCostUSD: 1.5},
+	summary := &store.Summary{
+		TaskCount: 2,
+		Usage:     runtime.Usage{InputTokens: 100, OutputTokens: 200, TotalCostUSD: 1.5},
 	}
-	if err := run.Close(rep, nil); err != nil {
+	if err := run.Close(summary, nil); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -220,7 +218,7 @@ func TestCloseFailedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := run.Close(&executor.Report{}, errors.New("boom")); err != nil {
+	if err := run.Close(&store.Summary{}, errors.New("boom")); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	m := readRun(t, run.Path())
@@ -241,7 +239,7 @@ func TestAtomicRewriteLeavesNoTmp(t *testing.T) {
 	for i := range 5 {
 		task := workflow.Task{ID: workflow.TaskID(fmt.Sprintf("t%d", i))}
 		run.OnStart()(task, "rt", "m", "")
-		run.OnFinish()(task, executor.TaskResult{TaskID: task.ID}, nil)
+		run.OnFinish()(task, store.TaskResult{}, nil)
 	}
 	if _, err := os.Stat(run.Path() + ".tmp"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tmp file lingered: err=%v", err)
@@ -273,11 +271,11 @@ func TestConcurrentOnFinishIsSafe(t *testing.T) {
 			id := workflow.TaskID(fmt.Sprintf("t%02d", i))
 			task := workflow.Task{ID: id}
 			run.OnStart()(task, "rt", "m", "")
-			run.OnFinish()(task, executor.TaskResult{TaskID: id, Output: fmt.Sprintf("out-%d", i)}, nil)
+			run.OnFinish()(task, store.TaskResult{Output: fmt.Sprintf("out-%d", i)}, nil)
 		}()
 	}
 	wg.Wait()
-	if err := run.Close(&executor.Report{}, nil); err != nil {
+	if err := run.Close(&store.Summary{}, nil); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

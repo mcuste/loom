@@ -13,8 +13,9 @@
 // atomically (write to .tmp, rename) on every OnStart/OnFinish so a crash
 // mid-run still leaves a valid file on disk.
 //
-// The store is intentionally orthogonal to the executor: it consumes
-// [executor.TaskResult] values via hook adapters and never reaches into
+// The store owns its own input types ([TaskResult], [Summary]) so it does
+// not depend on the executor. Callers translate their per-task results into
+// these types in a thin adapter; the store package never reaches into
 // runtime or workflow internals beyond the small surface those packages
 // already expose. Disk errors are reported via the optional OnError callback
 // so a failing disk does not abort a workflow.
@@ -30,10 +31,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
+
+// TaskResult is the per-task input to [Run.OnFinish]. It mirrors the fields
+// the store persists; callers translate from their own per-task result type
+// (e.g. executor.TaskResult) at the hook boundary.
+type TaskResult struct {
+	Prompt  string
+	Output  string
+	Usage   runtime.Usage
+	Elapsed time.Duration
+}
+
+// Summary is the workflow-level input to [Run.Close]: aggregate accounting
+// plus the count of tasks that completed successfully. Pass nil to Close to
+// leave the totals unset (useful when the run aborted before producing a
+// summary).
+type Summary struct {
+	Usage     runtime.Usage
+	TaskCount int
+}
 
 // runIDLayout is the time layout for the human-readable prefix of a run id.
 // UTC and lexicographically sortable.
@@ -49,9 +68,10 @@ type Run struct {
 	clock        func() time.Time
 	errorHandler func(error)
 
-	mu    sync.Mutex
-	state runRecord
-	tasks map[workflow.TaskID]int // task id -> index into state.Tasks
+	mu     sync.Mutex
+	state  runRecord
+	tasks  map[workflow.TaskID]int // task id -> index into state.Tasks
+	closed bool                    // Close is a no-op after the first call
 }
 
 // Config is the optional configuration for Open.
@@ -151,12 +171,11 @@ func (r *Run) OnStart() func(workflow.Task, runtime.Name, runtime.Model, runtime
 	}
 }
 
-// OnFinish returns an [executor.Hooks].OnFinish adapter that records the
-// task's final prompt, output, usage, and status, then rewrites the run
-// file. Errors are surfaced via the configured OnError callback and do not
-// propagate to the executor.
-func (r *Run) OnFinish() func(workflow.Task, executor.TaskResult, error) {
-	return func(t workflow.Task, res executor.TaskResult, runErr error) {
+// OnFinish returns a closure that records a task's final prompt, output,
+// usage, and status, then rewrites the run file. Errors are surfaced via
+// the configured OnError callback and do not propagate to the caller.
+func (r *Run) OnFinish() func(workflow.Task, TaskResult, error) {
+	return func(t workflow.Task, res TaskResult, runErr error) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		idx, ok := r.tasks[t.ID]
@@ -184,19 +203,25 @@ func (r *Run) OnFinish() func(workflow.Task, executor.TaskResult, error) {
 	}
 }
 
-// Close finalizes the run: it records totals from report, sets the overall
-// status, and refreshes the latest.json symlink. Safe to call once.
-func (r *Run) Close(report *executor.Report, runErr error) error {
+// Close finalizes the run: it records totals from summary, sets the overall
+// status, and refreshes the latest.json symlink. Idempotent — subsequent
+// calls return nil without rewriting the file or updating the symlink.
+func (r *Run) Close(summary *Summary, runErr error) error {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
 	r.state.FinishedAt = r.now()
 	r.state.ElapsedMs = r.state.FinishedAt.Sub(r.state.StartedAt).Milliseconds()
 	r.state.Status = statusFor(runErr)
 	if runErr != nil {
 		r.state.Error = runErr.Error()
 	}
-	if report != nil {
-		r.state.Usage = usageDTO(report.Usage)
-		r.state.TaskCount = len(report.Tasks)
+	if summary != nil {
+		r.state.Usage = usageDTO(summary.Usage)
+		r.state.TaskCount = summary.TaskCount
 	}
 	err := r.flushLocked()
 	r.mu.Unlock()

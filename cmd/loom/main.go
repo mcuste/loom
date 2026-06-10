@@ -99,11 +99,11 @@ func doRun(w io.Writer, path string) error {
 	}
 	fmt.Fprintf(w, "Run file : %s\n\n", run.Path())
 
-	rep, err := executor.Run(ctx, wf, combine(hooks(w, len(wf.Tasks)), executor.Hooks{
-		OnStart:  run.OnStart(),
-		OnFinish: run.OnFinish(),
-	}))
-	if closeErr := run.Close(rep, err); closeErr != nil {
+	rep, err := executor.Run(ctx, wf, executor.JoinHooks(
+		hooks(w, len(wf.Tasks)),
+		storeHooks(run),
+	))
+	if closeErr := run.Close(summaryFor(rep), err); closeErr != nil {
 		fmt.Fprintf(w, "  store: %v\n", closeErr)
 	}
 	if rep != nil {
@@ -112,26 +112,33 @@ func doRun(w io.Writer, path string) error {
 	return err
 }
 
-// combine fans an executor event out to multiple hook sets in registration
-// order. Used to layer the store's persistence hooks on top of the printer
-// hooks without coupling either implementation to the other.
-func combine(hs ...executor.Hooks) executor.Hooks {
+// storeHooks adapts a store.Run into executor.Hooks: OnStart passes through
+// unchanged; OnFinish translates the executor's TaskResult into the store's
+// own type at the boundary so the store package stays independent of the
+// executor.
+func storeHooks(run *store.Run) executor.Hooks {
+	finish := run.OnFinish()
 	return executor.Hooks{
-		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
-			for _, h := range hs {
-				if h.OnStart != nil {
-					h.OnStart(t, rt, m, e)
-				}
-			}
-		},
+		OnStart: run.OnStart(),
 		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
-			for _, h := range hs {
-				if h.OnFinish != nil {
-					h.OnFinish(t, res, err)
-				}
-			}
+			finish(t, store.TaskResult{
+				Prompt:  res.Prompt,
+				Output:  res.Output,
+				Usage:   res.Usage,
+				Elapsed: res.Elapsed,
+			}, err)
 		},
 	}
+}
+
+// summaryFor projects an executor.Report into the slim store.Summary the
+// store needs at Close time. Returns nil when rep is nil so Close leaves the
+// totals unset.
+func summaryFor(rep *executor.Report) *store.Summary {
+	if rep == nil {
+		return nil
+	}
+	return &store.Summary{Usage: rep.Usage, TaskCount: len(rep.Tasks)}
 }
 
 // printPlan writes the workflow header and the task execution order to w. It

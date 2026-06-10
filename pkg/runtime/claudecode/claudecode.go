@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/mcuste/loom/pkg/runtime"
 )
@@ -66,7 +67,7 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return runtime.Response{}, fmt.Errorf("claude-code: %w (stderr: %s)", err, stderr.String())
+		return runtime.Response{}, &ExecError{Err: err, Stderr: stderr.String()}
 	}
 
 	var env struct {
@@ -95,3 +96,21 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 func init() {
 	runtime.Register(Name, spec{})
 }
+
+// ExecError is returned when the `claude` subprocess fails. It carries the
+// wrapped exec error and the verbatim stderr so callers (and `errors.Is` /
+// `errors.As`) can inspect each separately instead of digging through a
+// formatted string.
+type ExecError struct {
+	Err    error
+	Stderr string
+}
+
+func (e *ExecError) Error() string {
+	if e.Stderr == "" {
+		return "claude-code: " + e.Err.Error()
+	}
+	return fmt.Sprintf("claude-code: %s: %s", e.Err, strings.TrimSpace(e.Stderr))
+}
+
+func (e *ExecError) Unwrap() error { return e.Err }
