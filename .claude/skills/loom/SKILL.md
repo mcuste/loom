@@ -28,6 +28,11 @@ runtime: claude-code         # default for tasks; only claude-code is registered
 model: sonnet                # default; one of: haiku | sonnet | opus
 effort: medium               # default; one of: low | medium | high | max  (claude-code)
 system_prompt: ...           # optional, appended to every task
+params:                       # optional; see ## Params
+  - name: ...                # required, [A-Za-z0-9_]+, unique
+    description: ...         # optional
+    default: ...             # optional; string-only, no {{}} expansion
+    required: false          # optional; true if no default
 
 tasks:
   - id: <task_id>            # required, [A-Za-z0-9_]+, unique
@@ -48,6 +53,54 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 - Every `{{id}}` placeholder **must also appear in `depends_on`**. Placeholders never implicitly extend the DAG. Repeating a placeholder is fine; it's templating, not declaration.
 - `depends_on` may list a task with no placeholder (pure ordering constraint).
 - Cycles, unknown deps, duplicate deps, and unknown placeholders fail `loom check`.
+
+## Params
+
+Workflows can accept parameters passed at runtime via the `-p` CLI flag. Params are declared at the top level, reference-able via `{{params.name}}` syntax in task prompts and `system_prompt`, and do not create DAG dependencies.
+
+Declare params as a list of objects with:
+- `name` (required, `[A-Za-z0-9_]+`): the identifier.
+- `description` (optional): documented in the plan output.
+- `default` (optional): string value used if not provided via CLI; if `default` is absent and `required: false` (or omitted), the param is optional with no default.
+- `required` (optional, default `false`): if `true`, the param **must** be provided via `-p`; cannot set both `required: true` and `default`.
+
+String values only — `default: 1` and `default: true` are stringified (`"1"`, `"true"`).
+
+Substitute params in prompts with `{{params.foo}}` (separate namespace from task ids; `{{foo}}` is a task ref, never a param):
+
+```yaml
+name: deploy
+description: Deploy service to an env
+runtime: claude-code
+model: sonnet
+effort: low
+params:
+  - name: env
+    description: Target environment
+    required: true
+  - name: replicas
+    default: "1"
+  - name: tag
+    default: latest
+tasks:
+  - id: plan
+    prompt: |
+      Plan deploy of image {{params.tag}} to {{params.env}} ({{params.replicas}}x).
+  - id: apply
+    depends_on: [plan]
+    prompt: |
+      Apply plan for {{params.env}}:
+      {{plan}}
+```
+
+Provide values on the CLI with repeatable `-p key=val`:
+
+```bash
+loom run examples/deploy.yaml -p env=prod -p replicas=3
+loom check examples/deploy.yaml -p env=prod
+```
+
+Resolution order (right-to-left wins): declared defaults → `-p` values. Unknown keys or missing required params are hard errors.
 
 ## Runtime / model / effort
 
@@ -75,7 +128,7 @@ Resolve per task. The workflow-level `model` / `effort` covers the majority; ove
 1. Decide the DAG shape first (fan-out, chain, diamond). Sketch task ids and edges.
 2. Pick workflow-level defaults to cover the majority of tasks; override only where escalation matters.
 3. Keep prompts tight — each `{{id}}` placeholder injects the *entire* upstream output verbatim.
-4. Run `loom check` until it's clean, then `loom run`.
+4. Run `loom check` until it's clean, then `loom run`. When params are declared, `loom check -p key=val` resolves `{{params.X}}` placeholders before printing the plan, so you can preview the actual prompts the model will see.
 
 ## Output
 

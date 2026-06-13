@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,15 +78,40 @@ func (b barrierRuntime) Run(ctx context.Context, req runtime.Request) (runtime.R
 	return runtime.Response{Output: req.Prompt}, nil
 }
 
+// systemPromptCaptureRuntime records the SystemPrompt from the most recent
+// Run call. Used by TestRunSystemPromptParamSubstitution to assert that the
+// executor performs param substitution before constructing the Request.
+type systemPromptCaptureRuntime struct {
+	mu       sync.Mutex
+	captured string
+}
+
+func (r *systemPromptCaptureRuntime) Validate(req runtime.Request) error {
+	if req.Model == "" {
+		return runtime.ErrMissingModel
+	}
+	return nil
+}
+
+func (r *systemPromptCaptureRuntime) Run(_ context.Context, req runtime.Request) (runtime.Response, error) {
+	r.mu.Lock()
+	r.captured = req.SystemPrompt
+	r.mu.Unlock()
+	return runtime.Response{Output: req.Prompt}, nil
+}
+
 var execBarrier = barrierRuntime{
 	entered: make(chan struct{}, 16),
 	release: make(chan struct{}),
 }
 
+var execSysCapture = &systemPromptCaptureRuntime{}
+
 func init() {
 	runtime.Register("exec-echo", echoRuntime{})
 	runtime.Register("exec-err", errRuntime{})
 	runtime.Register("exec-barrier", execBarrier)
+	runtime.Register("exec-syscapture", execSysCapture)
 }
 
 // TestRunSubstitutesUpstreamOutputs exercises the end-to-end happy path: the
@@ -108,7 +134,7 @@ tasks:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	rep, err := executor.Run(context.Background(), wf, executor.Hooks{})
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -155,7 +181,7 @@ tasks:
 			events = append(events, "finish:"+string(t.ID))
 		},
 	}
-	if _, err := executor.Run(context.Background(), wf, hooks); err != nil {
+	if _, err := executor.Run(context.Background(), wf, hooks, executor.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	want := []string{"start:a", "finish:a", "start:b", "finish:b"}
@@ -186,7 +212,7 @@ tasks:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	rep, err := executor.Run(context.Background(), wf, executor.Hooks{})
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
 	if err == nil {
 		t.Fatalf("Run returned nil error, want failure")
 	}
@@ -219,7 +245,7 @@ tasks:
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.Run(context.Background(), wf, executor.Hooks{})
+		_, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
 		done <- err
 	}()
 
@@ -249,9 +275,141 @@ func TestRunUnknownRuntime(t *testing.T) {
 			{ID: "a", Prompt: "x"},
 		},
 	}
-	_, err := executor.Run(context.Background(), wf, executor.Hooks{})
+	_, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
 	if !errors.Is(err, runtime.ErrUnknownRuntime) {
 		t.Fatalf("errors.Is ErrUnknownRuntime = false; err = %v", err)
 	}
 }
 
+// TestRunSubstitutesParams verifies that {{params.name}} placeholders in task
+// prompts are substituted with opts.Params values before the runtime sees them.
+func TestRunSubstitutesParams(t *testing.T) {
+	src := `
+name: wf
+runtime: exec-echo
+model: m1
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: "target={{params.env}}"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	opts := executor.Options{Params: workflow.ParamValues{"env": "prod"}}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Outputs["a"] != "target=prod" {
+		t.Errorf("Outputs[a] = %q, want %q", rep.Outputs["a"], "target=prod")
+	}
+}
+
+// TestRunSystemPromptParamSubstitution verifies that the executor substitutes
+// {{params.name}} in the workflow-level system_prompt before constructing the
+// runtime.Request, so the runtime sees the final resolved text.
+func TestRunSystemPromptParamSubstitution(t *testing.T) {
+	// Reset the capture from any prior test.
+	execSysCapture.mu.Lock()
+	execSysCapture.captured = ""
+	execSysCapture.mu.Unlock()
+
+	src := `
+name: wf
+runtime: exec-syscapture
+model: m1
+system_prompt: "ctx={{params.env}}"
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: "hello"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	opts := executor.Options{Params: workflow.ParamValues{"env": "staging"}}
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	execSysCapture.mu.Lock()
+	got := execSysCapture.captured
+	execSysCapture.mu.Unlock()
+
+	if got != "ctx=staging" {
+		t.Errorf("SystemPrompt = %q, want %q", got, "ctx=staging")
+	}
+}
+
+// TestRunParamsImmutableUnderRace verifies that three independent sibling tasks
+// all reading opts.Params concurrently introduce no data race. Run under
+// `go test -race` to assert the absence of concurrent map read/write.
+func TestRunParamsImmutableUnderRace(t *testing.T) {
+	src := `
+name: wf
+runtime: exec-echo
+model: m1
+params:
+  - name: x
+    default: original
+tasks:
+  - id: a
+    prompt: "{{params.x}}"
+  - id: b
+    prompt: "{{params.x}}"
+  - id: c
+    prompt: "{{params.x}}"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	opts := executor.Options{Params: workflow.ParamValues{"x": "racetest"}}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, res := range rep.Tasks {
+		if res.Prompt != "racetest" {
+			t.Errorf("task %q Prompt = %q, want %q", res.TaskID, res.Prompt, "racetest")
+		}
+	}
+}
+
+// TestRunReportCarriesParams asserts that rep.Params reflects opts.Params
+// verbatim so callers can read what substituted without re-resolving.
+func TestRunReportCarriesParams(t *testing.T) {
+	src := `
+name: wf
+runtime: exec-echo
+model: m1
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: "{{params.env}}"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := workflow.ParamValues{"env": "prod"}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{Params: want})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Params["env"] != "prod" {
+		t.Errorf("rep.Params[env] = %q, want %q", rep.Params["env"], "prod")
+	}
+	if len(rep.Params) != len(want) {
+		t.Errorf("rep.Params len = %d, want %d", len(rep.Params), len(want))
+	}
+}

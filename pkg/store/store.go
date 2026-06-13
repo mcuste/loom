@@ -87,6 +87,9 @@ type Config struct {
 	// OnError is invoked for non-fatal write errors so the caller can surface
 	// them without aborting the workflow. nil discards.
 	OnError func(error)
+	// Params holds resolved parameter values (key → value) for this run.
+	// Stored verbatim; no provenance is recorded.
+	Params map[string]string
 }
 
 // Open creates a new run JSON file for workflowID under cfg.Root, seeded
@@ -132,6 +135,7 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 			StartedAt:  started,
 			Status:     "running",
 			Manifest:   string(manifest),
+			Params:     cfg.Params,
 		},
 		tasks: map[workflow.TaskID]int{},
 	}
@@ -309,8 +313,9 @@ type runRecord struct {
 	Error      string       `json:"error,omitempty"`
 	TaskCount  int          `json:"task_count,omitempty"`
 	Usage      usageJSON    `json:"usage,omitzero"`
-	Manifest   string       `json:"manifest"`
-	Tasks      []taskRecord `json:"tasks"`
+	Manifest   string            `json:"manifest"`
+	Params     map[string]string `json:"params,omitempty"`
+	Tasks      []taskRecord      `json:"tasks"`
 }
 
 type taskRecord struct {

@@ -297,6 +297,45 @@ func TestConcurrentOnFinishIsSafe(t *testing.T) {
 	}
 }
 
+// TestRunRecordIncludesParams pins that params passed via Config appear under
+// the "params" key in the on-disk JSON so post-run inspection can show what
+// values were in effect.
+func TestRunRecordIncludesParams(t *testing.T) {
+	root := t.TempDir()
+	run, err := store.Open("wf", []byte("name: wf\n"), store.Config{
+		Root:   root,
+		Params: map[string]string{"env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m := readRun(t, run.Path())
+	params, ok := m["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("params not a map: %v", m["params"])
+	}
+	if params["env"] != "prod" {
+		t.Errorf("params[env] = %v, want prod", params["env"])
+	}
+}
+
+// TestEmptyParamsOmitted pins the omitempty contract: a run opened with no
+// Params must not produce a "params" key in the JSON so existing consumers
+// that parse the file as a loose map are unaffected.
+func TestEmptyParamsOmitted(t *testing.T) {
+	root := t.TempDir()
+	run, err := store.Open("wf", []byte("name: wf\n"), store.Config{Root: root})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m := readRun(t, run.Path())
+	if _, present := m["params"]; present {
+		t.Errorf("params key present in JSON but expected absent")
+	}
+}
+
 // TestRunIDIsUniqueAndSortable pins the two properties run ids exist to
 // provide: uniqueness under rapid creation (random suffix) and lexical
 // sortability (timestamp prefix). Without these, latest.json and an `ls`

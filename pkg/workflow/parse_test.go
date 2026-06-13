@@ -417,3 +417,414 @@ func TestParseFileNotFound(t *testing.T) {
 		t.Fatalf("errors.Is(_, os.ErrNotExist) = false; err = %v", err)
 	}
 }
+
+// TestParseParamsHappy pins that a declared params: block populates
+// wf.Params in declaration order and that HasDefault is true exactly when
+// the YAML included a default: key.
+func TestParseParamsHappy(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    description: target env
+    required: true
+  - name: replicas
+    default: "1"
+  - name: tag
+    default: latest
+tasks:
+  - id: a
+    prompt: |
+      go {{params.env}} {{params.replicas}} {{params.tag}}
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if len(wf.Params) != 3 {
+		t.Fatalf("len(Params) = %d, want 3", len(wf.Params))
+	}
+	got := []workflow.Param{
+		wf.Params[0], wf.Params[1], wf.Params[2],
+	}
+	want := []workflow.Param{
+		{Name: "env", Description: "target env", Required: true},
+		{Name: "replicas", Default: "1", HasDefault: true},
+		{Name: "tag", Default: "latest", HasDefault: true},
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("Params[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if p := wf.Param("env"); p == nil || !p.Required {
+		t.Errorf("Param(env) = %+v, want a required param", p)
+	}
+	if p := wf.Param("nope"); p != nil {
+		t.Errorf("Param(nope) = %+v, want nil", p)
+	}
+}
+
+func TestParseParamMissingName(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - description: no name
+    default: x
+tasks:
+  - id: a
+    prompt: hi
+`
+	_, err := workflow.Parse([]byte(src))
+	if !errors.Is(err, workflow.ErrMissingParamName) {
+		t.Fatalf("errors.Is(_, ErrMissingParamName) = false; err = %v", err)
+	}
+}
+
+func TestParseParamInvalidName(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: bad-name
+    default: x
+tasks:
+  - id: a
+    prompt: hi
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.InvalidParamNameError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As InvalidParamNameError failed; err = %v", err)
+	}
+	if got.Value != "bad-name" {
+		t.Errorf("InvalidParamNameError.Value = %q, want bad-name", got.Value)
+	}
+}
+
+func TestParseParamDuplicateName(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: a
+  - name: env
+    default: b
+tasks:
+  - id: a
+    prompt: |
+      {{params.env}}
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.DuplicateParamNameError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As DuplicateParamNameError failed; err = %v", err)
+	}
+	if got.Name != "env" {
+		t.Errorf("DuplicateParamNameError.Name = %q, want env", got.Name)
+	}
+}
+
+func TestParseParamRequiredAndDefaultConflict(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    required: true
+    default: prod
+tasks:
+  - id: a
+    prompt: |
+      {{params.env}}
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.ConflictingParamSpecError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As ConflictingParamSpecError failed; err = %v", err)
+	}
+	if got.Name != "env" {
+		t.Errorf("ConflictingParamSpecError.Name = %q, want env", got.Name)
+	}
+}
+
+func TestParseParamDefaultNonScalar(t *testing.T) {
+	cases := map[string]string{
+		"sequence default": `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: [a, b]
+tasks:
+  - id: a
+    prompt: |
+      {{params.env}}
+`,
+		"mapping default": `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: {a: b}
+tasks:
+  - id: a
+    prompt: |
+      {{params.env}}
+`,
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := workflow.Parse([]byte(src))
+			var got *workflow.InvalidParamDefaultError
+			if !errors.As(err, &got) {
+				t.Fatalf("errors.As InvalidParamDefaultError failed; err = %v", err)
+			}
+			if got.Name != "env" {
+				t.Errorf("InvalidParamDefaultError.Name = %q, want env", got.Name)
+			}
+		})
+	}
+}
+
+func TestParseParamDefaultNull(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: ~
+tasks:
+  - id: a
+    prompt: |
+      {{params.env}}
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.InvalidParamDefaultError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As InvalidParamDefaultError failed; err = %v", err)
+	}
+}
+
+// TestParseParamDefaultIntegerStringified pins that the raw YAML scalar text
+// is preserved verbatim — `default: 1` keeps "1", not coerced to an int.
+func TestParseParamDefaultIntegerStringified(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: n
+    default: 1
+tasks:
+  - id: a
+    prompt: |
+      {{params.n}}
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if wf.Params[0].Default != "1" {
+		t.Errorf("Params[0].Default = %q, want \"1\"", wf.Params[0].Default)
+	}
+}
+
+func TestParseUnknownParamPlaceholder(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: region
+    default: us
+tasks:
+  - id: a
+    prompt: |
+      {{params.regoin}} {{params.region}}
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.UnknownParamError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As UnknownParamError failed; err = %v", err)
+	}
+	if got.Task != "a" || got.Name != "regoin" {
+		t.Errorf("UnknownParamError = %+v, want task=a name=regoin", got)
+	}
+}
+
+func TestParseMalformedParamPlaceholder(t *testing.T) {
+	t.Run("multi segment", func(t *testing.T) {
+		src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: |
+      use {{params.env.region}} and {{params.env}}
+`
+		_, err := workflow.Parse([]byte(src))
+		var got *workflow.MalformedParamPlaceholderError
+		if !errors.As(err, &got) {
+			t.Fatalf("errors.As MalformedParamPlaceholderError failed; err = %v", err)
+		}
+		if got.Task != "a" {
+			t.Errorf("MalformedParamPlaceholderError.Task = %q, want a", got.Task)
+		}
+	})
+
+	t.Run("internal whitespace", func(t *testing.T) {
+		src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: |
+      use {{ params.env }} and {{params.env}}
+`
+		_, err := workflow.Parse([]byte(src))
+		var got *workflow.MalformedParamPlaceholderError
+		if !errors.As(err, &got) {
+			t.Fatalf("errors.As MalformedParamPlaceholderError failed; err = %v", err)
+		}
+	})
+
+	t.Run("bare placeholder collides with param hint", func(t *testing.T) {
+		src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: |
+      use {{env}} and {{params.env}}
+`
+		_, err := workflow.Parse([]byte(src))
+		var got *workflow.UnknownPlaceholderError
+		if !errors.As(err, &got) {
+			t.Fatalf("errors.As UnknownPlaceholderError failed; err = %v", err)
+		}
+		if got.Name != "env" {
+			t.Errorf("UnknownPlaceholderError.Name = %q, want env", got.Name)
+		}
+		if got.Hint == "" {
+			t.Errorf("UnknownPlaceholderError.Hint is empty; want a `did you mean {{params.env}}?` clause")
+		}
+	})
+}
+
+func TestParseUnusedParam(t *testing.T) {
+	t.Run("declared but not referenced", func(t *testing.T) {
+		src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: tag
+    default: latest
+tasks:
+  - id: a
+    prompt: hi
+`
+		_, err := workflow.Parse([]byte(src))
+		var got *workflow.UnusedParamError
+		if !errors.As(err, &got) {
+			t.Fatalf("errors.As UnusedParamError failed; err = %v", err)
+		}
+		if got.Name != "tag" {
+			t.Errorf("UnusedParamError.Name = %q, want tag", got.Name)
+		}
+	})
+
+	t.Run("referenced only in system_prompt", func(t *testing.T) {
+		src := `
+name: wf
+runtime: test-rt
+model: m1
+system_prompt: ctx={{params.env}}
+params:
+  - name: env
+    default: dev
+tasks:
+  - id: a
+    prompt: hi
+`
+		if _, err := workflow.Parse([]byte(src)); err != nil {
+			t.Fatalf("Parse returned error: %v", err)
+		}
+	})
+}
+
+func TestParseSystemPromptTaskPlaceholder(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+system_prompt: see {{a}}
+tasks:
+  - id: a
+    prompt: hi
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.SystemPlaceholderTaskRefError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As SystemPlaceholderTaskRefError failed; err = %v", err)
+	}
+	if got.Name != "a" {
+		t.Errorf("SystemPlaceholderTaskRefError.Name = %q, want a", got.Name)
+	}
+}
+
+// TestParseParamNameEqualsTaskID pins that a param and a task may share a
+// name without conflict — they live in separate namespaces, distinguished
+// by the `params.` prefix on the placeholder.
+func TestParseParamNameEqualsTaskID(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: plan
+    default: scaled
+tasks:
+  - id: plan
+    prompt: |
+      planning {{params.plan}}
+  - id: apply
+    depends_on: [plan]
+    prompt: |
+      apply {{plan}} with mode {{params.plan}}
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if wf.Param("plan") == nil {
+		t.Errorf("Param(plan) is nil")
+	}
+	if wf.ByID("plan") == nil {
+		t.Errorf("ByID(plan) is nil")
+	}
+}

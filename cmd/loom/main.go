@@ -2,9 +2,9 @@
 //
 // Usage:
 //
-//	loom run <workflow.yaml>      validate, print execution order, and run
-//	loom check <workflow.yaml>    validate and print execution order only
-//	loom --help                   show usage
+//	loom run <workflow.yaml> [-p key=val ...]    validate, print execution order, and run
+//	loom check <workflow.yaml> [-p key=val ...]  validate and print execution order only
+//	loom --help                                  show usage
 //
 // The plan, per-task progress, and the final summary are written to stdout.
 // Exit code 0 on success, 1 on any validation or execution error.
@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -50,33 +51,42 @@ func newRootCmd() *cobra.Command {
 }
 
 func newRunCmd() *cobra.Command {
-	return &cobra.Command{
+	var paramArgs []string
+	cmd := &cobra.Command{
 		Use:   "run <workflow.yaml>",
 		Short: "Validate and run a workflow",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doRun(cmd.OutOrStdout(), args[0])
+			return doRun(cmd.OutOrStdout(), args[0], paramArgs)
 		},
 	}
+	addParamFlags(cmd, &paramArgs)
+	return cmd
 }
 
 func newCheckCmd() *cobra.Command {
-	return &cobra.Command{
+	var paramArgs []string
+	cmd := &cobra.Command{
 		Use:   "check <workflow.yaml>",
 		Short: "Validate a workflow and print execution order",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			wf, err := workflow.ParseFile(args[0])
-			if err != nil {
-				return err
-			}
-			printPlan(cmd.OutOrStdout(), wf)
-			return nil
+			return doCheck(cmd.OutOrStdout(), args[0], paramArgs)
 		},
 	}
+	addParamFlags(cmd, &paramArgs)
+	return cmd
 }
 
-func doRun(w io.Writer, path string) error {
+// addParamFlags registers the repeatable `-p` / `--param` flag for passing
+// workflow params on the command line. StringArrayVarP is used (not
+// StringSliceVarP) so commas inside values are preserved verbatim.
+func addParamFlags(cmd *cobra.Command, params *[]string) {
+	cmd.Flags().StringArrayVarP(params, "param", "p", nil,
+		"set a workflow parameter (repeatable), e.g. -p env=prod")
+}
+
+func doRun(w io.Writer, path string, paramArgs []string) error {
 	manifest, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -85,7 +95,15 @@ func doRun(w io.Writer, path string) error {
 	if err != nil {
 		return err
 	}
-	printPlan(w, wf)
+	cliParams, err := workflow.ParseParamArgs(paramArgs)
+	if err != nil {
+		return err
+	}
+	resolved, err := workflow.ResolveParams(wf, cliParams, nil)
+	if err != nil {
+		return err
+	}
+	printPlan(w, wf, resolved, cliParams)
 	fmt.Fprintln(w)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -93,6 +111,7 @@ func doRun(w io.Writer, path string) error {
 
 	run, err := store.Open(wf.ID, manifest, store.Config{
 		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
+		Params:  stringifyParams(resolved),
 	})
 	if err != nil {
 		return err
@@ -102,7 +121,7 @@ func doRun(w io.Writer, path string) error {
 	rep, err := executor.Run(ctx, wf, executor.JoinHooks(
 		hooks(w, len(wf.Tasks)),
 		storeHooks(run),
-	))
+	), executor.Options{Params: resolved})
 	if closeErr := run.Close(summaryFor(rep), err); closeErr != nil {
 		fmt.Fprintf(w, "  store: %v\n", closeErr)
 	}
@@ -110,6 +129,66 @@ func doRun(w io.Writer, path string) error {
 		printSummary(w, wf, rep)
 	}
 	return err
+}
+
+// doCheck mirrors doRun's parse + ResolveParams pipeline, then exits without
+// invoking the executor. A MissingRequiredParamError is treated as advisory
+// (warning + exit 0) so `loom check` doubles as a "what params does this
+// workflow need?" probe; CLI-hygiene errors (unknown keys, malformed args,
+// duplicates) remain hard failures.
+func doCheck(w io.Writer, path string, paramArgs []string) error {
+	wf, err := workflow.ParseFile(path)
+	if err != nil {
+		return err
+	}
+	cliParams, err := workflow.ParseParamArgs(paramArgs)
+	if err != nil {
+		return err
+	}
+	resolved, err := workflow.ResolveParams(wf, cliParams, nil)
+	if err != nil {
+		var miss *workflow.MissingRequiredParamError
+		if errors.As(err, &miss) {
+			fmt.Fprintf(w, "warning: required param %q not supplied\n", miss.Name)
+			// Rebuild a partial bag so MISSING entries still surface in the
+			// printed plan rather than the section truncating silently.
+			resolved = partialResolved(wf, cliParams)
+		} else {
+			return err
+		}
+	}
+	printPlan(w, wf, resolved, cliParams)
+	return nil
+}
+
+// partialResolved rebuilds the resolved bag without the missing-required
+// check, so `loom check` can still print a meaningful plan when a required
+// param is absent. Keeps the merge order identical to ResolveParams.
+func partialResolved(wf *workflow.Workflow, cli map[string]string) workflow.ParamValues {
+	out := make(workflow.ParamValues, len(wf.Params))
+	for _, p := range wf.Params {
+		if p.HasDefault {
+			out[p.Name] = p.Default
+		}
+	}
+	for k, v := range cli {
+		out[workflow.ParamName(k)] = v
+	}
+	return out
+}
+
+// stringifyParams converts a ParamValues bag into the plain string map the
+// store package persists. nil in → nil out so an empty params block stays
+// absent from the JSON via `omitempty`.
+func stringifyParams(p workflow.ParamValues) map[string]string {
+	if len(p) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(p))
+	for k, v := range p {
+		out[string(k)] = v
+	}
+	return out
 }
 
 // storeHooks adapts a store.Run into executor.Hooks: OnStart passes through
@@ -141,10 +220,12 @@ func summaryFor(rep *executor.Report) *store.Summary {
 	return &store.Summary{Usage: rep.Usage, TaskCount: len(rep.Tasks)}
 }
 
-// printPlan writes the workflow header and the task execution order to w. It
-// uses workflow.Effective so the printed runtime/model/effort match what the
-// runtime will actually see.
-func printPlan(w io.Writer, wf *workflow.Workflow) {
+// printPlan writes the workflow header, the params block (when present), and
+// the task execution order to w. It uses workflow.Effective so the printed
+// runtime/model/effort match what the runtime will actually see. The cli arg
+// drives the per-param provenance tag (cli vs default vs MISSING); the
+// resolved bag drives the printed value.
+func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string) {
 	fmt.Fprintf(w, "Workflow : %s\n", wf.ID)
 	if wf.Description != "" {
 		fmt.Fprintf(w, "Desc     : %s\n", wf.Description)
@@ -154,6 +235,25 @@ func printPlan(w io.Writer, wf *workflow.Workflow) {
 	fmt.Fprintf(w, "Effort   : %s\n", orDash(string(wf.Effort)))
 	if wf.SystemPrompt != "" {
 		fmt.Fprintf(w, "System   : %s\n", wf.SystemPrompt)
+	}
+
+	if len(wf.Params) > 0 {
+		nameWidth := 0
+		for _, p := range wf.Params {
+			if n := len(p.Name); n > nameWidth {
+				nameWidth = n
+			}
+		}
+		fmt.Fprintf(w, "\nParams (%d):\n", len(wf.Params))
+		for _, p := range wf.Params {
+			value, ok := resolved[p.Name]
+			source := paramSource(p, cli, ok)
+			if !ok {
+				fmt.Fprintf(w, "  %-*s = %-12s (%s)\n", nameWidth, p.Name, "<missing>", source)
+				continue
+			}
+			fmt.Fprintf(w, "  %-*s = %-12s (%s)\n", nameWidth, p.Name, quoteIfNeeded(value), source)
+		}
 	}
 
 	order := wf.Plan()
@@ -172,6 +272,30 @@ func printPlan(w io.Writer, wf *workflow.Workflow) {
 		fmt.Fprintf(w, "  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
 			i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
 	}
+}
+
+// paramSource picks the provenance tag for a declared param given the CLI map
+// and whether the resolved bag carried a value. `cli` wins over `default`;
+// absence is reported as `MISSING`. (No --params-file yet — v2 follow-up.)
+func paramSource(p workflow.Param, cli map[string]string, resolvedHasValue bool) string {
+	if _, ok := cli[string(p.Name)]; ok {
+		return "cli"
+	}
+	if resolvedHasValue {
+		return "default"
+	}
+	return "MISSING"
+}
+
+// quoteIfNeeded surrounds a value with quotes only when it would otherwise
+// be ambiguous in the printed plan (empty string, or leading/trailing
+// whitespace). Keeps the common case readable while preserving fidelity for
+// the corner cases.
+func quoteIfNeeded(s string) string {
+	if s == "" || strings.TrimSpace(s) != s {
+		return fmt.Sprintf("%q", s)
+	}
+	return s
 }
 
 // hooks returns executor.Hooks that write per-task progress lines to w.

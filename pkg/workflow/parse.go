@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -23,14 +24,20 @@ import (
 //
 //  1. Workflow name and every task id satisfy [A-Za-z0-9_]+.
 //  2. Task ids are unique.
-//  3. Every task has a non-empty prompt.
-//  4. Every depends_on entry names a known task and appears at most once.
-//  5. Every {{id}} placeholder in a prompt is a member of that task's
+//  3. Param block: names are valid, unique, required-vs-default is exclusive,
+//     defaults are scalar strings.
+//  4. Every task has a non-empty prompt.
+//  5. Every depends_on entry names a known task and appears at most once.
+//  6. Every {{id}} placeholder in a prompt is a member of that task's
 //     depends_on. Placeholders are pure templating — they never extend the
 //     dependency graph implicitly.
-//  6. The task graph has no cycles.
-//  7. The effective runtime/model/effort per task (task override falling back
-//     to workflow defaults) is accepted by the registered runtime spec.
+//  7. Every {{params.x}} placeholder references a declared param.
+//  8. The task graph has no cycles.
+//  9. Every prompt and the system_prompt are free of malformed `{{params.…}}`
+//     tokens; system_prompt is free of task-id placeholders.
+//  10. Every declared param is referenced by at least one prompt or system_prompt.
+//  11. The effective runtime/model/effort per task is accepted by the registered
+//     runtime spec.
 func Parse(data []byte) (*Workflow, error) {
 	var raw rawWorkflow
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -47,6 +54,11 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("workflow %q: %w", id, ErrNoTasks)
 	}
 
+	params, paramIdx, err := parseParams(raw.Params)
+	if err != nil {
+		return nil, err
+	}
+
 	wf := &Workflow{
 		ID:           id,
 		Description:  raw.Description,
@@ -54,8 +66,17 @@ func Parse(data []byte) (*Workflow, error) {
 		Model:        runtime.Model(raw.Model),
 		Effort:       runtime.Effort(raw.Effort),
 		SystemPrompt: raw.SystemPrompt,
+		Params:       params,
 		Tasks:        make([]Task, 0, len(raw.Tasks)),
 		byID:         make(map[TaskID]int, len(raw.Tasks)),
+		paramByName:  paramIdx,
+	}
+
+	// Set membership reused by buildDeps' param scan; the index map's value type
+	// is irrelevant for membership, so wrap it once here.
+	paramSet := make(map[ParamName]struct{}, len(paramIdx))
+	for n := range paramIdx {
+		paramSet[n] = struct{}{}
 	}
 
 	ids := make(map[TaskID]struct{}, len(raw.Tasks))
@@ -75,8 +96,11 @@ func Parse(data []byte) (*Workflow, error) {
 		if rt.Prompt == "" {
 			return nil, fmt.Errorf("task %q: %w", tid, ErrMissingPrompt)
 		}
-		deps, err := buildDeps(tid, rt.DependsOn, rt.Prompt, ids)
+		deps, err := buildDeps(tid, rt.DependsOn, rt.Prompt, ids, paramSet)
 		if err != nil {
+			return nil, err
+		}
+		if err := checkMalformedParamPlaceholders(tid, rt.Prompt); err != nil {
 			return nil, err
 		}
 		wf.byID[tid] = len(wf.Tasks)
@@ -91,8 +115,16 @@ func Parse(data []byte) (*Workflow, error) {
 		})
 	}
 
+	if err := validateSystemPrompt(wf.SystemPrompt, paramSet); err != nil {
+		return nil, err
+	}
+
 	if cycle, ok := findCycle(wf); ok {
 		return nil, &CycleError{Cycle: cycle}
+	}
+
+	if err := checkUnusedParams(wf); err != nil {
+		return nil, err
 	}
 
 	for i := range wf.Tasks {
@@ -128,6 +160,11 @@ func ParseFile(path string) (*Workflow, error) {
 
 // rawWorkflow mirrors the YAML schema as decoded by yaml.v3. It exists only so
 // the parser can apply its own validation; callers see the validated Workflow.
+//
+// Params is captured as a raw yaml.Node so parseParams can inspect each entry's
+// `default:` scalar without yaml.v3 coercing `1` to !!int or `~` to !!null
+// before validation runs. (Plain decoding into a typed struct would lose the
+// distinction between `default: ""` and an absent key.)
 type rawWorkflow struct {
 	Name         string    `yaml:"name"`
 	Description  string    `yaml:"description"`
@@ -135,6 +172,7 @@ type rawWorkflow struct {
 	Model        string    `yaml:"model"`
 	Effort       string    `yaml:"effort"`
 	SystemPrompt string    `yaml:"system_prompt"`
+	Params       yaml.Node `yaml:"params"`
 	Tasks        []rawTask `yaml:"tasks"`
 }
 
@@ -148,11 +186,22 @@ type rawTask struct {
 	DependsOn   []string `yaml:"depends_on"`
 }
 
+// rawParam mirrors the typed (non-default) fields of a single `params:`
+// entry. `default:` is captured separately as a yaml.Node so the raw scalar
+// text (e.g. `1` from `default: 1`) survives without yaml.v3 coercing it to
+// !!int — see decodeRawParam.
+type rawParam struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Required    bool   `yaml:"required"`
+}
+
 // Sentinel parse errors. Typed errors below cover structured failures with
 // fields the caller may want to inspect.
 var (
-	ErrNoTasks       = errors.New("workflow has no tasks")
-	ErrMissingPrompt = errors.New("task has no prompt")
+	ErrNoTasks          = errors.New("workflow has no tasks")
+	ErrMissingPrompt    = errors.New("task has no prompt")
+	ErrMissingParamName = errors.New("param has no name")
 )
 
 // DuplicateTaskIDError reports two tasks declaring the same id.
@@ -177,13 +226,22 @@ func (e *UnknownDependencyError) Error() string {
 // does not appear in the task's depends_on. Placeholders are not allowed to
 // implicitly extend the dependency graph: every templated id must be declared
 // up front so the DAG is unambiguous.
+//
+// Hint, when non-empty, carries a clarifying suggestion appended to the error
+// message — currently "did you mean {{params.<name>}}?" when the offending
+// bare {{x}} matches a declared param.
 type UnknownPlaceholderError struct {
 	Task TaskID
 	Name string
+	Hint string
 }
 
 func (e *UnknownPlaceholderError) Error() string {
-	return fmt.Sprintf("task %q: placeholder {{%s}} not declared in depends_on", e.Task, e.Name)
+	msg := fmt.Sprintf("task %q: placeholder {{%s}} not declared in depends_on", e.Task, e.Name)
+	if e.Hint != "" {
+		msg += "; " + e.Hint
+	}
+	return msg
 }
 
 // DuplicateDependencyError reports a task whose depends_on list names the
@@ -209,8 +267,171 @@ func (e *CycleError) Error() string {
 	return "dependency cycle: " + strings.Join(ids, " -> ")
 }
 
+// DuplicateParamNameError reports two params declaring the same name.
+type DuplicateParamNameError struct{ Name ParamName }
+
+func (e *DuplicateParamNameError) Error() string {
+	return fmt.Sprintf("duplicate param name %q", e.Name)
+}
+
+// ConflictingParamSpecError reports a param that sets both `required: true`
+// and a `default:` — a default would never apply, so the spec is contradictory.
+type ConflictingParamSpecError struct{ Name ParamName }
+
+func (e *ConflictingParamSpecError) Error() string {
+	return fmt.Sprintf("param %q: required and default are mutually exclusive", e.Name)
+}
+
+// InvalidParamDefaultError reports a param `default:` that fails the
+// scalar-string rule (non-scalar YAML node, explicit null, etc.).
+type InvalidParamDefaultError struct {
+	Name   ParamName
+	Reason string
+}
+
+func (e *InvalidParamDefaultError) Error() string {
+	return fmt.Sprintf("param %q: invalid default: %s", e.Name, e.Reason)
+}
+
+// UnknownParamError reports a `{{params.X}}` placeholder whose name is not
+// declared in the workflow's `params:` block.
+type UnknownParamError struct {
+	Task TaskID
+	Name string
+}
+
+func (e *UnknownParamError) Error() string {
+	return fmt.Sprintf("task %q: placeholder {{params.%s}} references undeclared param", e.Task, e.Name)
+}
+
+// MalformedParamPlaceholderError reports a `{{params.…}}` token that does not
+// match the strict `{{params.name}}` shape — typically `{{params.x.y}}` or
+// `{{ params.x }}` with stray whitespace.
+type MalformedParamPlaceholderError struct {
+	Task  TaskID
+	Token string
+}
+
+func (e *MalformedParamPlaceholderError) Error() string {
+	return fmt.Sprintf("task %q: malformed param placeholder %q", e.Task, e.Token)
+}
+
+// SystemPlaceholderTaskRefError reports a `{{taskid}}` placeholder in the
+// workflow-level system_prompt. No task can be a dependency of system_prompt,
+// so a task reference there is always unresolvable.
+type SystemPlaceholderTaskRefError struct {
+	Name string
+}
+
+func (e *SystemPlaceholderTaskRefError) Error() string {
+	return fmt.Sprintf("system_prompt: placeholder {{%s}} references a task; system_prompt has no task dependencies", e.Name)
+}
+
+// UnusedParamError reports a declared param that no prompt or system_prompt
+// references.
+type UnusedParamError struct {
+	Name ParamName
+}
+
+func (e *UnusedParamError) Error() string {
+	return fmt.Sprintf("param %q is declared but never referenced", e.Name)
+}
+
+// parseParams validates the raw `params:` block and returns the resolved
+// Params slice in declaration order plus an index from name → slice position.
+//
+// node is the top-level `params:` yaml.Node — either zero (no `params:` key),
+// a sequence, or anything else (which is a structural error). Walking the
+// node by hand (rather than relying on `[]rawParam` decoding) preserves the
+// raw default scalar text and lets the parser reject non-scalar / null
+// defaults precisely.
+func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
+	if node.Kind == 0 {
+		return nil, nil, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, nil, fmt.Errorf("params: must be a sequence of param entries")
+	}
+	params := make([]Param, 0, len(node.Content))
+	idx := make(map[ParamName]int, len(node.Content))
+	for _, entry := range node.Content {
+		rp, defNode, err := decodeRawParam(entry)
+		if err != nil {
+			return nil, nil, err
+		}
+		if rp.Name == "" {
+			return nil, nil, ErrMissingParamName
+		}
+		name, err := NewParamName(rp.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, dup := idx[name]; dup {
+			return nil, nil, &DuplicateParamNameError{Name: name}
+		}
+		p := Param{
+			Name:        name,
+			Description: rp.Description,
+			Required:    rp.Required,
+		}
+		if defNode != nil {
+			if rp.Required {
+				return nil, nil, &ConflictingParamSpecError{Name: name}
+			}
+			if defNode.Kind != yaml.ScalarNode {
+				return nil, nil, &InvalidParamDefaultError{Name: name, Reason: "must be a scalar string"}
+			}
+			if defNode.Tag == "!!null" {
+				return nil, nil, &InvalidParamDefaultError{Name: name, Reason: "null default is not allowed"}
+			}
+			p.Default = defNode.Value
+			p.HasDefault = true
+		}
+		idx[name] = len(params)
+		params = append(params, p)
+	}
+	return params, idx, nil
+}
+
+// decodeRawParam destructures a single `params:` mapping entry. Returned
+// values: the typed fields (name/description/required) for plain access, the
+// `default:` value node (nil when absent), or an error for an unknown key or
+// shape mismatch.
+func decodeRawParam(entry *yaml.Node) (rawParam, *yaml.Node, error) {
+	var rp rawParam
+	if entry.Kind != yaml.MappingNode {
+		return rp, nil, fmt.Errorf("params: entry must be a mapping")
+	}
+	var defNode *yaml.Node
+	for i := 0; i+1 < len(entry.Content); i += 2 {
+		k, v := entry.Content[i], entry.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			return rp, nil, fmt.Errorf("params: entry key must be a scalar")
+		}
+		switch k.Value {
+		case "name":
+			if err := v.Decode(&rp.Name); err != nil {
+				return rp, nil, fmt.Errorf("params.name: %w", err)
+			}
+		case "description":
+			if err := v.Decode(&rp.Description); err != nil {
+				return rp, nil, fmt.Errorf("params.description: %w", err)
+			}
+		case "required":
+			if err := v.Decode(&rp.Required); err != nil {
+				return rp, nil, fmt.Errorf("params.required: %w", err)
+			}
+		case "default":
+			defNode = v
+		default:
+			return rp, nil, fmt.Errorf("params: unknown field %q", k.Value)
+		}
+	}
+	return rp, defNode, nil
+}
+
 // buildDeps validates a task's depends_on list and checks that every
-// `{{x}}` placeholder in its prompt references an entry in that list.
+// `{{x}}` and `{{params.x}}` placeholder in its prompt is well-defined.
 //
 // depends_on is the single source of truth for the dependency graph; the
 // parser never extends it implicitly from prompt text. Repeating a
@@ -219,7 +440,11 @@ func (e *CycleError) Error() string {
 //
 // Self-edges are kept so findCycle reports them uniformly as a cycle of
 // length 1; suppressing them here would hide the user error.
-func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]struct{}) ([]TaskID, error) {
+//
+// When a bare `{{x}}` placeholder is unknown to depends_on but happens to
+// match a declared param, the returned UnknownPlaceholderError carries a
+// hint suggesting `{{params.x}}` so users notice the missing prefix.
+func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]struct{}, params map[ParamName]struct{}) ([]TaskID, error) {
 	deps := make([]TaskID, 0, len(declared))
 	declaredSet := make(map[TaskID]struct{}, len(declared))
 
@@ -239,11 +464,94 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 	}
 
 	for _, m := range placeholderRe.FindAllStringSubmatch(prompt, -1) {
-		if _, ok := declaredSet[TaskID(m[1])]; !ok {
-			return nil, &UnknownPlaceholderError{Task: tid, Name: m[1]}
+		name := m[1]
+		if _, ok := declaredSet[TaskID(name)]; ok {
+			continue
+		}
+		err := &UnknownPlaceholderError{Task: tid, Name: name}
+		if _, isParam := params[ParamName(name)]; isParam {
+			err.Hint = fmt.Sprintf("did you mean {{params.%s}}?", name)
+		}
+		return nil, err
+	}
+
+	for _, m := range paramPlaceholderRe.FindAllStringSubmatch(prompt, -1) {
+		if _, ok := params[ParamName(m[1])]; !ok {
+			return nil, &UnknownParamError{Task: tid, Name: m[1]}
 		}
 	}
 	return deps, nil
+}
+
+// brokenBraceRe matches any `{{...}}` token whose body contains no closing
+// braces. Used together with combinedPlaceholderRe to spot tokens that look
+// like placeholders but fail the strict `{{name}}` / `{{params.name}}` shape.
+var brokenBraceRe = regexp.MustCompile(`\{\{[^}]*\}\}`)
+
+// checkMalformedParamPlaceholders scans prompt for any `{{params.…}}`-shaped
+// token that combinedPlaceholderRe rejects — typically `{{params.x.y}}` or
+// `{{ params.x }}` — and reports it. Other malformed `{{…}}` tokens (bare,
+// non-param shapes) fall through to buildDeps' UnknownPlaceholderError path.
+func checkMalformedParamPlaceholders(tid TaskID, prompt string) error {
+	for _, tok := range brokenBraceRe.FindAllString(prompt, -1) {
+		if combinedPlaceholderRe.MatchString(tok) {
+			continue
+		}
+		// Strip surrounding whitespace so `{{ params.x }}` is recognized as a
+		// would-be param placeholder. `{{params}}` alone is left to fall through
+		// to buildDeps' UnknownPlaceholderError path.
+		inner := strings.TrimSpace(tok[2 : len(tok)-2])
+		if strings.HasPrefix(inner, "params.") {
+			return &MalformedParamPlaceholderError{Task: tid, Token: tok}
+		}
+	}
+	return nil
+}
+
+// validateSystemPrompt rejects task-id placeholders in the workflow-level
+// system_prompt (no task can be its dependency) and rejects unknown / malformed
+// param placeholders there too.
+func validateSystemPrompt(sp string, params map[ParamName]struct{}) error {
+	if sp == "" {
+		return nil
+	}
+	// Task-id placeholders are never resolvable in system_prompt.
+	for _, m := range placeholderRe.FindAllStringSubmatch(sp, -1) {
+		return &SystemPlaceholderTaskRefError{Name: m[1]}
+	}
+	for _, m := range paramPlaceholderRe.FindAllStringSubmatch(sp, -1) {
+		if _, ok := params[ParamName(m[1])]; !ok {
+			return &UnknownParamError{Task: "", Name: m[1]}
+		}
+	}
+	if err := checkMalformedParamPlaceholders("", sp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkUnusedParams enforces that every declared param is referenced by at
+// least one prompt or by the system_prompt.
+func checkUnusedParams(wf *Workflow) error {
+	if len(wf.Params) == 0 {
+		return nil
+	}
+	used := make(map[ParamName]struct{}, len(wf.Params))
+	scan := func(s string) {
+		for _, m := range paramPlaceholderRe.FindAllStringSubmatch(s, -1) {
+			used[ParamName(m[1])] = struct{}{}
+		}
+	}
+	scan(wf.SystemPrompt)
+	for i := range wf.Tasks {
+		scan(wf.Tasks[i].Prompt)
+	}
+	for _, p := range wf.Params {
+		if _, ok := used[p.Name]; !ok {
+			return &UnusedParamError{Name: p.Name}
+		}
+	}
+	return nil
 }
 
 // findCycle runs a DFS over the dependency graph and returns the first cycle

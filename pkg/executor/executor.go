@@ -1,10 +1,11 @@
 // Package executor orchestrates a parsed [workflow.Workflow] against the
 // runtimes registered in the [runtime] package. It computes the deterministic
 // execution order via [workflow.Workflow.Plan], substitutes each task's
-// `{{id}}` placeholders with the outputs of upstream tasks, and dispatches
-// independent tasks concurrently against their registered runtimes. Hooks
-// let callers observe per-task progress without coupling the orchestrator to
-// a particular output sink.
+// `{{id}}` and `{{params.name}}` placeholders with upstream task outputs and
+// resolved parameter values respectively, and dispatches independent tasks
+// concurrently against their registered runtimes. Hooks let callers observe
+// per-task progress without coupling the orchestrator to a particular output
+// sink.
 package executor
 
 import (
@@ -21,9 +22,10 @@ import (
 
 // TaskResult is the outcome of one task execution.
 //
-// Prompt is the final text sent to the runtime, with `{{id}}` placeholders
-// already substituted; persisting it lets callers reconstruct exactly what
-// the model saw without re-running substitution.
+// Prompt is the final text sent to the runtime, with `{{id}}` and
+// `{{params.name}}` placeholders already substituted; persisting it lets
+// callers reconstruct exactly what the model saw without re-running
+// substitution.
 type TaskResult struct {
 	TaskID  workflow.TaskID
 	Prompt  string
@@ -37,12 +39,15 @@ type TaskResult struct {
 // Tasks lists per-task results in completion order — not Plan order — because
 // independent tasks run concurrently and finish at different times. Outputs is
 // the same data keyed by id for placeholder lookups. Usage sums Usage across
-// every completed task. On partial failure (Run returns non-nil error), the
-// report contains the tasks that completed before the failure.
+// every completed task. Params carries opts.Params verbatim so callers can
+// read what actually substituted without re-resolving. On partial failure (Run
+// returns non-nil error), the report contains the tasks that completed before
+// the failure.
 type Report struct {
 	Tasks   []TaskResult
 	Outputs map[workflow.TaskID]string
 	Usage   runtime.Usage
+	Params  workflow.ParamValues // carries opts.Params verbatim; nil when no params were used.
 }
 
 // Hooks let callers observe per-task progress without owning an output sink.
@@ -56,19 +61,27 @@ type Hooks struct {
 	OnFinish func(t workflow.Task, res TaskResult, err error)
 }
 
+// Options configures a Run call. The zero value is valid and runs the workflow
+// with no parameters.
+type Options struct {
+	Params workflow.ParamValues // resolved params; read-only after Run starts.
+}
+
 // Run executes wf's tasks concurrently, respecting the dependency graph.
 // Each task waits for its upstream dependencies to complete, substitutes
-// `{{id}}` placeholders in its prompt with their outputs, then dispatches a
-// single [runtime.Request] to its registered runtime.
+// `{{id}}` and `{{params.name}}` placeholders in its prompt with upstream
+// outputs and opts.Params respectively, then dispatches a single
+// [runtime.Request] to its registered runtime.
 //
 // On the first task error, sibling goroutines are cancelled via context and
 // Run returns the partial Report along with the wrapped error. Cancellation
 // of the caller's ctx propagates the same way.
-func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks) (*Report, error) {
+func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
 	order := wf.Plan()
 	rep := &Report{
 		Tasks:   make([]TaskResult, 0, len(order)),
 		Outputs: make(map[workflow.TaskID]string, len(order)),
+		Params:  opts.Params, // stash once before any g.Go; goroutines only read it
 	}
 
 	gates := make(map[workflow.TaskID]chan struct{}, len(order))
@@ -96,8 +109,9 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks) (*Report, erro
 				return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 			}
 
+			// mu guards rep.Outputs; opts.Params is read-only after Run starts, no lock needed.
 			mu.Lock()
-			prompt := workflow.Substitute(t.Prompt, rep.Outputs)
+			prompt := workflow.Substitute(t.Prompt, rep.Outputs, opts.Params)
 			mu.Unlock()
 
 			req := runtime.Request{
@@ -105,7 +119,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks) (*Report, erro
 				Prompt:       prompt,
 				Model:        model,
 				Effort:       effort,
-				SystemPrompt: wf.SystemPrompt,
+				SystemPrompt: workflow.Substitute(wf.SystemPrompt, nil, opts.Params),
 			}
 
 			if hooks.OnStart != nil {

@@ -12,10 +12,11 @@ import (
 // `name:` decodes into rawWorkflow.Name but lives on Workflow.ID).
 func TestRawMirrorsPublic(t *testing.T) {
 	cases := []struct {
-		name    string
-		raw     any
-		public  any
-		aliases map[string]string // raw field name -> public field name
+		name        string
+		raw         any
+		public      any
+		aliases     map[string]string   // raw field name -> public field name
+		extraPublic map[string]struct{} // public fields with no raw counterpart (derived)
 	}{
 		{
 			name:    "workflow",
@@ -28,16 +29,26 @@ func TestRawMirrorsPublic(t *testing.T) {
 			raw:    rawTask{},
 			public: Task{},
 		},
+		{
+			name:   "param",
+			raw:    rawParam{},
+			public: Param{},
+			// `default:` is decoded by hand from the raw yaml.Node so the
+			// scalar text survives without coercion (e.g. `default: 1` stays
+			// "1"); it has no rawParam field. Default and HasDefault both
+			// receive their values that way.
+			extraPublic: map[string]struct{}{"Default": {}, "HasDefault": {}},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assertFieldParity(t, reflect.TypeOf(tc.raw), reflect.TypeOf(tc.public), tc.aliases)
+			assertFieldParity(t, reflect.TypeOf(tc.raw), reflect.TypeOf(tc.public), tc.aliases, tc.extraPublic)
 		})
 	}
 }
 
-func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[string]string) {
+func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[string]string, extraPublic map[string]struct{}) {
 	t.Helper()
 
 	pubFields := map[string]struct{}{}
@@ -45,6 +56,9 @@ func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[strin
 		// Unexported fields are internal caches (e.g. parse-built indices), not
 		// part of the YAML-to-domain schema, and must not trigger drift alarms.
 		if !f.IsExported() {
+			continue
+		}
+		if _, ok := extraPublic[f.Name]; ok {
 			continue
 		}
 		pubFields[f.Name] = struct{}{}
@@ -69,10 +83,10 @@ func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[strin
 }
 
 // TestPlaceholderRegexMatchesIdentifierAlphabet pins the contract that every
-// string accepted as a TaskID by identifierRe is also captured by the
-// parser's placeholderRe when wrapped in `{{...}}`, and that strings rejected
-// by identifierRe are also rejected by placeholderRe. If someone widens or
-// narrows identifierClass without updating one regex, this test fails.
+// string accepted as a TaskID/ParamName by identifierRe is also captured by
+// every `{{...}}` form recognized by the parser, and that strings rejected by
+// identifierRe are also rejected by every placeholder regex. If someone widens
+// or narrows identifierClass without updating one regex, this test fails.
 func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 	accept := []string{"a", "A", "task1", "joke", "summary_v2", "_under", "123abc"}
 	reject := []string{"", "with-dash", "with.dot", "with space", "with$dollar", "with/slash"}
@@ -82,9 +96,19 @@ func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 			t.Errorf("identifierRe rejected %q; update the accept list if intended", s)
 			continue
 		}
-		matches := placeholderRe.FindStringSubmatch("{{" + s + "}}")
-		if len(matches) != 2 || matches[1] != s {
-			t.Errorf("placeholderRe did not capture %q from {{%s}}; got %v — regex drift", s, s, matches)
+		if m := placeholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 2 || m[1] != s {
+			t.Errorf("placeholderRe did not capture %q from {{%s}}; got %v — regex drift", s, s, m)
+		}
+		if m := paramPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 2 || m[1] != s {
+			t.Errorf("paramPlaceholderRe did not capture %q from {{params.%s}}; got %v — regex drift", s, s, m)
+		}
+		// combinedPlaceholderRe distinguishes branches via capture groups: group
+		// 1 is the param name, group 2 is the task id.
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 3 || m[1] != s || m[2] != "" {
+			t.Errorf("combinedPlaceholderRe param branch dropped %q from {{params.%s}}; got %v — regex drift", s, s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 3 || m[2] != s || m[1] != "" {
+			t.Errorf("combinedPlaceholderRe task branch dropped %q from {{%s}}; got %v — regex drift", s, s, m)
 		}
 	}
 	for _, s := range reject {
@@ -92,8 +116,17 @@ func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 			t.Errorf("identifierRe accepted %q; update the reject list if intended", s)
 			continue
 		}
-		if matches := placeholderRe.FindStringSubmatch("{{" + s + "}}"); matches != nil {
-			t.Errorf("placeholderRe matched {{%s}} for a non-identifier string; got %v — regex drift", s, matches)
+		if m := placeholderRe.FindStringSubmatch("{{" + s + "}}"); m != nil {
+			t.Errorf("placeholderRe matched {{%s}} for a non-identifier string; got %v — regex drift", s, m)
+		}
+		if m := paramPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); m != nil {
+			t.Errorf("paramPlaceholderRe matched {{params.%s}} for a non-identifier string; got %v — regex drift", s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); m != nil {
+			t.Errorf("combinedPlaceholderRe param branch matched {{params.%s}}; got %v — regex drift", s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); m != nil {
+			t.Errorf("combinedPlaceholderRe task branch matched {{%s}}; got %v — regex drift", s, m)
 		}
 	}
 }
