@@ -55,11 +55,20 @@ Resolution per task: task field → workflow default. A task with no runtime and
 
 `claude-code` runtime (only one registered, see `pkg/runtime/claudecode/claudecode.go`):
 
-- models: `haiku`, `sonnet`, `opus`
-- efforts: `low`, `medium`, `high`, `max` (optional; empty = runtime default)
-- binary: `claude` must be on PATH; invoked with `-p --output-format json --model X [--effort Y] [--system-prompt Z] --dangerously-skip-permissions <prompt>`
+Models — pick by task difficulty:
 
-Per-task overrides are the standard pattern: cheap+fast (haiku/low) for fan-out drafting, escalate (opus/high or max) for synthesis or critique steps. Since independent tasks run in parallel, a wide fan-out of haiku drafts costs ~one task's wall time, not N.
+- `haiku` — very simple, mechanical tasks: rename a file, format JSON, run a fixed shell command, summarize a short input.
+- `sonnet` — standard, not-so-challenging work: implement code from an already-architected plan, write tests against a defined contract, follow a clear spec.
+- `opus` — the most challenging work: architecture decisions, ambiguous requirements, design synthesis, hard debugging, adversarial review.
+
+Efforts — pick by how much thinking the task warrants:
+
+- `low` — one-shot, no real deliberation needed (the task is mostly typing).
+- `medium` — default; some reasoning, weighing a couple of options before acting.
+- `high` — extended thinking: multi-step reasoning, exploring alternatives, careful verification.
+- `max` — burn maximum compute: only for the hardest synthesis / critique / design steps where getting it right dwarfs cost.
+
+Resolve per task. The workflow-level `model` / `effort` covers the majority; override only on tasks that need to step up or down. Independent tasks run in parallel, so a wide fan-out of haiku/low drafts costs ~one task's wall time, not N.
 
 ## Authoring workflow
 
@@ -67,17 +76,6 @@ Per-task overrides are the standard pattern: cheap+fast (haiku/low) for fan-out 
 2. Pick workflow-level defaults to cover the majority of tasks; override only where escalation matters.
 3. Keep prompts tight — each `{{id}}` placeholder injects the *entire* upstream output verbatim.
 4. Run `loom check` until it's clean, then `loom run`.
-
-## Adding a new runtime
-
-If the user wants to register another runtime (e.g. `openai-api`, `ollama`):
-
-1. New package under `pkg/runtime/<name>/` exposing a type that satisfies `runtime.Runtime` (and optionally `SubprocessRuntime` or `APIRuntime`).
-2. `Validate(req runtime.Request) error` enforces accepted models / effort / system-prompt rules, wrapping `runtime.ErrMissingModel`, `ErrUnsupportedModel`, `ErrUnsupportedEffort`, `ErrUnsupportedSystemPrompt` as appropriate.
-3. `Run(ctx, req) (runtime.Response, error)` executes the request and returns text + `runtime.Usage`.
-4. `init()` calls `runtime.Register(Name, spec{})`.
-5. Add a side-effect import in `cmd/loom/main.go`.
-6. Tests in `pkg/runtime/<name>/<name>_test.go` mirroring `claudecode_test.go`.
 
 ## Output
 
