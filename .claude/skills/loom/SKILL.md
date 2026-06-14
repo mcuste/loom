@@ -4,7 +4,7 @@ description: Author and run loom workflows — YAML DAGs of LLM tasks executed b
 allowed-tools: Bash(loom *), Read, Write, Edit, Glob, Grep
 ---
 
-Author and execute loom workflows. Loom parses a YAML workflow, builds a DAG over `{{id}}` placeholders + `depends_on`, and dispatches each task to a registered runtime (currently only `claude-code`, which shells out to the `claude` CLI).
+Author and execute loom workflows. Loom parses a YAML workflow, builds a DAG over `{{id}}` placeholders + `depends_on`, and dispatches each task to a registered runtime (`claude-code`, which shells out to the `claude` CLI, or `codex`, which shells out to the `codex` CLI).
 
 ## CLI
 
@@ -24,7 +24,7 @@ Top level:
 ```yaml
 name: my_workflow            # required, [A-Za-z0-9_]+
 description: ...             # optional, plan-output only
-runtime: claude-code         # default for tasks; only claude-code is registered
+runtime: claude-code         # default for tasks; one of: claude-code | codex
 model: sonnet                # default; one of: haiku | sonnet | opus
 effort: medium               # default; one of: low | medium | high | max  (claude-code)
 system_prompt: ...           # optional, appended to every task
@@ -106,7 +106,7 @@ Resolution order (right-to-left wins): declared defaults → `-p` values. Unknow
 
 Resolution per task: task field → workflow default. A task with no runtime and a workflow with no default fails validation.
 
-`claude-code` runtime (only one registered, see `pkg/runtime/claudecode/claudecode.go`):
+`claude-code` runtime (see `pkg/runtime/claudecode/claudecode.go`):
 
 Models — pick by task difficulty:
 
@@ -122,6 +122,21 @@ Efforts — pick by how much thinking the task warrants:
 - `max` — burn maximum compute: only for the hardest synthesis / critique / design steps where getting it right dwarfs cost.
 
 Resolve per task. The workflow-level `model` / `effort` covers the majority; override only on tasks that need to step up or down. Independent tasks run in parallel, so a wide fan-out of haiku/low drafts costs ~one task's wall time, not N.
+
+`codex` runtime (see `pkg/runtime/codex/codex.go`):
+
+Requires `OPENAI_API_KEY` (or `CODEX_API_KEY`) in the environment, or run `codex login` before `loom run`.
+
+Models:
+
+- `gpt-5.5` — reasoning; accepts effort.
+- `gpt-5.4` — reasoning; accepts effort.
+- `gpt-5.4-mini` — reasoning; smaller / faster; accepts effort.
+- `gpt-5.3-codex-spark` — non-reasoning, text-only; effort is forwarded but may be ignored by the backend.
+
+Efforts: `minimal | low | medium | high | xhigh`. Empty effort means "leave runtime default" (same convention as `claude-code`).
+
+**`system_prompt` is not supported** by the `codex` runtime. Codex CLI has no headless system-prompt flag — use an `AGENTS.md` file in the working directory for persistent instructions instead. Setting `system_prompt` with `runtime: codex` is a hard validation error.
 
 ## Authoring workflow
 

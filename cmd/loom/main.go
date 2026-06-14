@@ -32,6 +32,7 @@ import (
 
 	// Side-effect imports register runtimes with the runtime package.
 	_ "github.com/mcuste/loom/pkg/runtime/claudecode"
+	_ "github.com/mcuste/loom/pkg/runtime/codex"
 )
 
 func main() {
