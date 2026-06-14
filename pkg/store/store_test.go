@@ -336,6 +336,85 @@ func TestEmptyParamsOmitted(t *testing.T) {
 	}
 }
 
+// TestShellTaskCommandRoundTrips pins that a TaskResult with Command set
+// persists the "command" field to disk, and that an LLM task with only Prompt
+// continues to round-trip correctly. Both tasks are exercised in the same run
+// so the test also confirms the two record shapes coexist without collision.
+func TestShellTaskCommandRoundTrips(t *testing.T) {
+	root := t.TempDir()
+	run, err := store.Open("wf", []byte("name: wf\n"), store.Config{Root: root})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Shell task: Command holds original body; Prompt holds substituted cmdline;
+	// no runtime/model/effort (executor passes empty strings for shell tasks).
+	shellTask := workflow.Task{ID: "shell-echo"}
+	run.OnStart()(shellTask, "", "", "")
+	run.OnFinish()(shellTask, store.TaskResult{
+		Prompt:  "echo hello world",
+		Command: "echo {{msg}}",
+		Output:  "hello world\n",
+		Elapsed: 50 * time.Millisecond,
+	}, nil)
+
+	// LLM task: only Prompt set; Command must stay absent in JSON.
+	llmTask := workflow.Task{ID: "llm-summarise"}
+	run.OnStart()(llmTask, "claude-code", "sonnet", "low")
+	run.OnFinish()(llmTask, store.TaskResult{
+		Prompt:  "summarise this",
+		Output:  "summary here",
+		Usage:   runtime.Usage{InputTokens: 5, OutputTokens: 3},
+		Elapsed: 120 * time.Millisecond,
+	}, nil)
+
+	tasks := readRun(t, run.Path())["tasks"].([]any)
+	if len(tasks) != 2 {
+		t.Fatalf("tasks len = %d, want 2", len(tasks))
+	}
+
+	byID := map[string]map[string]any{}
+	for _, raw := range tasks {
+		entry := raw.(map[string]any)
+		byID[entry["id"].(string)] = entry
+	}
+
+	// Shell task: command and prompt both present; runtime/model/effort absent.
+	shell := byID["shell-echo"]
+	if shell == nil {
+		t.Fatalf("shell-echo task missing from JSON")
+	}
+	if got := shell["command"]; got != "echo {{msg}}" {
+		t.Errorf("shell-echo command = %v, want %q", got, "echo {{msg}}")
+	}
+	if got := shell["prompt"]; got != "echo hello world" {
+		t.Errorf("shell-echo prompt = %v, want %q", got, "echo hello world")
+	}
+	if got := shell["output"]; got != "hello world\n" {
+		t.Errorf("shell-echo output = %v, want %q", got, "hello world\n")
+	}
+	for _, key := range []string{"runtime", "model", "effort"} {
+		if v, present := shell[key]; present && v != "" {
+			t.Errorf("shell-echo %s = %v, want absent/empty", key, v)
+		}
+	}
+
+	// LLM task: prompt round-trips; command absent.
+	llm := byID["llm-summarise"]
+	if llm == nil {
+		t.Fatalf("llm-summarise task missing from JSON")
+	}
+	if got := llm["prompt"]; got != "summarise this" {
+		t.Errorf("llm-summarise prompt = %v, want %q", got, "summarise this")
+	}
+	if v, present := llm["command"]; present && v != "" {
+		t.Errorf("llm-summarise command = %v, want absent", v)
+	}
+	if got := llm["runtime"]; got != "claude-code" {
+		t.Errorf("llm-summarise runtime = %v, want claude-code", got)
+	}
+}
+
 // TestRunIDIsUniqueAndSortable pins the two properties run ids exist to
 // provide: uniqueness under rapid creation (random suffix) and lexical
 // sortability (timestamp prefix). Without these, latest.json and an `ls`

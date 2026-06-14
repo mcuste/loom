@@ -9,8 +9,12 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,16 +26,38 @@ import (
 
 // TaskResult is the outcome of one task execution.
 //
-// Prompt is the final text sent to the runtime, with `{{id}}` and
-// `{{params.name}}` placeholders already substituted; persisting it lets
-// callers reconstruct exactly what the model saw without re-running
-// substitution.
+// For an LLM task, Prompt is the final text sent to the runtime, with `{{id}}`
+// and `{{params.name}}` placeholders already substituted, and Command is
+// empty. For a shell task, Command holds the substituted command line, Prompt
+// is empty, and Usage is zero. Output is the runtime's response in the LLM
+// case and the trimmed stdout in the shell case. Persisting these fields lets
+// callers reconstruct exactly what the runtime (or shell) saw without
+// re-running substitution.
 type TaskResult struct {
 	TaskID  workflow.TaskID
 	Prompt  string
+	Command string
 	Output  string
 	Usage   runtime.Usage
 	Elapsed time.Duration
+}
+
+// ShellError reports a non-zero exit from a shell task. The wrapped command's
+// stderr is captured verbatim so callers can surface it without re-running
+// the process.
+type ShellError struct {
+	ExitCode int
+	Stderr   string
+}
+
+// Error implements error. Includes the exit code and the trimmed stderr so a
+// single line conveys both why the task failed and what the process said.
+func (e *ShellError) Error() string {
+	s := strings.TrimSpace(e.Stderr)
+	if s == "" {
+		return fmt.Sprintf("shell: exit %d", e.ExitCode)
+	}
+	return fmt.Sprintf("shell: exit %d: %s", e.ExitCode, s)
 }
 
 // Report is the aggregate outcome of a Run call.
@@ -56,6 +82,10 @@ type Report struct {
 // (err is nil on success). Under concurrent execution, hook calls for
 // different tasks may interleave; implementations must be safe for
 // concurrent use.
+//
+// For a shell task, OnStart is invoked with empty runtime.Name, runtime.Model,
+// and runtime.Effort values — the CLI uses that as the discriminator to render
+// a shell-flavored progress line.
 type Hooks struct {
 	OnStart  func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort)
 	OnFinish func(t workflow.Task, res TaskResult, err error)
@@ -69,9 +99,10 @@ type Options struct {
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
 // Each task waits for its upstream dependencies to complete, substitutes
-// `{{id}}` and `{{params.name}}` placeholders in its prompt with upstream
-// outputs and opts.Params respectively, then dispatches a single
-// [runtime.Request] to its registered runtime.
+// `{{id}}` and `{{params.name}}` placeholders in its prompt (or command) with
+// upstream outputs and opts.Params respectively, then dispatches either a
+// single [runtime.Request] to its registered runtime or, for shell tasks, a
+// `sh -c` child process.
 //
 // On the first task error, sibling goroutines are cancelled via context and
 // Run returns the partial Report along with the wrapped error. Cancellation
@@ -103,37 +134,39 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				}
 			}
 
-			rt, model, effort := wf.Effective(t)
-			runner, ok := runtime.Lookup(rt)
-			if !ok {
-				return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
-			}
-
-			// mu guards rep.Outputs; opts.Params is read-only after Run starts, no lock needed.
+			// Substitute the body (Prompt or Command) for both task kinds before
+			// dispatch. mu guards rep.Outputs; opts.Params is read-only after Run
+			// starts, no lock needed.
 			mu.Lock()
-			prompt := workflow.Substitute(t.Prompt, rep.Outputs, opts.Params)
+			var body string
+			if t.Command != "" {
+				body = workflow.Substitute(t.Command, rep.Outputs, opts.Params)
+			} else {
+				body = workflow.Substitute(t.Prompt, rep.Outputs, opts.Params)
+			}
 			mu.Unlock()
 
-			req := runtime.Request{
-				TaskID:       string(t.ID),
-				Prompt:       prompt,
-				Model:        model,
-				Effort:       effort,
-				SystemPrompt: workflow.Substitute(wf.SystemPrompt, nil, opts.Params),
-			}
+			var (
+				res    TaskResult
+				runErr error
+			)
 
-			if hooks.OnStart != nil {
-				hooks.OnStart(*t, rt, model, effort)
-			}
-
-			start := time.Now()
-			resp, runErr := runner.Run(gctx, req)
-			res := TaskResult{
-				TaskID:  t.ID,
-				Prompt:  prompt,
-				Output:  resp.Output,
-				Usage:   resp.Usage,
-				Elapsed: time.Since(start),
+			if t.Command != "" {
+				if hooks.OnStart != nil {
+					hooks.OnStart(*t, "", "", "")
+				}
+				res, runErr = runShell(gctx, t, body)
+			} else {
+				rt, model, effort := wf.Effective(t)
+				runner, ok := runtime.Lookup(rt)
+				if !ok {
+					return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
+				}
+				sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params)
+				if hooks.OnStart != nil {
+					hooks.OnStart(*t, rt, model, effort)
+				}
+				res, runErr = runLLM(gctx, t, body, runner, model, effort, sysPrompt)
 			}
 
 			if hooks.OnFinish != nil {
@@ -144,12 +177,12 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 			}
 
 			mu.Lock()
-			rep.Outputs[t.ID] = resp.Output
+			rep.Outputs[t.ID] = res.Output
 			rep.Tasks = append(rep.Tasks, res)
-			rep.Usage.InputTokens += resp.Usage.InputTokens
-			rep.Usage.OutputTokens += resp.Usage.OutputTokens
-			rep.Usage.CacheReadTokens += resp.Usage.CacheReadTokens
-			rep.Usage.TotalCostUSD += resp.Usage.TotalCostUSD
+			rep.Usage.InputTokens += res.Usage.InputTokens
+			rep.Usage.OutputTokens += res.Usage.OutputTokens
+			rep.Usage.CacheReadTokens += res.Usage.CacheReadTokens
+			rep.Usage.TotalCostUSD += res.Usage.TotalCostUSD
 			mu.Unlock()
 
 			close(gates[t.ID])
@@ -159,6 +192,56 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 
 	err := g.Wait()
 	return rep, err
+}
+
+// runLLM executes one LLM task against its resolved runner. The substituted
+// prompt and system prompt are passed in by the dispatcher so this helper has
+// no awareness of the surrounding workflow.
+func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime.Runner, model runtime.Model, effort runtime.Effort, sysPrompt string) (TaskResult, error) {
+	req := runtime.Request{
+		TaskID:       string(t.ID),
+		Prompt:       prompt,
+		Model:        model,
+		Effort:       effort,
+		SystemPrompt: sysPrompt,
+	}
+
+	start := time.Now()
+	resp, runErr := runner.Run(ctx, req)
+	res := TaskResult{
+		TaskID:  t.ID,
+		Prompt:  prompt,
+		Output:  resp.Output,
+		Usage:   resp.Usage,
+		Elapsed: time.Since(start),
+	}
+	return res, runErr
+}
+
+// runShell executes one shell task as `sh -c <line>`. The provided ctx cancels
+// the child process on Run-level cancellation or sibling failure. Stdout is
+// captured and trimmed of trailing newlines; stderr is captured verbatim and
+// surfaced on non-zero exit via [ShellError].
+func runShell(ctx context.Context, t *workflow.Task, line string) (TaskResult, error) {
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, "sh", "-c", line)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	res := TaskResult{
+		TaskID:  t.ID,
+		Command: line,
+		Output:  strings.TrimRight(string(out), "\n"),
+		Elapsed: time.Since(start),
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return res, &ShellError{ExitCode: exitErr.ExitCode(), Stderr: stderr.String()}
+		}
+		return res, err
+	}
+	return res, nil
 }
 
 // JoinHooks fans an event out to every hook set in registration order, so

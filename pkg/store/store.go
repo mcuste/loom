@@ -38,8 +38,12 @@ import (
 // TaskResult is the per-task input to [Run.OnFinish]. It mirrors the fields
 // the store persists; callers translate from their own per-task result type
 // (e.g. executor.TaskResult) at the hook boundary.
+//
+// For shell tasks, Prompt holds the substituted command line, Usage is zero,
+// and Command carries the original (pre-substitution) command body.
 type TaskResult struct {
 	Prompt  string
+	Command string
 	Output  string
 	Usage   runtime.Usage
 	Elapsed time.Duration
@@ -190,6 +194,7 @@ func (r *Run) OnFinish() func(workflow.Task, TaskResult, error) {
 		}
 		tr := &r.state.Tasks[idx]
 		tr.Prompt = res.Prompt
+		tr.Command = res.Command
 		tr.Output = res.Output
 		tr.Usage = usageDTO(res.Usage)
 		tr.FinishedAt = r.now()
@@ -330,6 +335,7 @@ type taskRecord struct {
 	Error      string    `json:"error,omitempty"`
 	Usage      usageJSON `json:"usage,omitzero"`
 	Prompt     string    `json:"prompt,omitempty"`
+	Command    string    `json:"command,omitempty"`
 	Output     string    `json:"output,omitempty"`
 }
 

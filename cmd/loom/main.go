@@ -269,9 +269,18 @@ func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues
 
 	for i, id := range order {
 		t := wf.ByID(id)
-		rt, m, e := wf.Effective(t)
-		fmt.Fprintf(w, "  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
-			i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+		if t.IsShell() {
+			cmd := t.Command
+			if len(cmd) > 60 {
+				cmd = cmd[:60] + "…"
+			}
+			fmt.Fprintf(w, "  %2d. %-*s  kind=shell  cmd=%q  deps=%s\n",
+				i+1, idWidth, id, cmd, depsList(t.DependsOn))
+		} else {
+			rt, m, e := wf.Effective(t)
+			fmt.Fprintf(w, "  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
+				i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+		}
 	}
 }
 
@@ -312,12 +321,24 @@ func hooks(w io.Writer, total int) executor.Hooks {
 		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
 			n := step.Add(1)
 			mu.Lock()
-			fmt.Fprintf(w, "[%d/%d] %s (%s/%s%s)\n", n, total, t.ID, rt, m, effortSuffix(e))
+			if rt == "" {
+				fmt.Fprintf(w, "[%d/%d] %s (shell)\n", n, total, t.ID)
+			} else {
+				fmt.Fprintf(w, "[%d/%d] %s (%s/%s%s)\n", n, total, t.ID, rt, m, effortSuffix(e))
+			}
 			mu.Unlock()
 		},
 		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
 			mu.Lock()
 			defer mu.Unlock()
+			if t.IsShell() {
+				if err != nil {
+					fmt.Fprintf(w, "  %s FAIL after %s: %v\n", t.ID, res.Elapsed.Round(time.Millisecond), err)
+					return
+				}
+				fmt.Fprintf(w, "  %s done %s  exit=0\n", t.ID, res.Elapsed.Round(time.Millisecond))
+				return
+			}
 			if err != nil {
 				fmt.Fprintf(w, "  %s FAIL after %s: %v\n", t.ID, res.Elapsed.Round(time.Millisecond), err)
 				return

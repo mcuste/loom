@@ -41,8 +41,11 @@ tasks:
     model: ...               # optional task-level override
     effort: ...              # optional task-level override
     depends_on: [a, b]       # optional; explicit DAG edges
-    prompt: |                # required, non-empty
+    prompt: |                # exactly one of prompt or command; non-empty
       Text with {{a}} and {{b}} placeholders.
+    # — OR —
+    command: |               # runs sh -c instead of dispatching to a runtime
+      echo "{{a}}" | wc -l
 ```
 
 Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(true)`). No `inputs:`, `output:`, `workflow:`, `with:` — sub-workflows aren't implemented.
@@ -53,6 +56,24 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 - Every `{{id}}` placeholder **must also appear in `depends_on`**. Placeholders never implicitly extend the DAG. Repeating a placeholder is fine; it's templating, not declaration.
 - `depends_on` may list a task with no placeholder (pure ordering constraint).
 - Cycles, unknown deps, duplicate deps, and unknown placeholders fail `loom check`.
+
+## Command tasks
+
+A task with `command:` runs `sh -c <substituted-command>` instead of dispatching to a runtime.
+
+**Discriminator rule** — exactly one of `prompt` or `command` must be set per task. Setting both or neither is rejected by the parser (`loom check` surfaces the error before execution).
+
+**Rejected fields on command tasks** — `runtime`, `model`, and `effort` at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected.
+
+**Placeholders** — `{{task_id}}` and `{{params.x}}` substitute into `command:` bodies identically to `prompt:` bodies; the same `depends_on` rule applies (every `{{id}}` placeholder must also appear in `depends_on`).
+
+**Stdout is the output** — captured stdout becomes the task's full string output, consumable downstream via `{{task_id}}` exactly like LLM output.
+
+**Stderr streams live** — stderr is not captured; it surfaces on failure via the task's error message.
+
+**Non-zero exit fails the task** — a non-zero exit code is treated as a task failure and propagates through the DAG exactly like a runtime error.
+
+**Security caveat** — LLM output substituted via `{{task_id}}` into a `command:` body is untrusted input. If upstream tasks are prompted with user-supplied data, shell-injection is possible. Sanitise or quote values before splicing them into commands.
 
 ## Params
 
@@ -103,6 +124,8 @@ loom check examples/deploy.yaml -p env=prod
 Resolution order (right-to-left wins): declared defaults → `-p` values. Unknown keys or missing required params are hard errors.
 
 ## Runtime / model / effort
+
+These fields are LLM-only and are ignored by command tasks; task-level overrides of `runtime`, `model`, or `effort` on a command task are a hard validation error.
 
 Resolution per task: task field → workflow default. A task with no runtime and a workflow with no default fails validation.
 

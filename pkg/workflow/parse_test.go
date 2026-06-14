@@ -240,7 +240,40 @@ func TestParseErrors(t *testing.T) {
 		{
 			name:    "missing prompt",
 			src:     "name: wf\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n",
-			wantErr: workflow.ErrMissingPrompt,
+			wantErr: workflow.ErrMissingPromptOrCommand,
+		},
+		{
+			name:    "both prompt and command",
+			src:     "name: wf\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    prompt: hi\n    command: echo hi\n",
+			wantErr: workflow.ErrPromptAndCommandSet,
+		},
+		{
+			name:    "command with task-level runtime",
+			src:     "name: wf\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    command: echo hi\n    runtime: test-rt\n",
+			wantErr: workflow.ErrShellTaskWithRuntime,
+		},
+		{
+			name:    "command with task-level model",
+			src:     "name: wf\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    command: echo hi\n    model: m1\n",
+			wantErr: workflow.ErrShellTaskWithRuntime,
+		},
+		{
+			name:    "command with task-level effort",
+			src:     "name: wf\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    command: echo hi\n    effort: low\n",
+			wantErr: workflow.ErrShellTaskWithRuntime,
+		},
+		{
+			name: "task-ref placeholder in command without depends_on",
+			src: `name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: a
+    prompt: A
+  - id: b
+    command: echo {{a}}
+`,
+			wantErr: &workflow.UnknownPlaceholderError{},
 		},
 		{
 			name:    "duplicate task id",
@@ -794,6 +827,96 @@ tasks:
 	}
 	if got.Name != "a" {
 		t.Errorf("SystemPlaceholderTaskRefError.Name = %q, want a", got.Name)
+	}
+}
+
+// TestParseCommandOnly verifies that a task with only `command:` set and no
+// prompt parses successfully, and that Task.Command and IsShell are populated.
+func TestParseCommandOnly(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: a
+    command: echo hello
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if len(wf.Tasks) != 1 {
+		t.Fatalf("len(Tasks) = %d, want 1", len(wf.Tasks))
+	}
+	task := wf.Tasks[0]
+	if task.Command != "echo hello" {
+		t.Errorf("Command = %q, want %q", task.Command, "echo hello")
+	}
+	if task.Prompt != "" {
+		t.Errorf("Prompt = %q, want empty", task.Prompt)
+	}
+	if !task.IsShell() {
+		t.Errorf("IsShell() = false, want true")
+	}
+}
+
+// TestParseMixedKindWorkflow verifies that a workflow containing both LLM and
+// shell tasks is accepted, including workflow-level model and effort (which
+// shell tasks tolerate but ignore).
+func TestParseMixedKindWorkflow(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+effort: low
+tasks:
+  - id: fetch
+    command: curl https://example.com
+  - id: summarise
+    depends_on: [fetch]
+    prompt: |
+      summarise {{fetch}}
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if len(wf.Tasks) != 2 {
+		t.Fatalf("len(Tasks) = %d, want 2", len(wf.Tasks))
+	}
+	if !wf.Tasks[0].IsShell() {
+		t.Errorf("Tasks[0].IsShell() = false, want true")
+	}
+	if wf.Tasks[1].IsShell() {
+		t.Errorf("Tasks[1].IsShell() = true, want false")
+	}
+	if wf.Effort != "low" {
+		t.Errorf("Effort = %q, want low", wf.Effort)
+	}
+}
+
+// TestParseUndeclaredParamInCommand mirrors TestParseUnknownParamPlaceholder
+// but exercises the command body path.
+func TestParseUndeclaredParamInCommand(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+params:
+  - name: region
+    default: us
+tasks:
+  - id: a
+    command: |
+      deploy --env {{params.env}} --region {{params.region}}
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.UnknownParamError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As UnknownParamError failed; err = %v", err)
+	}
+	if got.Task != "a" || got.Name != "env" {
+		t.Errorf("UnknownParamError = %+v, want task=a name=env", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -380,6 +381,116 @@ tasks:
 		if res.Prompt != "racetest" {
 			t.Errorf("task %q Prompt = %q, want %q", res.TaskID, res.Prompt, "racetest")
 		}
+	}
+}
+
+// TestShellHappyPath verifies that a shell task with `command: echo hi`
+// produces "hi" as output and zero Usage.
+func TestShellHappyPath(t *testing.T) {
+	wf := &workflow.Workflow{
+		ID: "wf",
+		Tasks: []workflow.Task{
+			{ID: "a", Command: "echo hi"},
+		},
+	}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := rep.Outputs["a"]; got != "hi" {
+		t.Errorf("Outputs[a] = %q, want %q", got, "hi")
+	}
+	if len(rep.Tasks) != 1 {
+		t.Fatalf("Tasks = %d, want 1", len(rep.Tasks))
+	}
+	if (rep.Tasks[0].Usage != runtime.Usage{}) {
+		t.Errorf("Usage = %+v, want zero", rep.Tasks[0].Usage)
+	}
+}
+
+// TestShellFailure verifies that a command exiting non-zero returns a
+// *executor.ShellError carrying the right ExitCode and non-empty Stderr.
+func TestShellFailure(t *testing.T) {
+	wf := &workflow.Workflow{
+		ID: "wf",
+		Tasks: []workflow.Task{
+			{ID: "a", Command: "echo 'something went wrong' >&2; exit 2"},
+		},
+	}
+	_, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+	if err == nil {
+		t.Fatal("Run returned nil error, want failure")
+	}
+	var shellErr *executor.ShellError
+	if !errors.As(err, &shellErr) {
+		t.Fatalf("error is %T, want *executor.ShellError; err = %v", err, err)
+	}
+	if shellErr.ExitCode != 2 {
+		t.Errorf("ExitCode = %d, want 2", shellErr.ExitCode)
+	}
+	if strings.TrimSpace(shellErr.Stderr) == "" {
+		t.Errorf("Stderr is empty, want non-empty")
+	}
+}
+
+// TestShellContextCancel verifies that cancelling the context interrupts a
+// long-running shell command and returns an error within a short deadline.
+func TestShellContextCancel(t *testing.T) {
+	wf := &workflow.Workflow{
+		ID: "wf",
+		Tasks: []workflow.Task{
+			{ID: "a", Command: "sleep 60"},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.Run(ctx, wf, executor.Hooks{}, executor.Options{})
+		done <- err
+	}()
+
+	// Give the process a moment to start, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run returned nil error after context cancel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after context cancel")
+	}
+}
+
+// TestShellFeedsLLMDownstream verifies a mixed DAG: a shell task's stdout
+// becomes a placeholder substituted into a downstream LLM task's prompt.
+func TestShellFeedsLLMDownstream(t *testing.T) {
+	src := `
+name: wf
+runtime: exec-echo
+model: m1
+tasks:
+  - id: shell_out
+    command: "echo greetings"
+  - id: llm_in
+    depends_on: [shell_out]
+    prompt: "got: {{shell_out}}"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := rep.Outputs["shell_out"]; got != "greetings" {
+		t.Errorf("Outputs[shell_out] = %q, want %q", got, "greetings")
+	}
+	if got := rep.Outputs["llm_in"]; got != "got: greetings" {
+		t.Errorf("Outputs[llm_in] = %q, want %q", got, "got: greetings")
 	}
 }
 

@@ -26,18 +26,22 @@ import (
 //  2. Task ids are unique.
 //  3. Param block: names are valid, unique, required-vs-default is exclusive,
 //     defaults are scalar strings.
-//  4. Every task has a non-empty prompt.
+//  4. Every task sets exactly one of `prompt:` or `command:`. A task with
+//     `command:` (a shell task) must not set task-level runtime, model, or
+//     effort.
 //  5. Every depends_on entry names a known task and appears at most once.
-//  6. Every {{id}} placeholder in a prompt is a member of that task's
-//     depends_on. Placeholders are pure templating — they never extend the
-//     dependency graph implicitly.
-//  7. Every {{params.x}} placeholder references a declared param.
+//  6. Every {{id}} placeholder in a prompt or command is a member of that
+//     task's depends_on. Placeholders are pure templating — they never extend
+//     the dependency graph implicitly.
+//  7. Every {{params.x}} placeholder (in prompt, command, or system_prompt)
+//     references a declared param.
 //  8. The task graph has no cycles.
-//  9. Every prompt and the system_prompt are free of malformed `{{params.…}}`
-//     tokens; system_prompt is free of task-id placeholders.
-//  10. Every declared param is referenced by at least one prompt or system_prompt.
-//  11. The effective runtime/model/effort per task is accepted by the registered
-//     runtime spec.
+//  9. Every prompt, command, and the system_prompt are free of malformed
+//     `{{params.…}}` tokens; system_prompt is free of task-id placeholders.
+//  10. Every declared param is referenced by at least one prompt, command, or
+//     system_prompt.
+//  11. The effective runtime/model/effort per LLM task is accepted by the
+//     registered runtime spec. Shell tasks bypass this check.
 func Parse(data []byte) (*Workflow, error) {
 	var raw rawWorkflow
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -93,20 +97,33 @@ func Parse(data []byte) (*Workflow, error) {
 
 	for _, rt := range raw.Tasks {
 		tid := TaskID(rt.ID)
-		if rt.Prompt == "" {
-			return nil, fmt.Errorf("task %q: %w", tid, ErrMissingPrompt)
+		switch {
+		case rt.Prompt == "" && rt.Command == "":
+			return nil, fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
+		case rt.Prompt != "" && rt.Command != "":
+			return nil, fmt.Errorf("task %q: %w", tid, ErrPromptAndCommandSet)
 		}
-		deps, err := buildDeps(tid, rt.DependsOn, rt.Prompt, ids, paramSet)
+		// body is the text that placeholder validation runs against —
+		// substitution targets the same string at execution time.
+		body := rt.Prompt
+		if rt.Command != "" {
+			body = rt.Command
+			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
+			}
+		}
+		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet)
 		if err != nil {
 			return nil, err
 		}
-		if err := checkMalformedParamPlaceholders(tid, rt.Prompt); err != nil {
+		if err := checkMalformedParamPlaceholders(tid, body); err != nil {
 			return nil, err
 		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
 			ID:          tid,
 			Prompt:      rt.Prompt,
+			Command:     rt.Command,
 			Description: rt.Description,
 			Runtime:     runtime.Name(rt.Runtime),
 			Model:       runtime.Model(rt.Model),
@@ -129,6 +146,12 @@ func Parse(data []byte) (*Workflow, error) {
 
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
+		if t.IsShell() {
+			// Shell tasks bypass the runtime registry entirely — runtime/model/
+			// effort have no meaning, and the task-level reject above guarantees
+			// they are unset on t.
+			continue
+		}
 		rt, m, e := wf.Effective(t)
 		req := runtime.Request{
 			TaskID:       string(t.ID),
@@ -183,6 +206,7 @@ type rawTask struct {
 	Model       string   `yaml:"model"`
 	Effort      string   `yaml:"effort"`
 	Prompt      string   `yaml:"prompt"`
+	Command     string   `yaml:"command"`
 	DependsOn   []string `yaml:"depends_on"`
 }
 
@@ -202,6 +226,18 @@ var (
 	ErrNoTasks          = errors.New("workflow has no tasks")
 	ErrMissingPrompt    = errors.New("task has no prompt")
 	ErrMissingParamName = errors.New("param has no name")
+
+	// ErrMissingPromptOrCommand reports a task that sets neither `prompt:` nor
+	// `command:`. Exactly one must be present.
+	ErrMissingPromptOrCommand = errors.New("task has neither prompt nor command")
+	// ErrPromptAndCommandSet reports a task that sets both `prompt:` and
+	// `command:`. The two are mutually exclusive.
+	ErrPromptAndCommandSet = errors.New("task sets both prompt and command")
+	// ErrShellTaskWithRuntime reports a shell task (one with `command:`) that
+	// also sets task-level `runtime:`, `model:`, or `effort:`. These fields are
+	// meaningless for shell tasks and rejected at the task level; workflow-level
+	// defaults are tolerated.
+	ErrShellTaskWithRuntime = errors.New("shell task must not set runtime, model, or effort")
 )
 
 // DuplicateTaskIDError reports two tasks declaring the same id.
@@ -544,7 +580,11 @@ func checkUnusedParams(wf *Workflow) error {
 	}
 	scan(wf.SystemPrompt)
 	for i := range wf.Tasks {
+		// Shell tasks reference params via {{params.x}} in their command body
+		// exactly like LLM tasks do in their prompt; one of the two is empty
+		// per the parser's XOR check, so scanning both is safe.
 		scan(wf.Tasks[i].Prompt)
+		scan(wf.Tasks[i].Command)
 	}
 	for _, p := range wf.Params {
 		if _, ok := used[p.Name]; !ok {

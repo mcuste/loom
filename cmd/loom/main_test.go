@@ -165,6 +165,83 @@ tasks:
 	}
 }
 
+// TestCheckCommandShellTask pins the printPlan output for a workflow that
+// contains a shell task. The plan line must show kind=shell and cmd=... but
+// must NOT show the runtime/model/effort triple that LLM tasks emit.
+func TestCheckCommandShellTask(t *testing.T) {
+	path := writeWorkflow(t, `
+name: wf_shell
+tasks:
+  - id: greet
+    command: echo hello
+`)
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"check", path})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("check returned err = %v; want nil\noutput:\n%s", err, buf.String())
+	}
+	out := buf.String()
+
+	// Plan line must contain kind=shell.
+	if !strings.Contains(out, "kind=shell") {
+		t.Errorf("expected kind=shell in plan; got:\n%s", out)
+	}
+	// cmd= must quote the command body.
+	if !strings.Contains(out, `cmd="echo hello"`) {
+		t.Errorf(`expected cmd="echo hello" in plan; got:\n%s`, out)
+	}
+	// deps=none for a task with no dependencies.
+	if !strings.Contains(out, "deps=none") {
+		t.Errorf("expected deps=none in plan; got:\n%s", out)
+	}
+	// runtime= triple must be absent — shell tasks suppress it.
+	if strings.Contains(out, "runtime=") {
+		t.Errorf("did not expect runtime= in shell-task plan line; got:\n%s", out)
+	}
+}
+
+// TestRunCommandShellTask drives the full run pipeline for a shell task.
+// The progress output must emit the (shell) flavour on start and exit=0 on
+// finish; the LLM-specific in=/out=/cache= fields must be absent.
+func TestRunCommandShellTask(t *testing.T) {
+	path := writeWorkflow(t, `
+name: wf_shell
+tasks:
+  - id: greet
+    command: echo hello
+`)
+	chdirTo(t, t.TempDir())
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"run", path})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	}
+	out := buf.String()
+
+	// OnStart shell flavour: "[N/N] greet (shell)".
+	if !strings.Contains(out, "greet (shell)") {
+		t.Errorf("expected 'greet (shell)' in progress; got:\n%s", out)
+	}
+	// OnFinish shell flavour: "greet done ... exit=0".
+	if !strings.Contains(out, "exit=0") {
+		t.Errorf("expected 'exit=0' in progress; got:\n%s", out)
+	}
+	// LLM-specific token fields must be absent.
+	if strings.Contains(out, "in=") || strings.Contains(out, "out=") || strings.Contains(out, "cache=") {
+		t.Errorf("did not expect token fields for shell task; got:\n%s", out)
+	}
+}
+
 // TestRunCommandResolvesAndSubstitutes drives the full run pipeline against
 // the cmd-echo fake runtime. The persisted run record's tasks[0].prompt must
 // equal the substituted text, proving the param flowed through ResolveParams

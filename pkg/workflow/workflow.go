@@ -147,8 +147,13 @@ type Task struct {
 	// ID uniquely identifies the task within its workflow.
 	ID TaskID
 	// Prompt is the text sent to the model, with `{{id}}` placeholders to be
-	// substituted by upstream task outputs at run time.
+	// substituted by upstream task outputs at run time. Empty for shell tasks;
+	// see Command.
 	Prompt string
+	// Command is the shell command body executed via `sh -c`. Mutually
+	// exclusive with Prompt. Placeholders `{{id}}` and `{{params.x}}` are
+	// substituted before execution.
+	Command string
 	// Description is shown in plan output; not sent to the model.
 	Description string
 	// Runtime overrides Workflow.Runtime for this task when non-empty.
@@ -162,6 +167,11 @@ type Task struct {
 	// placeholder found in the prompt.
 	DependsOn []TaskID
 }
+
+// IsShell reports whether t is a shell task (has Command set) rather than an
+// LLM task. The parser enforces XOR between Prompt and Command, so this is a
+// reliable discriminator at the executor, CLI, and store layers.
+func (t Task) IsShell() bool { return t.Command != "" }
 
 // Param is a declared workflow parameter — a named value supplied at run time
 // via `-p key=val` (or a defaults block) and substituted into prompts via
