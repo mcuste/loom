@@ -95,6 +95,12 @@ type Hooks struct {
 // with no parameters.
 type Options struct {
 	Params workflow.ParamValues // resolved params; read-only after Run starts.
+	// Seed maps task ids to outputs that should be treated as already-produced.
+	// Seeded tasks have their gates closed with the supplied value before any
+	// goroutine launches, so unseeded downstream tasks see the seed via
+	// {{id}} substitution. Seeded tasks fire no hooks and do not appear in
+	// Report.Tasks. Entries naming an id not in the workflow are ignored.
+	Seed map[workflow.TaskID]string
 }
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
@@ -120,10 +126,23 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		gates[tid] = make(chan struct{})
 	}
 
+	// Close seeded gates and stamp their outputs before spawning any
+	// goroutine. Downstream waiters see the seed via {{id}} substitution
+	// just as if the task had run this invocation. Unknown ids are ignored.
+	for _, tid := range order {
+		if v, ok := opts.Seed[tid]; ok {
+			rep.Outputs[tid] = v
+			close(gates[tid])
+		}
+	}
+
 	var mu sync.Mutex
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tid := range order {
+		if _, seeded := opts.Seed[tid]; seeded {
+			continue
+		}
 		t := wf.ByID(tid)
 		g.Go(func() error {
 			for _, dep := range t.DependsOn {

@@ -47,21 +47,29 @@ func newRootCmd() *cobra.Command {
 		Short:        "Validate and run workflow YAML files",
 		SilenceUsage: true,
 	}
-	root.AddCommand(newRunCmd(), newCheckCmd())
+	root.AddCommand(newRunCmd(), newCheckCmd(), newResumeCmd())
 	return root
 }
 
 func newRunCmd() *cobra.Command {
-	var paramArgs []string
+	var (
+		paramArgs    []string
+		resumeLatest bool
+	)
 	cmd := &cobra.Command{
 		Use:   "run <workflow.yaml>",
 		Short: "Validate and run a workflow",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if resumeLatest {
+				return doRunResumeLatest(cmd.OutOrStdout(), args[0], paramArgs)
+			}
 			return doRun(cmd.OutOrStdout(), args[0], paramArgs)
 		},
 	}
 	addParamFlags(cmd, &paramArgs)
+	cmd.Flags().BoolVar(&resumeLatest, "resume-latest", false,
+		"seed ok tasks from .loom/runs/<wf>/latest.json and re-run the remainder")
 	return cmd
 }
 
@@ -104,7 +112,7 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	printPlan(w, wf, resolved, cliParams)
+	printPlan(w, wf, resolved, cliParams, nil)
 	fmt.Fprintln(w)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -127,7 +135,7 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 		fmt.Fprintf(w, "  store: %v\n", closeErr)
 	}
 	if rep != nil {
-		printSummary(w, wf, rep)
+		printSummary(w, wf, rep, len(wf.Tasks))
 	}
 	return err
 }
@@ -158,7 +166,7 @@ func doCheck(w io.Writer, path string, paramArgs []string) error {
 			return err
 		}
 	}
-	printPlan(w, wf, resolved, cliParams)
+	printPlan(w, wf, resolved, cliParams, nil)
 	return nil
 }
 
@@ -225,8 +233,10 @@ func summaryFor(rep *executor.Report) *store.Summary {
 // the task execution order to w. It uses workflow.Effective so the printed
 // runtime/model/effort match what the runtime will actually see. The cli arg
 // drives the per-param provenance tag (cli vs default vs MISSING); the
-// resolved bag drives the printed value.
-func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string) {
+// resolved bag drives the printed value. When seeded is non-empty, ids in
+// the set are annotated and the section header shows the count separately,
+// so a resume plan tells the user which steps will be skipped.
+func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string, seeded map[workflow.TaskID]bool) {
 	fmt.Fprintf(w, "Workflow : %s\n", wf.ID)
 	if wf.Description != "" {
 		fmt.Fprintf(w, "Desc     : %s\n", wf.Description)
@@ -258,7 +268,17 @@ func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues
 	}
 
 	order := wf.Plan()
-	fmt.Fprintf(w, "\nExecution order (%d task%s):\n", len(order), plural(len(order)))
+	seedCount := 0
+	for _, id := range order {
+		if seeded[id] {
+			seedCount++
+		}
+	}
+	if seedCount > 0 {
+		fmt.Fprintf(w, "\nExecution order (%d task%s; %d seeded):\n", len(order), plural(len(order)), seedCount)
+	} else {
+		fmt.Fprintf(w, "\nExecution order (%d task%s):\n", len(order), plural(len(order)))
+	}
 
 	idWidth := 0
 	for _, id := range order {
@@ -269,24 +289,28 @@ func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues
 
 	for i, id := range order {
 		t := wf.ByID(id)
+		suffix := ""
+		if seeded[id] {
+			suffix = "  (seeded; using stored output)"
+		}
 		if t.IsShell() {
 			cmd := t.Command
 			if len(cmd) > 60 {
 				cmd = cmd[:60] + "…"
 			}
-			fmt.Fprintf(w, "  %2d. %-*s  kind=shell  cmd=%q  deps=%s\n",
-				i+1, idWidth, id, cmd, depsList(t.DependsOn))
+			fmt.Fprintf(w, "  %2d. %-*s  kind=shell  cmd=%q  deps=%s%s\n",
+				i+1, idWidth, id, cmd, depsList(t.DependsOn), suffix)
 		} else {
 			rt, m, e := wf.Effective(t)
-			fmt.Fprintf(w, "  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
-				i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+			fmt.Fprintf(w, "  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s%s\n",
+				i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn), suffix)
 		}
 	}
 }
 
 // paramSource picks the provenance tag for a declared param given the CLI map
 // and whether the resolved bag carried a value. `cli` wins over `default`;
-// absence is reported as `MISSING`. (No --params-file yet — v2 follow-up.)
+// absence is reported as `MISSING`.
 func paramSource(p workflow.Param, cli map[string]string, resolvedHasValue bool) string {
 	if _, ok := cli[string(p.Name)]; ok {
 		return "cli"
@@ -350,18 +374,21 @@ func hooks(w io.Writer, total int) executor.Hooks {
 	}
 }
 
-// printSummary writes the final cost and token totals after a run.
-func printSummary(w io.Writer, wf *workflow.Workflow, rep *executor.Report) {
+// printSummary writes the final cost and token totals after a run. expected
+// is the number of tasks the executor was meant to run on this invocation
+// (full workflow for `loom run`, workflow minus seeded count for `loom
+// resume`); comparing against rep.Tasks decides the success line.
+func printSummary(w io.Writer, wf *workflow.Workflow, rep *executor.Report, expected int) {
 	const bar = "────────────────────────────────────────"
 	fmt.Fprintf(w, "\n%s\n", bar)
 	fmt.Fprintf(w, "  total tokens : %d in / %d out / %d cache-read\n",
 		rep.Usage.InputTokens, rep.Usage.OutputTokens, rep.Usage.CacheReadTokens)
 	fmt.Fprintf(w, "  total cost   : $%.6f\n", rep.Usage.TotalCostUSD)
 	fmt.Fprintf(w, "%s\n", bar)
-	if len(rep.Tasks) == len(wf.Tasks) {
+	if len(rep.Tasks) == expected {
 		fmt.Fprintf(w, "✓ workflow %q complete\n", wf.ID)
 	} else {
-		fmt.Fprintf(w, "✗ workflow %q stopped after %d/%d tasks\n", wf.ID, len(rep.Tasks), len(wf.Tasks))
+		fmt.Fprintf(w, "✗ workflow %q stopped after %d/%d tasks\n", wf.ID, len(rep.Tasks), expected)
 	}
 }
 

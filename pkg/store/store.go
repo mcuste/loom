@@ -62,6 +62,16 @@ type Summary struct {
 // UTC and lexicographically sortable.
 const runIDLayout = "20060102T150405Z"
 
+// Status values written to the on-disk run record. Exported so callers (e.g.
+// the resume command) reference the same string the store writes; a rename
+// here is a compile-time signal to every consumer instead of a silent miss.
+const (
+	StatusRunning = "running"
+	StatusStarted = "started"
+	StatusOK      = "ok"
+	StatusFailed  = "failed"
+)
+
 // Run is an open, on-disk record of a single workflow execution. Callers
 // create a Run with Open, feed it executor events via OnStart/OnFinish, and
 // finalize it with Close. Methods are safe for concurrent use.
@@ -73,7 +83,7 @@ type Run struct {
 	errorHandler func(error)
 
 	mu     sync.Mutex
-	state  runRecord
+	state  RunRecord
 	tasks  map[workflow.TaskID]int // task id -> index into state.Tasks
 	closed bool                    // Close is a no-op after the first call
 }
@@ -133,11 +143,11 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 		id:           id,
 		clock:        now,
 		errorHandler: cfg.OnError,
-		state: runRecord{
+		state: RunRecord{
 			RunID:      id,
 			WorkflowID: string(workflowID),
 			StartedAt:  started,
-			Status:     "running",
+			Status:     StatusRunning,
 			Manifest:   string(manifest),
 			Params:     cfg.Params,
 		},
@@ -163,7 +173,7 @@ func (r *Run) OnStart() func(workflow.Task, runtime.Name, runtime.Model, runtime
 		defer r.mu.Unlock()
 		idx, ok := r.tasks[t.ID]
 		if !ok {
-			r.state.Tasks = append(r.state.Tasks, taskRecord{ID: string(t.ID)})
+			r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
 			idx = len(r.state.Tasks) - 1
 			r.tasks[t.ID] = idx
 		}
@@ -172,7 +182,7 @@ func (r *Run) OnStart() func(workflow.Task, runtime.Name, runtime.Model, runtime
 		tr.Model = string(m)
 		tr.Effort = string(e)
 		tr.StartedAt = r.now()
-		tr.Status = "started"
+		tr.Status = StatusStarted
 		if err := r.flushLocked(); err != nil {
 			r.report(fmt.Errorf("store: task %s: write: %w", t.ID, err))
 		}
@@ -188,7 +198,7 @@ func (r *Run) OnFinish() func(workflow.Task, TaskResult, error) {
 		defer r.mu.Unlock()
 		idx, ok := r.tasks[t.ID]
 		if !ok {
-			r.state.Tasks = append(r.state.Tasks, taskRecord{ID: string(t.ID)})
+			r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
 			idx = len(r.state.Tasks) - 1
 			r.tasks[t.ID] = idx
 		}
@@ -200,10 +210,10 @@ func (r *Run) OnFinish() func(workflow.Task, TaskResult, error) {
 		tr.FinishedAt = r.now()
 		tr.ElapsedMs = res.Elapsed.Milliseconds()
 		if runErr != nil {
-			tr.Status = "failed"
+			tr.Status = StatusFailed
 			tr.Error = runErr.Error()
 		} else {
-			tr.Status = "ok"
+			tr.Status = StatusOK
 			tr.Error = ""
 		}
 		if err := r.flushLocked(); err != nil {
@@ -291,9 +301,9 @@ func defaultRandSuffix() (string, error) {
 
 func statusFor(err error) string {
 	if err == nil {
-		return "ok"
+		return StatusOK
 	}
-	return "failed"
+	return StatusFailed
 }
 
 func usageDTO(u runtime.Usage) usageJSON {
@@ -305,10 +315,27 @@ func usageDTO(u runtime.Usage) usageJSON {
 	}
 }
 
-// On-disk DTOs. Private to the package so the JSON layout can evolve
-// without breaking importers.
+// Load reads a run record from path and decodes it into a [RunRecord]. Used
+// by the resume command to recover the persisted manifest, params, and per-
+// task outputs from a prior run. Errors are wrapped with the source path so
+// the caller can surface them without rebuilding context.
+func Load(path string) (*RunRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("store: read run record %s: %w", path, err)
+	}
+	var rec RunRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("store: parse run record %s: %w", path, err)
+	}
+	return &rec, nil
+}
 
-type runRecord struct {
+// RunRecord is the top-level on-disk structure for a single workflow run.
+// Exported so callers (e.g. the resume command) bind to the same JSON shape
+// the store writes; a field rename here is a compile-time error at the call
+// site instead of a silent JSON decode miss.
+type RunRecord struct {
 	RunID      string       `json:"run_id"`
 	WorkflowID string       `json:"workflow_id"`
 	StartedAt  time.Time    `json:"started_at"`
@@ -320,10 +347,11 @@ type runRecord struct {
 	Usage      usageJSON    `json:"usage,omitzero"`
 	Manifest   string            `json:"manifest"`
 	Params     map[string]string `json:"params,omitempty"`
-	Tasks      []taskRecord      `json:"tasks"`
+	Tasks      []TaskRecord      `json:"tasks"`
 }
 
-type taskRecord struct {
+// TaskRecord is the per-task entry within a [RunRecord].
+type TaskRecord struct {
 	ID         string    `json:"id"`
 	Runtime    string    `json:"runtime,omitempty"`
 	Model      string    `json:"model,omitempty"`
@@ -339,6 +367,8 @@ type taskRecord struct {
 	Output     string    `json:"output,omitempty"`
 }
 
+// usageJSON is unexported; external callers read accounting via the embedded
+// fields of RunRecord/TaskRecord rather than through this inner type.
 type usageJSON struct {
 	InputTokens     int     `json:"input_tokens,omitempty"`
 	OutputTokens    int     `json:"output_tokens,omitempty"`

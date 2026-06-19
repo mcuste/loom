@@ -9,8 +9,10 @@ Author and execute loom workflows. Loom parses a YAML workflow, builds a DAG ove
 ## CLI
 
 ```bash
-loom check <workflow.yaml>   # parse + validate + print execution order, no execution
-loom run   <workflow.yaml>   # check + execute every task (independent tasks run concurrently)
+loom check  <workflow.yaml>                 # parse + validate + print execution order, no execution
+loom run    <workflow.yaml>                 # check + execute every task (independent tasks run concurrently)
+loom run    <workflow.yaml> --resume-latest # resume the last run of this workflow: skip ok tasks, re-run the rest
+loom resume <run-id>                        # resume a specific .loom/runs/<wf>/<id>.json; "latest" follows latest.json
 ```
 
 Always run `loom check <file>` first when authoring — it surfaces every validation error (cycles, unknown deps, unknown placeholders, bad model/effort) without burning tokens on `claude`.
@@ -178,6 +180,8 @@ Efforts: `minimal | low | medium | high | xhigh`. Empty effort means "leave runt
 ```
 
 `<run_id>` is `YYYYMMDDTHHMMSSZ-<6 hex>` (UTC, sortable). The file embeds the verbatim manifest, per-task `prompt` (with placeholders already substituted), full `output`, `usage` (in / out / cache-read tokens, cost USD), timing, and status — plus a top-level `usage` total and `task_count`. It is rewritten on every `OnStart` / `OnFinish` via tmp+rename, so a crash mid-run still leaves a parseable file.
+
+Failed or interrupted runs can be resumed: `loom resume <run-id>` (or `loom resume latest`) loads the record, seeds every task whose `status` is `ok` with its stored `output`, and only dispatches the remaining tasks. The original params block is reused, so no `-p` flags are required on the resume invocation. `loom run wf.yaml --resume-latest` is the same operation keyed off the workflow path instead of a run id.
 
 Use it to inspect what the model actually saw and produced, or to compare runs:
 
