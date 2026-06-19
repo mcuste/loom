@@ -1,0 +1,310 @@
+name: go_implement
+description: |
+  Implement Go code with a TDD + quality-review loop.
+
+  Mirrors the rust-implement skill from bayanay:
+    test_gen -> implement -> lint -> evaluate -> fix -> lint -> evaluate -> document -> report
+
+  Assumes `gofmt`, `go`, and `golangci-lint` are on PATH in the working directory
+  loom is invoked from. If `golangci-lint` is missing the lint step still runs;
+  the missing-binary error is captured in the lint output and surfaced to the
+  evaluator and the final report.
+
+  Invoke:
+    loom run workflows/go_implement.yaml -p task="add a Bloom filter to pkg/cache"
+    loom run workflows/go_implement.yaml -p task="..." -p scope="./pkg/cache"
+runtime: claude-code
+model: sonnet
+effort: medium
+
+params:
+  - name: task
+    description: Free-form description of the Go change to implement.
+    required: true
+  - name: scope
+    description: Package or directory the change is allowed to touch. "." for the whole module.
+    default: "."
+
+tasks:
+  - id: test_gen
+    description: Write failing Go tests that pin down the requested behavior.
+    model: opus
+    effort: high
+    prompt: |
+      You are the test-first author for a Go change.
+
+      Task:
+      {{params.task}}
+
+      Scope: {{params.scope}}
+
+      Write FAILING Go tests under {{params.scope}} that pin down the behavior
+      described above. Tests must compile (so `go build ./...` still works)
+      but must fail when run — declare the smallest stub needed for the test
+      file to compile, returning a zero value with a TODO comment.
+
+      Rules:
+      - Standard `testing` package; subtests via `t.Run` for table-driven cases.
+      - Prefer behavioral tests over implementation tests: assert on observable
+        public API (returned values, errors, side effects on injected fakes),
+        not on internal state.
+      - Integration tests for public API, HTTP handlers, CLI, file I/O;
+        unit tests only for isolated logic.
+      - One assertion target per test; name tests as scenarios
+        (TestParse_RejectsEmptyInput).
+      - Skip tests that only exercise language semantics or third-party
+        library behavior.
+      - Wrap errors with `fmt.Errorf("...: %w", err)` in any helper code you
+        write; lowercase error messages, no trailing punctuation.
+
+      Use Edit / Write to create the files. Then output:
+        1. List of test files created
+        2. Short test plan: one bullet per test, naming the scenario.
+
+  - id: implement
+    description: Implement the change so the failing tests pass.
+    depends_on: [test_gen]
+    model: opus
+    effort: high
+    prompt: |
+      Implement Go code to satisfy the tests written in the previous step.
+
+      Task:
+      {{params.task}}
+
+      Scope: {{params.scope}}
+
+      Test files + plan from the test-first step:
+      {{test_gen}}
+
+      Rules:
+      - Touch only files under {{params.scope}} (plus the test files already
+        written). Replace stubs with real implementations; preserve test
+        signatures unless a test obviously encodes the wrong shape.
+      - Idiomatic Go: short names, early returns, accept interfaces / return
+        structs, accept `context.Context` as first arg for anything that does
+        I/O, no panics in library code, no goroutine leaks (every spawned
+        goroutine must have a documented exit path).
+      - Errors as values, wrapped with `fmt.Errorf("...: %w", err)`; sentinel
+        errors via `errors.Is`; typed errors only when callers branch on them.
+      - Lowercase error messages without trailing punctuation.
+      - YAGNI: build only what the tests require. No speculative interfaces,
+        no premature generics, no config knobs without a caller.
+      - If you need a new dependency, justify it inline and run `go mod tidy`.
+
+      Use Edit / Write to modify files. Then output:
+        1. List of files created/modified
+        2. One-paragraph summary of the implementation approach.
+
+  - id: lint1
+    description: Run gofmt, go vet, golangci-lint, and go test on the changes.
+    depends_on: [implement]
+    command: |
+      printf '=== gofmt -l ===\n'
+      gofmt -l .
+      printf '\n=== go vet ===\n'
+      go vet ./... 2>&1 || true
+      printf '\n=== golangci-lint ===\n'
+      golangci-lint run ./... 2>&1 || true
+      printf '\n=== go test ===\n'
+      go test ./... 2>&1 || true
+
+  - id: evaluate
+    description: First-pass review of the implementation. Read-only.
+    depends_on: [lint1]
+    model: sonnet
+    effort: high
+    prompt: |
+      You are a senior Go reviewer. Critique the implementation. Reading
+      only: do NOT edit files.
+
+      Task:
+      {{params.task}}
+
+      Scope: {{params.scope}}
+
+      Lint + test output:
+      {{lint1}}
+
+      Inspect the files touched by the implementation step against these
+      rule tiers, in priority order:
+        1. Correctness: wrong behavior, data races, goroutine leaks,
+           ignored errors, nil deref, off-by-one, missing context
+           propagation on I/O.
+        2. API design: exported surface bloat, `Get`-prefixed accessors,
+           interfaces with a single impl when no DI need, returning
+           concrete pointers where errors-as-values would suffice.
+        3. Error handling: lost context (no `%w`), sentinel-vs-typed
+           mismatch, error strings starting with uppercase or ending in
+           punctuation, `panic` in library code.
+        4. Architecture: layering violations, packages importing upward,
+           god structs, hidden globals, mutable package state.
+        5. Test quality: assertions of language semantics, missing edge
+           cases the task implies, brittle string-match on unrelated
+           output, no parallelism on independent table cases.
+        6. Performance: allocation in hot loops, unnecessary string
+           concatenation, channels-of-channels, `sync.Mutex` around a
+           single atomic op.
+        7. Style: naming, godoc on exported items missing or echo-style,
+           comments that restate code.
+
+      Apply a worthiness filter: skip a finding if no caller benefits, the
+      rule breaks down at this edge case, or the cost dwarfs the value.
+
+      Output format (no prose, no preamble): a bulleted list, max 10
+      findings, ranked by tier:
+
+        - <file>:<line> [tier] <one-line description, citing the rule>
+
+      If clean: `All clean - no violations found`.
+
+  - id: fix
+    description: Apply the evaluator findings to the codebase.
+    depends_on: [evaluate]
+    model: opus
+    effort: high
+    prompt: |
+      Apply the following review findings to the Go codebase. Edit only the
+      files the findings call out; do not invent new work.
+
+      Task:
+      {{params.task}}
+
+      Scope: {{params.scope}}
+
+      Review findings:
+      {{evaluate}}
+
+      If the findings are `All clean - no violations found`, output
+      `nothing to do` and stop.
+
+      For each finding: apply the minimal change that resolves it, keep
+      test signatures intact, ensure no stale imports or shadowed vars
+      remain. Re-run a mental compile before finishing.
+
+      Use Edit / Write. Then output:
+        1. List of files modified.
+        2. One bullet per finding addressed (or skipped, with reason).
+
+  - id: lint2
+    description: Re-run gofmt, go vet, golangci-lint, and go test after the fix pass.
+    depends_on: [fix]
+    command: |
+      printf '=== gofmt -l ===\n'
+      gofmt -l .
+      printf '\n=== go vet ===\n'
+      go vet ./... 2>&1 || true
+      printf '\n=== golangci-lint ===\n'
+      golangci-lint run ./... 2>&1 || true
+      printf '\n=== go test ===\n'
+      go test ./... 2>&1 || true
+
+  - id: evaluate2
+    description: Second-pass review after the fix. Read-only.
+    depends_on: [lint2]
+    model: sonnet
+    effort: medium
+    prompt: |
+      Second-pass review. Reading only: do NOT edit files.
+
+      Lint + test output after the fix pass:
+      {{lint2}}
+
+      Re-check the files touched in the fix step against the same rule
+      tiers as the first evaluation (correctness > API > errors >
+      architecture > tests > perf > style). Apply the same worthiness
+      filter.
+
+      Output format: bulleted list, max 5 findings, same shape as the
+      first review:
+
+        - <file>:<line> [tier] <one-line description, citing the rule>
+
+      If clean: `All clean - no violations remaining`.
+
+  - id: document
+    description: Add or clean up godoc on exported items in changed files.
+    depends_on: [evaluate2]
+    model: sonnet
+    effort: medium
+    prompt: |
+      Documentation pass on the Go files modified by the previous steps.
+
+      Use `git status --short` (or `git diff --name-only`) to scope the
+      work to files actually changed in this run. Only touch files under
+      {{params.scope}}.
+
+      Decision gate for every comment: does it communicate something
+      beyond what the name and type signature already convey? If no,
+      skip writing it; if a comment already exists that fails this test,
+      delete it.
+
+      Rules:
+      - Every exported (capitalized) identifier in changed files gets a
+        godoc comment that starts with the identifier name.
+      - For unexported items, document only what is non-obvious: a hidden
+        invariant, a workaround for a specific bug, a subtle ordering,
+        the reason a goroutine is safe to leak.
+      - Remove commented-out code and narration comments
+        ("// loop over items") that restate the code.
+      - Preserve `//go:` directives, `// nolint:` comments, generated-file
+        headers, and any existing `// SAFETY:` style invariants.
+
+      Use Edit. Then output:
+        1. List of files documented.
+        2. Short summary: what was added vs cleaned up.
+
+  - id: report
+    description: Final markdown report for this run.
+    depends_on: [test_gen, implement, lint1, evaluate, fix, lint2, evaluate2, document]
+    model: sonnet
+    effort: low
+    prompt: |
+      Produce a short final report in Markdown.
+
+      Task:
+      {{params.task}}
+
+      Test plan:
+      {{test_gen}}
+
+      Implementation summary:
+      {{implement}}
+
+      First lint + test output:
+      {{lint1}}
+
+      First-pass review:
+      {{evaluate}}
+
+      Fix summary:
+      {{fix}}
+
+      Second lint + test output:
+      {{lint2}}
+
+      Second-pass review:
+      {{evaluate2}}
+
+      Documentation summary:
+      {{document}}
+
+      Required structure (exact H2s):
+
+      ## Files changed
+      Bullet list, derived from the implement / fix / document summaries.
+
+      ## What was implemented
+      One short paragraph at the behavioral level.
+
+      ## Quality
+      One bullet per remaining concern (file:line + tier). State
+      explicitly if the second-pass review and second lint pass were
+      both clean.
+
+      ## Open questions
+      Bullet list, only if there are decisions the implementer punted on
+      that a human should look at. Omit the section if none.
+
+      Output ONLY the report body in Markdown. No preamble, no closing
+      meta-commentary.
