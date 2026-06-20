@@ -73,7 +73,7 @@ type Report struct {
 	Tasks   []TaskResult
 	Outputs map[workflow.TaskID]string
 	Usage   runtime.Usage
-	Params  workflow.ParamValues // Params carries opts.Params verbatim; nil when no params were used.
+	Params  workflow.ParamValues
 }
 
 // Hooks let callers observe per-task progress without owning an output sink.
@@ -83,9 +83,10 @@ type Report struct {
 // different tasks may interleave; implementations must be safe for
 // concurrent use.
 //
+// Consumers MUST use t.IsShell() to distinguish shell tasks from LLM tasks.
 // For a shell task, OnStart is invoked with empty runtime.Name, runtime.Model,
-// and runtime.Effort values — the CLI uses that as the discriminator to render
-// a shell-flavored progress line.
+// and runtime.Effort because those routing fields genuinely do not apply, but
+// their emptiness is not the contract: do not infer shell-ness from it.
 type Hooks struct {
 	OnStart  func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort)
 	OnFinish func(t workflow.Task, res TaskResult, err error)
@@ -162,16 +163,16 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				}
 			}
 
-			// Substitute the body (Prompt or Command) for both task kinds before
-			// dispatch. mu guards rep.Outputs; opts.Params is read-only after Run
-			// starts, no lock needed.
-			mu.Lock()
-			var body string
-			if t.Command != "" {
-				body = workflow.Substitute(t.Command, rep.Outputs, opts.Params)
-			} else {
-				body = workflow.Substitute(t.Prompt, rep.Outputs, opts.Params)
+			// Substitute the body for both task kinds before dispatch; IsShell
+			// selects Command vs Prompt as the source text. mu guards
+			// rep.Outputs; opts.Params is read-only after Run starts, no lock
+			// needed.
+			src := t.Prompt
+			if t.IsShell() {
+				src = t.Command
 			}
+			mu.Lock()
+			body := workflow.Substitute(src, rep.Outputs, opts.Params)
 			mu.Unlock()
 
 			var (
@@ -179,7 +180,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				runErr error
 			)
 
-			if t.Command != "" {
+			if t.IsShell() {
 				if hooks.OnStart != nil {
 					hooks.OnStart(*t, "", "", "")
 				}

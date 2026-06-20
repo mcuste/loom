@@ -84,17 +84,14 @@ func newCheckCmd() *cobra.Command {
 	return cmd
 }
 
-// addParamFlags registers the repeatable `-p` / `--param` flag for passing
-// workflow params on the command line. StringArrayVarP is used (not
-// StringSliceVarP) so commas inside values are preserved verbatim.
+// addParamFlags uses StringArrayVarP (not StringSliceVarP) so commas inside
+// values are preserved verbatim.
 func addParamFlags(cmd *cobra.Command, params *[]string) {
 	cmd.Flags().StringArrayVarP(params, "param", "p", nil,
 		"set a workflow parameter (repeatable), e.g. -p env=prod")
 }
 
-// doRun is the full execution path: parse, resolve params, then delegate to
-// the unified runWorkflow pipeline with an empty seed (a plain run executes
-// every task).
+// doRun passes an empty seed to runWorkflow so every task executes fresh.
 func doRun(w io.Writer, path string, paramArgs []string) error {
 	manifest, err := os.ReadFile(path)
 	if err != nil {
@@ -115,11 +112,10 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 	return runWorkflow(w, manifest, wf, resolved, cliParams, seedPlan{})
 }
 
-// doCheck mirrors doRun's parse + ResolveParams pipeline, then exits without
-// invoking the executor. A MissingRequiredParamError is treated as advisory
-// (warning + exit 0) so `loom check` doubles as a "what params does this
-// workflow need?" probe; CLI-hygiene errors (unknown keys, malformed args,
-// duplicates) remain hard failures.
+// doCheck treats MissingRequiredParamError as advisory (warning + exit 0) so
+// `loom check` doubles as a "what params does this workflow need?" probe;
+// CLI-hygiene errors (unknown keys, malformed args, duplicates) are still
+// hard failures.
 func doCheck(w io.Writer, path string, paramArgs []string) error {
 	wf, err := workflow.ParseFile(path)
 	if err != nil {
@@ -147,9 +143,7 @@ func doCheck(w io.Writer, path string, paramArgs []string) error {
 	return nil
 }
 
-// partialResolved rebuilds the resolved bag without the missing-required
-// check, so `loom check` can still print a meaningful plan when a required
-// param is absent. Keeps the merge order identical to ResolveParams.
+// partialResolved keeps the merge order identical to ResolveParams.
 func partialResolved(wf *workflow.Workflow, cli map[string]string) workflow.ParamValues {
 	out := make(workflow.ParamValues, len(wf.Params))
 	for _, p := range wf.Params {
@@ -163,9 +157,8 @@ func partialResolved(wf *workflow.Workflow, cli map[string]string) workflow.Para
 	return out
 }
 
-// stringifyParams converts a ParamValues bag into the plain string map the
-// store package persists. nil in → nil out so an empty params block stays
-// absent from the JSON via `omitempty`.
+// stringifyParams returns nil for an empty bag so `omitempty` keeps params
+// absent from the stored JSON rather than writing an empty object.
 func stringifyParams(p workflow.ParamValues) map[string]string {
 	if len(p) == 0 {
 		return nil
@@ -177,9 +170,8 @@ func stringifyParams(p workflow.ParamValues) map[string]string {
 	return out
 }
 
-// storeHooks adapts a store.Run into executor.Hooks. OnStart and OnFinish are
-// store methods whose signatures match the hook fields, so they bind directly
-// as method values with no translation layer.
+// storeHooks binds store.Run.OnStart and store.Run.OnFinish as method values
+// directly — their signatures match executor.Hooks with no adapter needed.
 func storeHooks(run *store.Run) executor.Hooks {
 	return executor.Hooks{
 		OnStart:  run.OnStart,
@@ -187,9 +179,7 @@ func storeHooks(run *store.Run) executor.Hooks {
 	}
 }
 
-// summaryFor projects an executor.Report into the slim store.Summary the
-// store needs at Close time. Returns nil when rep is nil so Close leaves the
-// totals unset.
+// summaryFor returns nil when rep is nil so store.Run.Close leaves totals unset.
 func summaryFor(rep *executor.Report) *store.Summary {
 	if rep == nil {
 		return nil
@@ -197,13 +187,10 @@ func summaryFor(rep *executor.Report) *store.Summary {
 	return &store.Summary{Usage: rep.Usage, TaskCount: len(rep.Tasks)}
 }
 
-// printPlan writes the workflow header, the params block (when present), and
-// the task execution order to w. It uses workflow.Effective so the printed
-// runtime/model/effort match what the runtime will actually see. The cli arg
-// drives the per-param provenance tag (cli vs default vs MISSING); the
-// resolved bag drives the printed value. When seeded is non-empty, ids in
-// the set are annotated and the section header shows the count separately,
-// so a resume plan tells the user which steps will be skipped.
+// printPlan uses workflow.Effective so printed runtime/model/effort match what
+// the runtime will actually see. cli drives the per-param provenance tag
+// (cli vs default vs MISSING). When seeded is non-empty the section header
+// separates the seeded count so a resume plan shows which steps are skipped.
 func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string, seeded map[workflow.TaskID]bool) {
 	fmt.Fprintf(w, "Workflow : %s\n", wf.ID)
 	if wf.Description != "" {
@@ -276,9 +263,6 @@ func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues
 	}
 }
 
-// paramSource picks the provenance tag for a declared param given the CLI map
-// and whether the resolved bag carried a value. `cli` wins over `default`;
-// absence is reported as `MISSING`.
 func paramSource(p workflow.Param, cli map[string]string, resolvedHasValue bool) string {
 	if _, ok := cli[string(p.Name)]; ok {
 		return "cli"
@@ -289,10 +273,6 @@ func paramSource(p workflow.Param, cli map[string]string, resolvedHasValue bool)
 	return "MISSING"
 }
 
-// quoteIfNeeded surrounds a value with quotes only when it would otherwise
-// be ambiguous in the printed plan (empty string, or leading/trailing
-// whitespace). Keeps the common case readable while preserving fidelity for
-// the corner cases.
 func quoteIfNeeded(s string) string {
 	if s == "" || strings.TrimSpace(s) != s {
 		return fmt.Sprintf("%q", s)
@@ -300,10 +280,8 @@ func quoteIfNeeded(s string) string {
 	return s
 }
 
-// hooks returns executor.Hooks that write per-task progress lines to w.
-// Under concurrent execution, OnStart and OnFinish for different tasks
-// interleave; the mutex serializes writes so a line never tears, and the
-// finish line carries the task id so output is still readable.
+// hooks serializes concurrent OnStart/OnFinish writes behind a mutex so
+// output lines never interleave mid-write.
 func hooks(w io.Writer, total int) executor.Hooks {
 	var (
 		step atomic.Int32
@@ -313,12 +291,12 @@ func hooks(w io.Writer, total int) executor.Hooks {
 		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
 			n := step.Add(1)
 			mu.Lock()
-			if rt == "" {
+			defer mu.Unlock()
+			if t.IsShell() {
 				fmt.Fprintf(w, "[%d/%d] %s (shell)\n", n, total, t.ID)
 			} else {
 				fmt.Fprintf(w, "[%d/%d] %s (%s/%s%s)\n", n, total, t.ID, rt, m, effortSuffix(e))
 			}
-			mu.Unlock()
 		},
 		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
 			mu.Lock()
@@ -342,10 +320,9 @@ func hooks(w io.Writer, total int) executor.Hooks {
 	}
 }
 
-// printSummary writes the final cost and token totals after a run. expected
-// is the number of tasks the executor was meant to run on this invocation
-// (full workflow for `loom run`, workflow minus seeded count for `loom
-// resume`); comparing against rep.Tasks decides the success line.
+// printSummary compares len(rep.Tasks) against expected to choose the success
+// or partial-failure line. expected is the full task count for `loom run` and
+// the non-seeded count for `loom resume`.
 func printSummary(w io.Writer, wf *workflow.Workflow, rep *executor.Report, expected int) {
 	const bar = "────────────────────────────────────────"
 	fmt.Fprintf(w, "\n%s\n", bar)
