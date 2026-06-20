@@ -86,6 +86,7 @@ func readNewRun(t *testing.T, wfID, skipID string) map[string]any {
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
 	}
+	var matches []string
 	for _, e := range entries {
 		name := e.Name()
 		if name == "latest.json" || filepath.Ext(name) != ".json" {
@@ -94,18 +95,23 @@ func readNewRun(t *testing.T, wfID, skipID string) map[string]any {
 		if strings.TrimSuffix(name, ".json") == skipID {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("read new run: %v", err)
-		}
-		var m map[string]any
-		if err := json.Unmarshal(data, &m); err != nil {
-			t.Fatalf("unmarshal new run: %v", err)
-		}
-		return m
+		matches = append(matches, name)
 	}
-	t.Fatalf("no new run record produced under %s", dir)
-	return nil
+	if len(matches) == 0 {
+		t.Fatalf("no new run record produced under %s", dir)
+	}
+	if len(matches) > 1 {
+		t.Fatalf("expected exactly one new run record under %s, found %d: %v", dir, len(matches), matches)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, matches[0]))
+	if err != nil {
+		t.Fatalf("read new run: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal new run: %v", err)
+	}
+	return m
 }
 
 // TestResumeCommand_SeedsOkTasksAndRerunsFailed pins the contract: tasks with

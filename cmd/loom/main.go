@@ -11,16 +11,13 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -95,10 +92,9 @@ func addParamFlags(cmd *cobra.Command, params *[]string) {
 		"set a workflow parameter (repeatable), e.g. -p env=prod")
 }
 
-// doRun is the full execution path: parse, resolve params, open a store run,
-// execute with joined progress+store hooks, finalize the store, and print the
-// summary. The store's Close error is reported independently so a write failure
-// after a successful run does not mask the nil return value.
+// doRun is the full execution path: parse, resolve params, then delegate to
+// the unified runWorkflow pipeline with an empty seed (a plain run executes
+// every task).
 func doRun(w io.Writer, path string, paramArgs []string) error {
 	manifest, err := os.ReadFile(path)
 	if err != nil {
@@ -116,32 +112,7 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	printPlan(w, wf, resolved, cliParams, nil)
-	fmt.Fprintln(w)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	run, err := store.Open(wf.ID, manifest, store.Config{
-		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
-		Params:  stringifyParams(resolved),
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "Run file : %s\n\n", run.Path())
-
-	rep, err := executor.Run(ctx, wf, executor.JoinHooks(
-		hooks(w, len(wf.Tasks)),
-		storeHooks(run),
-	), executor.Options{Params: resolved})
-	if closeErr := run.Close(summaryFor(rep), err); closeErr != nil {
-		fmt.Fprintf(w, "  store: %v\n", closeErr)
-	}
-	if rep != nil {
-		printSummary(w, wf, rep, len(wf.Tasks))
-	}
-	return err
+	return runWorkflow(w, manifest, wf, resolved, cliParams, seedPlan{})
 }
 
 // doCheck mirrors doRun's parse + ResolveParams pipeline, then exits without
@@ -162,7 +133,9 @@ func doCheck(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		var miss *workflow.MissingRequiredParamError
 		if errors.As(err, &miss) {
-			fmt.Fprintf(w, "warning: required param %q not supplied\n", miss.Name)
+			if _, werr := fmt.Fprintf(w, "warning: required param %q not supplied\n", miss.Name); werr != nil {
+				return werr
+			}
 			// Rebuild a partial bag so MISSING entries still surface in the
 			// printed plan rather than the section truncating silently.
 			resolved = partialResolved(wf, cliParams)

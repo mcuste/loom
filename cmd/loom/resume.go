@@ -1,20 +1,16 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -96,14 +92,7 @@ func runFromRecord(w io.Writer, manifest []byte, rec *store.RunRecord, paramArgs
 		inWorkflow[wf.Tasks[i].ID] = true
 	}
 
-	type seedEntry struct {
-		ID     workflow.TaskID
-		Output string
-		Prompt string
-		Cmd    string
-	}
-	seed := make(map[workflow.TaskID]string, len(rec.Tasks))
-	var seedOrder []seedEntry
+	plan := seedPlan{seed: make(map[workflow.TaskID]string, len(rec.Tasks))}
 	for _, t := range rec.Tasks {
 		if t.Status != store.StatusOK {
 			continue
@@ -112,66 +101,16 @@ func runFromRecord(w io.Writer, manifest []byte, rec *store.RunRecord, paramArgs
 		if !inWorkflow[tid] {
 			continue
 		}
-		seed[tid] = t.Output
-		seedOrder = append(seedOrder, seedEntry{ID: tid, Output: t.Output, Prompt: t.Prompt, Cmd: t.Command})
+		plan.seed[tid] = t.Output
+		plan.entries = append(plan.entries, seedEntry{
+			id:      tid,
+			prompt:  t.Prompt,
+			command: t.Command,
+			output:  t.Output,
+		})
 	}
 
-	seededSet := make(map[workflow.TaskID]bool, len(seed))
-	for id := range seed {
-		seededSet[id] = true
-	}
-
-	printPlan(w, wf, resolved, cliParams, seededSet)
-	fmt.Fprintln(w)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	run, err := store.Open(wf.ID, manifest, store.Config{
-		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
-		Params:  stringifyParams(resolved),
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "Run file : %s\n\n", run.Path())
-	if len(seed) > 0 {
-		fmt.Fprintf(w, "Seeded   : %d task(s) from prior run\n\n", len(seed))
-	}
-
-	// Stamp each seeded task into the new run record as an already-ok entry
-	// so a future resume of this run can find them. The executor itself
-	// fires no hooks for seeded tasks (by design), so we drive the store
-	// hooks directly here, mimicking what the executor would have done.
-	sh := storeHooks(run)
-	for _, s := range seedOrder {
-		t := wf.ByID(s.ID)
-		if t.IsShell() {
-			sh.OnStart(*t, "", "", "")
-		} else {
-			rt, m, e := wf.Effective(t)
-			sh.OnStart(*t, rt, m, e)
-		}
-		sh.OnFinish(*t, executor.TaskResult{
-			TaskID:  s.ID,
-			Prompt:  s.Prompt,
-			Command: s.Cmd,
-			Output:  s.Output,
-		}, nil)
-	}
-
-	expected := len(wf.Tasks) - len(seed)
-	rep, runErr := executor.Run(ctx, wf, executor.JoinHooks(
-		hooks(w, expected),
-		storeHooks(run),
-	), executor.Options{Params: resolved, Seed: seed})
-	if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
-		fmt.Fprintf(w, "  store: %v\n", closeErr)
-	}
-	if rep != nil {
-		printSummary(w, wf, rep, expected)
-	}
-	return runErr
+	return runWorkflow(w, manifest, wf, resolved, cliParams, plan)
 }
 
 // findRunRecord resolves a user-supplied run id to a path under .loom/runs.
