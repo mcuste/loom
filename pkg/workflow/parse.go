@@ -103,7 +103,7 @@ func Parse(data []byte) (*Workflow, error) {
 		case rt.Prompt != "" && rt.Command != "":
 			return nil, fmt.Errorf("task %q: %w", tid, ErrPromptAndCommandSet)
 		}
-		// body is the text that placeholder validation runs against —
+		// body is the text that placeholder validation runs against;
 		// substitution targets the same string at execution time.
 		body := rt.Prompt
 		if rt.Command != "" {
@@ -119,6 +119,10 @@ func Parse(data []byte) (*Workflow, error) {
 		if err := checkMalformedParamPlaceholders(tid, body); err != nil {
 			return nil, err
 		}
+		retry, err := parseRetry(tid, rt.Retry)
+		if err != nil {
+			return nil, err
+		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
 			ID:          tid,
@@ -129,6 +133,7 @@ func Parse(data []byte) (*Workflow, error) {
 			Model:       runtime.Model(rt.Model),
 			Effort:      runtime.Effort(rt.Effort),
 			DependsOn:   deps,
+			Retry:       retry,
 		})
 	}
 
@@ -147,7 +152,7 @@ func Parse(data []byte) (*Workflow, error) {
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
 		if t.IsShell() {
-			// Shell tasks bypass the runtime registry entirely — runtime/model/
+			// Shell tasks bypass the runtime registry entirely; runtime/model/
 			// effort have no meaning, and the task-level reject above guarantees
 			// they are unset on t.
 			continue
@@ -208,6 +213,10 @@ type rawTask struct {
 	Prompt      string   `yaml:"prompt"`
 	Command     string   `yaml:"command"`
 	DependsOn   []string `yaml:"depends_on"`
+	// Retry is captured as a raw yaml.Node so the parser can distinguish an
+	// absent `retry:` key (zero value, no retry) from a present-but-partial
+	// block whose `backoff`/`on` defaults must be filled in.
+	Retry yaml.Node `yaml:"retry"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`
@@ -373,6 +382,50 @@ func (e *UnusedParamError) Error() string {
 	return fmt.Sprintf("param %q is declared but never referenced", e.Name)
 }
 
+// InvalidRetryMaxError reports a task `retry.max` that is negative. Max counts
+// retries after the first attempt, so it must be >= 0.
+type InvalidRetryMaxError struct {
+	Task TaskID
+	Max  int
+}
+
+func (e *InvalidRetryMaxError) Error() string {
+	return fmt.Sprintf("task %q: invalid retry max %d: must be >= 0", e.Task, e.Max)
+}
+
+// UnknownBackoffError reports a task `retry.backoff` that is not one of
+// none|constant|exponential.
+type UnknownBackoffError struct {
+	Task    TaskID
+	Backoff string
+}
+
+func (e *UnknownBackoffError) Error() string {
+	return fmt.Sprintf("task %q: unknown retry backoff %q: must be one of none|constant|exponential", e.Task, e.Backoff)
+}
+
+// UnknownRetryClassError reports a task `retry.on` entry that names an error
+// class the classifier does not recognize. Only "transient" is known for now.
+type UnknownRetryClassError struct {
+	Task  TaskID
+	Class string
+}
+
+func (e *UnknownRetryClassError) Error() string {
+	return fmt.Sprintf("task %q: unknown retry class %q: only \"transient\" is recognized", e.Task, e.Class)
+}
+
+// UnknownRetryFieldError reports a key inside a task `retry:` mapping that is
+// not one of max|backoff|on.
+type UnknownRetryFieldError struct {
+	Task  TaskID
+	Field string
+}
+
+func (e *UnknownRetryFieldError) Error() string {
+	return fmt.Sprintf("task %q: retry: unknown field %q", e.Task, e.Field)
+}
+
 // parseParams validates the raw `params:` block and returns the resolved
 // Params slice in declaration order plus an index from name → slice position.
 //
@@ -464,6 +517,61 @@ func decodeRawParam(entry *yaml.Node) (rawParam, *yaml.Node, error) {
 		}
 	}
 	return rp, defNode, nil
+}
+
+// parseRetry decodes a task's `retry:` mapping into a Retry policy. An absent
+// block (zero-value node) yields the zero-value Retry (no retry). A present
+// block defaults backoff to exponential and on to [transient] when omitted,
+// then validates max >= 0, backoff against the enum, and every on entry against
+// the known error classes.
+func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
+	if node.Kind == 0 {
+		return Retry{}, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return Retry{}, fmt.Errorf("task %q: retry must be a mapping", tid)
+	}
+	r := Retry{Backoff: BackoffExponential, On: []string{"transient"}}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k, v := node.Content[i], node.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			return Retry{}, fmt.Errorf("task %q: retry key must be a scalar", tid)
+		}
+		switch k.Value {
+		case "max":
+			if err := v.Decode(&r.Max); err != nil {
+				return Retry{}, fmt.Errorf("task %q: retry.max: %w", tid, err)
+			}
+			if r.Max < 0 {
+				return Retry{}, &InvalidRetryMaxError{Task: tid, Max: r.Max}
+			}
+		case "backoff":
+			var b string
+			if err := v.Decode(&b); err != nil {
+				return Retry{}, fmt.Errorf("task %q: retry.backoff: %w", tid, err)
+			}
+			switch Backoff(b) {
+			case BackoffNone, BackoffConstant, BackoffExponential:
+				r.Backoff = Backoff(b)
+			default:
+				return Retry{}, &UnknownBackoffError{Task: tid, Backoff: b}
+			}
+		case "on":
+			var on []string
+			if err := v.Decode(&on); err != nil {
+				return Retry{}, fmt.Errorf("task %q: retry.on: %w", tid, err)
+			}
+			for _, c := range on {
+				if c != "transient" {
+					return Retry{}, &UnknownRetryClassError{Task: tid, Class: c}
+				}
+			}
+			r.On = on
+		default:
+			return Retry{}, &UnknownRetryFieldError{Task: tid, Field: k.Value}
+		}
+	}
+	return r, nil
 }
 
 // buildDeps validates a task's depends_on list and checks that every

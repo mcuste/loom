@@ -73,7 +73,7 @@ type Report struct {
 	Tasks   []TaskResult
 	Outputs map[workflow.TaskID]string
 	Usage   runtime.Usage
-	Params  workflow.ParamValues // carries opts.Params verbatim; nil when no params were used.
+	Params  workflow.ParamValues // Params carries opts.Params verbatim; nil when no params were used.
 }
 
 // Hooks let callers observe per-task progress without owning an output sink.
@@ -94,13 +94,18 @@ type Hooks struct {
 // Options configures a Run call. The zero value is valid and runs the workflow
 // with no parameters.
 type Options struct {
-	Params workflow.ParamValues // resolved params; read-only after Run starts.
+	Params workflow.ParamValues // Params holds resolved parameter values; read-only after Run starts.
 	// Seed maps task ids to outputs that should be treated as already-produced.
 	// Seeded tasks have their gates closed with the supplied value before any
 	// goroutine launches, so unseeded downstream tasks see the seed via
 	// {{id}} substitution. Seeded tasks fire no hooks and do not appear in
 	// Report.Tasks. Entries naming an id not in the workflow are ignored.
 	Seed map[workflow.TaskID]string
+	// RetryBaseDelay is the base backoff delay between retry attempts. When
+	// zero, defaultRetryBaseDelay (1s) applies. Carried per-call rather than as
+	// package state so concurrent Run calls (and parallel tests) never share a
+	// mutable delay.
+	RetryBaseDelay time.Duration
 }
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
@@ -115,6 +120,10 @@ type Options struct {
 // of the caller's ctx propagates the same way.
 func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
 	order := wf.Plan()
+	baseDelay := opts.RetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = defaultRetryBaseDelay
+	}
 	rep := &Report{
 		Tasks:   make([]TaskResult, 0, len(order)),
 		Outputs: make(map[workflow.TaskID]string, len(order)),
@@ -174,7 +183,9 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				if hooks.OnStart != nil {
 					hooks.OnStart(*t, "", "", "")
 				}
-				res, runErr = runShell(gctx, t, body)
+				res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
+					return runShell(gctx, t, body)
+				})
 			} else {
 				rt, model, effort := wf.Effective(t)
 				runner, ok := runtime.Lookup(rt)
@@ -185,7 +196,9 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				if hooks.OnStart != nil {
 					hooks.OnStart(*t, rt, model, effort)
 				}
-				res, runErr = runLLM(gctx, t, body, runner, model, effort, sysPrompt)
+				res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
+					return runLLM(gctx, t, body, runner, model, effort, sysPrompt)
+				})
 			}
 
 			if hooks.OnFinish != nil {

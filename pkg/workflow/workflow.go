@@ -163,9 +163,40 @@ type Task struct {
 	// Effort overrides Workflow.Effort for this task when non-empty.
 	Effort runtime.Effort
 	// DependsOn names the tasks this task depends on. Populated from explicit
-	// `depends_on` in YAML and auto-extended at parse for every `{{id}}`
-	// placeholder found in the prompt.
+	// `depends_on` in YAML; the parser validates that every `{{id}}` placeholder
+	// in the prompt appears here but does not extend this list implicitly.
 	DependsOn []TaskID
+	// Retry is the task's retry policy. The zero value means "no retry"
+	// (Max == 0). Meaningful for both LLM and shell tasks.
+	Retry Retry
+}
+
+// Backoff names the delay schedule applied between retry attempts.
+type Backoff string
+
+const (
+	// BackoffNone retries with no delay between attempts.
+	BackoffNone Backoff = "none"
+	// BackoffConstant waits a fixed base delay before every retry.
+	BackoffConstant Backoff = "constant"
+	// BackoffExponential doubles the base delay each retry (base, 2*base, ...).
+	BackoffExponential Backoff = "exponential"
+)
+
+// Retry is a per-task retry policy. Zero value means no retry.
+type Retry struct {
+	// Max is the number of retries after the first attempt. 0 disables retry.
+	Max int
+	// Backoff selects the inter-attempt delay schedule.
+	Backoff Backoff
+	// On lists the error classes that are retryable. Only "transient" is
+	// recognized for now.
+	On []string
+}
+
+// Enabled reports whether the policy permits at least one retry (Max > 0).
+func (r Retry) Enabled() bool {
+	return r.Max > 0
 }
 
 // IsShell reports whether t is a shell task (has Command set) rather than an
