@@ -25,16 +25,6 @@ const maxBackoffShift = 30
 // resets/refusals/EOF/"temporarily unavailable". Matched case-insensitively.
 var transientRe = regexp.MustCompile(`(?i)(50[0234]\b|\b429\b|rate limit|too many requests|overloaded|timeout|timed out|connection reset|connection refused|\beof\b|temporarily unavailable)`)
 
-// isTransient reports whether err looks like a transient, retryable failure.
-// A nil error is never transient. The match runs case-insensitively over
-// err.Error(), so it sees ExecError/ShellError-wrapped stderr the same way.
-func isTransient(err error) bool {
-	if err == nil {
-		return false
-	}
-	return transientRe.MatchString(err.Error())
-}
-
 // runWithRetry invokes attempt, then retries it up to t.Retry.Max additional
 // times while the returned error is classified as a retryable class in
 // t.Retry.On. Between attempts it sleeps per the backoff schedule using base as
@@ -61,12 +51,14 @@ func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, att
 	return res, err
 }
 
-// retryable reports whether err belongs to a class the policy opts into. Only
-// the "transient" class is recognized; an error qualifies when "transient" is
-// listed in r.On AND isTransient classifies it as such.
+// retryable reports whether err belongs to a class the policy opts into. Each
+// class name in r.On is looked up in the classifier registry; err qualifies if
+// any registered classifier matches it. Class names with no classifier (none
+// can be admitted by the parser, per the drift guard) are ignored.
 func retryable(r workflow.Retry, err error) bool {
 	for _, class := range r.On {
-		if class == "transient" && isTransient(err) {
+		classify, ok := classifiers[workflow.RetryClass(class)]
+		if ok && classify(err) {
 			return true
 		}
 	}

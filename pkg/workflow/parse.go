@@ -232,8 +232,11 @@ type rawParam struct {
 // Sentinel parse errors. Typed errors below cover structured failures with
 // fields the caller may want to inspect.
 var (
-	ErrNoTasks          = errors.New("workflow has no tasks")
-	ErrMissingPrompt    = errors.New("task has no prompt")
+	// ErrNoTasks is returned when the workflow YAML declares no tasks.
+	ErrNoTasks = errors.New("workflow has no tasks")
+	// ErrMissingPrompt is returned when a task declares no prompt.
+	ErrMissingPrompt = errors.New("task has no prompt")
+	// ErrMissingParamName is returned when a params entry omits the name field.
 	ErrMissingParamName = errors.New("param has no name")
 
 	// ErrMissingPromptOrCommand reports a task that sets neither `prompt:` nor
@@ -405,14 +408,15 @@ func (e *UnknownBackoffError) Error() string {
 }
 
 // UnknownRetryClassError reports a task `retry.on` entry that names an error
-// class the classifier does not recognize. Only "transient" is known for now.
+// class the classifier does not recognize. The recognized vocabulary is
+// sourced from RetryClasses so the message cannot drift.
 type UnknownRetryClassError struct {
 	Task  TaskID
 	Class string
 }
 
 func (e *UnknownRetryClassError) Error() string {
-	return fmt.Sprintf("task %q: unknown retry class %q: only \"transient\" is recognized", e.Task, e.Class)
+	return fmt.Sprintf("task %q: unknown retry class %q: only %s is recognized", e.Task, e.Class, recognizedRetryClasses())
 }
 
 // UnknownRetryFieldError reports a key inside a task `retry:` mapping that is
@@ -531,7 +535,7 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 	if node.Kind != yaml.MappingNode {
 		return Retry{}, fmt.Errorf("task %q: retry must be a mapping", tid)
 	}
-	r := Retry{Backoff: BackoffExponential, On: []string{"transient"}}
+	r := Retry{Backoff: BackoffExponential, On: []string{string(RetryClassTransient)}}
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		k, v := node.Content[i], node.Content[i+1]
 		if k.Kind != yaml.ScalarNode {
@@ -562,7 +566,7 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 				return Retry{}, fmt.Errorf("task %q: retry.on: %w", tid, err)
 			}
 			for _, c := range on {
-				if c != "transient" {
+				if !ValidRetryClass(RetryClass(c)) {
 					return Retry{}, &UnknownRetryClassError{Task: tid, Class: c}
 				}
 			}

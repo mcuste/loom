@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
-// TestIsTransient_ClassifiesRetryableSignals pins which error messages the
-// classifier treats as transient (case-insensitive). Each subtest is one
-// scenario; the assertion target is the boolean classification.
-func TestIsTransient_ClassifiesRetryableSignals(t *testing.T) {
+// TestTransientClassifier_ClassifiesRetryableSignals pins which error messages
+// the classifier treats as transient (case-insensitive) via the plain-string
+// fallback path. Each subtest is one scenario; the assertion target is the
+// boolean classification.
+func TestTransientClassifier_ClassifiesRetryableSignals(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -35,18 +36,18 @@ func TestIsTransient_ClassifiesRetryableSignals(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := isTransient(errors.New(tc.msg)); got != tc.want {
-				t.Errorf("isTransient(%q) = %v, want %v", tc.msg, got, tc.want)
+			if got := transientClassifier(errors.New(tc.msg)); got != tc.want {
+				t.Errorf("transientClassifier(%q) = %v, want %v", tc.msg, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestIsTransient_NilErrorIsNotTransient pins that a nil error is never
+// TestTransientClassifier_NilErrorIsNotTransient pins that a nil error is never
 // classified transient.
-func TestIsTransient_NilErrorIsNotTransient(t *testing.T) {
+func TestTransientClassifier_NilErrorIsNotTransient(t *testing.T) {
 	t.Parallel()
-	if isTransient(nil) {
-		t.Errorf("isTransient(nil) = true, want false")
+	if transientClassifier(nil) {
+		t.Errorf("transientClassifier(nil) = true, want false")
 	}
 }
