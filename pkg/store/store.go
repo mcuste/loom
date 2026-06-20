@@ -13,12 +13,12 @@
 // atomically (write to .tmp, rename) on every OnStart/OnFinish so a crash
 // mid-run still leaves a valid file on disk.
 //
-// The store owns its own input types ([TaskResult], [Summary]) so it does
-// not depend on the executor. Callers translate their per-task results into
-// these types in a thin adapter; the store package never reaches into
-// runtime or workflow internals beyond the small surface those packages
-// already expose. Disk errors are reported via the optional OnError callback
-// so a failing disk does not abort a workflow.
+// Run.OnFinish consumes [executor.TaskResult] directly, so the CLI hooks the
+// store into the executor with no field-by-field translation at the boundary;
+// the store owns only [Summary], its workflow-level Close input. The package
+// never reaches into runtime or workflow internals beyond the small surface
+// those packages already expose. Disk errors are reported via the optional
+// OnError callback so a failing disk does not abort a workflow.
 package store
 
 import (
@@ -31,23 +31,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
-
-// TaskResult is the per-task input to [Run.OnFinish]. It mirrors the fields
-// the store persists; callers translate from their own per-task result type
-// (e.g. executor.TaskResult) at the hook boundary.
-//
-// For shell tasks, Prompt holds the substituted command line, Usage is zero,
-// and Command carries the original (pre-substitution) command body.
-type TaskResult struct {
-	Prompt  string
-	Command string
-	Output  string
-	Usage   runtime.Usage
-	Elapsed time.Duration
-}
 
 // Summary is the workflow-level input to [Run.Close]: aggregate accounting
 // plus the count of tasks that completed successfully. Pass nil to Close to
@@ -165,60 +152,59 @@ func (r *Run) ID() string { return r.id }
 // Path returns the absolute or root-relative path of the run JSON file.
 func (r *Run) Path() string { return r.path }
 
-// OnStart returns an [executor.Hooks].OnStart adapter that appends a task
-// entry with its resolved routing fields and rewrites the run file.
-func (r *Run) OnStart() func(workflow.Task, runtime.Name, runtime.Model, runtime.Effort) {
-	return func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		idx, ok := r.tasks[t.ID]
-		if !ok {
-			r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
-			idx = len(r.state.Tasks) - 1
-			r.tasks[t.ID] = idx
-		}
-		tr := &r.state.Tasks[idx]
-		tr.Runtime = string(rt)
-		tr.Model = string(m)
-		tr.Effort = string(e)
-		tr.StartedAt = r.now()
-		tr.Status = StatusStarted
-		if err := r.flushLocked(); err != nil {
-			r.report(fmt.Errorf("store: task %s: write: %w", t.ID, err))
-		}
+// OnStart satisfies [executor.Hooks].OnStart: it appends a task entry with
+// its resolved routing fields and rewrites the run file. The store receiver
+// is the only captured state, so callers pass the method value directly
+// (executor.Hooks{OnStart: run.OnStart}).
+func (r *Run) OnStart(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx, ok := r.tasks[t.ID]
+	if !ok {
+		r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
+		idx = len(r.state.Tasks) - 1
+		r.tasks[t.ID] = idx
+	}
+	tr := &r.state.Tasks[idx]
+	tr.Runtime = string(rt)
+	tr.Model = string(m)
+	tr.Effort = string(e)
+	tr.StartedAt = r.now()
+	tr.Status = StatusStarted
+	if err := r.flushLocked(); err != nil {
+		r.report(fmt.Errorf("store: task %s: write: %w", t.ID, err))
 	}
 }
 
-// OnFinish returns a closure that records a task's final prompt, output,
-// usage, and status, then rewrites the run file. Errors are surfaced via
-// the configured OnError callback and do not propagate to the caller.
-func (r *Run) OnFinish() func(workflow.Task, TaskResult, error) {
-	return func(t workflow.Task, res TaskResult, runErr error) {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		idx, ok := r.tasks[t.ID]
-		if !ok {
-			r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
-			idx = len(r.state.Tasks) - 1
-			r.tasks[t.ID] = idx
-		}
-		tr := &r.state.Tasks[idx]
-		tr.Prompt = res.Prompt
-		tr.Command = res.Command
-		tr.Output = res.Output
-		tr.Usage = usageDTO(res.Usage)
-		tr.FinishedAt = r.now()
-		tr.ElapsedMs = res.Elapsed.Milliseconds()
-		if runErr != nil {
-			tr.Status = StatusFailed
-			tr.Error = runErr.Error()
-		} else {
-			tr.Status = StatusOK
-			tr.Error = ""
-		}
-		if err := r.flushLocked(); err != nil {
-			r.report(fmt.Errorf("store: task %s: write: %w", t.ID, err))
-		}
+// OnFinish satisfies [executor.Hooks].OnFinish: it records a task's final
+// prompt, output, usage, and status, then rewrites the run file. Errors are
+// surfaced via the configured OnError callback and do not propagate to the
+// caller. As with OnStart, callers pass the method value directly.
+func (r *Run) OnFinish(t workflow.Task, res executor.TaskResult, runErr error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx, ok := r.tasks[t.ID]
+	if !ok {
+		r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
+		idx = len(r.state.Tasks) - 1
+		r.tasks[t.ID] = idx
+	}
+	tr := &r.state.Tasks[idx]
+	tr.Prompt = res.Prompt
+	tr.Command = res.Command
+	tr.Output = res.Output
+	tr.Usage = usageDTO(res.Usage)
+	tr.ElapsedMs = res.Elapsed.Milliseconds()
+	tr.FinishedAt = r.now()
+	if runErr != nil {
+		tr.Status = StatusFailed
+		tr.Error = runErr.Error()
+	} else {
+		tr.Status = StatusOK
+		tr.Error = ""
+	}
+	if err := r.flushLocked(); err != nil {
+		r.report(fmt.Errorf("store: task %s: write: %w", t.ID, err))
 	}
 }
 
@@ -336,15 +322,15 @@ func Load(path string) (*RunRecord, error) {
 // the store writes; a field rename here is a compile-time error at the call
 // site instead of a silent JSON decode miss.
 type RunRecord struct {
-	RunID      string       `json:"run_id"`
-	WorkflowID string       `json:"workflow_id"`
-	StartedAt  time.Time    `json:"started_at"`
-	FinishedAt time.Time    `json:"finished_at,omitzero"`
-	ElapsedMs  int64        `json:"elapsed_ms,omitempty"`
-	Status     string       `json:"status"`
-	Error      string       `json:"error,omitempty"`
-	TaskCount  int          `json:"task_count,omitempty"`
-	Usage      usageJSON    `json:"usage,omitzero"`
+	RunID      string            `json:"run_id"`
+	WorkflowID string            `json:"workflow_id"`
+	StartedAt  time.Time         `json:"started_at"`
+	FinishedAt time.Time         `json:"finished_at,omitzero"`
+	ElapsedMs  int64             `json:"elapsed_ms,omitempty"`
+	Status     string            `json:"status"`
+	Error      string            `json:"error,omitempty"`
+	TaskCount  int               `json:"task_count,omitempty"`
+	Usage      usageJSON         `json:"usage,omitzero"`
 	Manifest   string            `json:"manifest"`
 	Params     map[string]string `json:"params,omitempty"`
 	Tasks      []TaskRecord      `json:"tasks"`

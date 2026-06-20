@@ -95,6 +95,10 @@ func addParamFlags(cmd *cobra.Command, params *[]string) {
 		"set a workflow parameter (repeatable), e.g. -p env=prod")
 }
 
+// doRun is the full execution path: parse, resolve params, open a store run,
+// execute with joined progress+store hooks, finalize the store, and print the
+// summary. The store's Close error is reported independently so a write failure
+// after a successful run does not mask the nil return value.
 func doRun(w io.Writer, path string, paramArgs []string) error {
 	manifest, err := os.ReadFile(path)
 	if err != nil {
@@ -200,22 +204,13 @@ func stringifyParams(p workflow.ParamValues) map[string]string {
 	return out
 }
 
-// storeHooks adapts a store.Run into executor.Hooks: OnStart passes through
-// unchanged; OnFinish translates the executor's TaskResult into the store's
-// own type at the boundary so the store package stays independent of the
-// executor.
+// storeHooks adapts a store.Run into executor.Hooks. OnStart and OnFinish are
+// store methods whose signatures match the hook fields, so they bind directly
+// as method values with no translation layer.
 func storeHooks(run *store.Run) executor.Hooks {
-	finish := run.OnFinish()
 	return executor.Hooks{
-		OnStart: run.OnStart(),
-		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
-			finish(t, store.TaskResult{
-				Prompt:  res.Prompt,
-				Output:  res.Output,
-				Usage:   res.Usage,
-				Elapsed: res.Elapsed,
-			}, err)
-		},
+		OnStart:  run.OnStart,
+		OnFinish: run.OnFinish,
 	}
 }
 

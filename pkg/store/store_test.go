@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -107,8 +108,8 @@ func TestOnStartOnFinishUpdatesTaskEntry(t *testing.T) {
 	}
 
 	task := workflow.Task{ID: "alpha"}
-	run.OnStart()(task, "claude-code", "sonnet", "medium")
-	run.OnFinish()(task, store.TaskResult{
+	run.OnStart(task, "claude-code", "sonnet", "medium")
+	run.OnFinish(task, executor.TaskResult{
 		Prompt:  "substituted prompt",
 		Output:  "model output",
 		Usage:   runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5},
@@ -154,8 +155,8 @@ func TestOnFinishRecordsTaskError(t *testing.T) {
 	}
 
 	task := workflow.Task{ID: "beta"}
-	run.OnStart()(task, "rt", "m", "")
-	run.OnFinish()(task, store.TaskResult{}, errors.New("kaboom"))
+	run.OnStart(task, "rt", "m", "")
+	run.OnFinish(task, executor.TaskResult{}, errors.New("kaboom"))
 
 	tasks := readRun(t, run.Path())["tasks"].([]any)
 	got := tasks[0].(map[string]any)
@@ -177,8 +178,8 @@ func TestCloseFinalizesAndLinksLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	run.OnFinish()(workflow.Task{ID: "a"}, store.TaskResult{Elapsed: 10 * time.Millisecond}, nil)
-	run.OnFinish()(workflow.Task{ID: "b"}, store.TaskResult{Elapsed: 20 * time.Millisecond}, nil)
+	run.OnFinish(workflow.Task{ID: "a"}, executor.TaskResult{Elapsed: 10 * time.Millisecond}, nil)
+	run.OnFinish(workflow.Task{ID: "b"}, executor.TaskResult{Elapsed: 20 * time.Millisecond}, nil)
 
 	summary := &store.Summary{
 		TaskCount: 2,
@@ -238,8 +239,8 @@ func TestAtomicRewriteLeavesNoTmp(t *testing.T) {
 	}
 	for i := range 5 {
 		task := workflow.Task{ID: workflow.TaskID(fmt.Sprintf("t%d", i))}
-		run.OnStart()(task, "rt", "m", "")
-		run.OnFinish()(task, store.TaskResult{}, nil)
+		run.OnStart(task, "rt", "m", "")
+		run.OnFinish(task, executor.TaskResult{}, nil)
 	}
 	if _, err := os.Stat(run.Path() + ".tmp"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tmp file lingered: err=%v", err)
@@ -270,8 +271,8 @@ func TestConcurrentOnFinishIsSafe(t *testing.T) {
 			defer wg.Done()
 			id := workflow.TaskID(fmt.Sprintf("t%02d", i))
 			task := workflow.Task{ID: id}
-			run.OnStart()(task, "rt", "m", "")
-			run.OnFinish()(task, store.TaskResult{Output: fmt.Sprintf("out-%d", i)}, nil)
+			run.OnStart(task, "rt", "m", "")
+			run.OnFinish(task, executor.TaskResult{Output: fmt.Sprintf("out-%d", i)}, nil)
 		}()
 	}
 	wg.Wait()
@@ -347,21 +348,21 @@ func TestShellTaskCommandRoundTrips(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// Shell task: Command holds original body; Prompt holds substituted cmdline;
-	// no runtime/model/effort (executor passes empty strings for shell tasks).
+	// Shell task: Command holds the substituted command line and Prompt stays
+	// empty, matching what executor.runShell produces; no runtime/model/effort
+	// (executor passes empty strings for shell tasks).
 	shellTask := workflow.Task{ID: "shell-echo"}
-	run.OnStart()(shellTask, "", "", "")
-	run.OnFinish()(shellTask, store.TaskResult{
-		Prompt:  "echo hello world",
-		Command: "echo {{msg}}",
+	run.OnStart(shellTask, "", "", "")
+	run.OnFinish(shellTask, executor.TaskResult{
+		Command: "echo hello world",
 		Output:  "hello world\n",
 		Elapsed: 50 * time.Millisecond,
 	}, nil)
 
 	// LLM task: only Prompt set; Command must stay absent in JSON.
 	llmTask := workflow.Task{ID: "llm-summarise"}
-	run.OnStart()(llmTask, "claude-code", "sonnet", "low")
-	run.OnFinish()(llmTask, store.TaskResult{
+	run.OnStart(llmTask, "claude-code", "sonnet", "low")
+	run.OnFinish(llmTask, executor.TaskResult{
 		Prompt:  "summarise this",
 		Output:  "summary here",
 		Usage:   runtime.Usage{InputTokens: 5, OutputTokens: 3},
@@ -379,16 +380,17 @@ func TestShellTaskCommandRoundTrips(t *testing.T) {
 		byID[entry["id"].(string)] = entry
 	}
 
-	// Shell task: command and prompt both present; runtime/model/effort absent.
+	// Shell task: command present; prompt absent (runShell never sets it);
+	// runtime/model/effort absent.
 	shell := byID["shell-echo"]
 	if shell == nil {
 		t.Fatalf("shell-echo task missing from JSON")
 	}
-	if got := shell["command"]; got != "echo {{msg}}" {
-		t.Errorf("shell-echo command = %v, want %q", got, "echo {{msg}}")
+	if got := shell["command"]; got != "echo hello world" {
+		t.Errorf("shell-echo command = %v, want %q", got, "echo hello world")
 	}
-	if got := shell["prompt"]; got != "echo hello world" {
-		t.Errorf("shell-echo prompt = %v, want %q", got, "echo hello world")
+	if v, present := shell["prompt"]; present && v != "" {
+		t.Errorf("shell-echo prompt = %v, want absent", v)
 	}
 	if got := shell["output"]; got != "hello world\n" {
 		t.Errorf("shell-echo output = %v, want %q", got, "hello world\n")
