@@ -7,11 +7,8 @@ package codex
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
-	"strings"
 
 	"github.com/mcuste/loom/pkg/runtime"
 )
@@ -71,59 +68,43 @@ func costUSD(model runtime.Model, u runtime.Usage) float64 {
 		float64(u.OutputTokens)*p.output) / perMillion
 }
 
-type spec struct{}
-
-// Compile-time proof that spec satisfies the Subprocess contract.
-var _ runtime.Subprocess = spec{}
-
-func (spec) Validate(req runtime.Request) error {
-	if req.Model == "" {
-		return runtime.ErrMissingModel
-	}
-	if _, ok := models[req.Model]; !ok {
-		return fmt.Errorf("model %q: %w", req.Model, runtime.ErrUnsupportedModel)
-	}
-	if req.Effort != "" {
-		if _, ok := efforts[req.Effort]; !ok {
-			return fmt.Errorf("effort %q: %w", req.Effort, runtime.ErrUnsupportedEffort)
-		}
-	}
+var spec = runtime.Spec{
+	Name:       Name,
+	BinaryName: binary,
+	Models:     models,
+	Efforts:    efforts,
 	// `codex exec` has no system-prompt flag; AGENTS.md is the only mechanism
 	// and is filesystem-resident, so a per-request SystemPrompt cannot be
 	// honored without silently changing semantics.
-	if req.SystemPrompt != "" {
-		return runtime.ErrUnsupportedSystemPrompt
-	}
-	return nil
+	AcceptSystemPrompt: false,
+	Args:               args,
+	Decode:             decode,
 }
 
-func (spec) Binary() string { return binary }
-
-func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, error) {
-	args := []string{
+func args(req runtime.Request) []string {
+	a := []string{
 		"exec",
 		"--json",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--model", string(req.Model),
 	}
 	if req.Effort != "" {
-		args = append(args, "-c", "model_reasoning_effort="+string(req.Effort))
+		a = append(a, "-c", "model_reasoning_effort="+string(req.Effort))
 	}
-	args = append(args, req.Prompt)
+	return append(a, req.Prompt)
+}
 
-	cmd := exec.CommandContext(ctx, binary, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return runtime.Response{}, &ExecError{Err: err, Stderr: stderr.String()}
-	}
-
+// decode scans codex's JSONL event stream for the final agent message and turn
+// usage, then derives TotalCostUSD from the model pricing. The model is taken
+// from whichever event echoes it (codex stamps the resolved model on its
+// stream); an absent model falls through costUSD to a non-fatal 0.
+func decode(stdout []byte) (runtime.Response, error) {
 	var (
 		lastAgentMessage string
 		usage            runtime.Usage
+		model            runtime.Model
 	)
-	scanner := bufio.NewScanner(&stdout)
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
 	// Individual JSONL events (especially reasoning items) can exceed the
 	// default 64 KiB scanner buffer; raise the ceiling to 1 MiB per line.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -138,6 +119,7 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"item"`
+			Model runtime.Model `json:"model"`
 			Usage struct {
 				InputTokens           int `json:"input_tokens"`
 				CachedInputTokens     int `json:"cached_input_tokens"`
@@ -146,7 +128,10 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(line, &ev); err != nil {
-			return runtime.Response{}, fmt.Errorf("codex: parse json: %w", err)
+			return runtime.Response{}, fmt.Errorf("parse json: %w", err)
+		}
+		if ev.Model != "" {
+			model = ev.Model
 		}
 		switch ev.Type {
 		case "item.completed":
@@ -164,10 +149,13 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return runtime.Response{}, fmt.Errorf("codex: read json stream: %w", err)
+		return runtime.Response{}, fmt.Errorf("read json stream: %w", err)
+	}
+	if lastAgentMessage == "" {
+		return runtime.Response{}, fmt.Errorf("no agent_message in event stream")
 	}
 
-	usage.TotalCostUSD = costUSD(req.Model, usage)
+	usage.TotalCostUSD = costUSD(model, usage)
 	return runtime.Response{
 		Output: lastAgentMessage,
 		Usage:  usage,
@@ -175,23 +163,5 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 }
 
 func init() {
-	runtime.Register(Name, spec{})
+	runtime.Register(Name, spec)
 }
-
-// ExecError is returned when the `codex` subprocess fails. It carries the
-// wrapped exec error and the verbatim stderr so callers (and `errors.Is` /
-// `errors.As`) can inspect each separately instead of digging through a
-// formatted string.
-type ExecError struct {
-	Err    error
-	Stderr string
-}
-
-func (e *ExecError) Error() string {
-	if e.Stderr == "" {
-		return "codex: " + e.Err.Error()
-	}
-	return fmt.Sprintf("codex: %s: %s", e.Err, strings.TrimSpace(e.Stderr))
-}
-
-func (e *ExecError) Unwrap() error { return e.Err }

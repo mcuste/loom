@@ -5,12 +5,8 @@
 package claudecode
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
-	"strings"
 
 	"github.com/mcuste/loom/pkg/runtime"
 )
@@ -25,51 +21,32 @@ var (
 	efforts = map[runtime.Effort]struct{}{"low": {}, "medium": {}, "high": {}, "max": {}}
 )
 
-type spec struct{}
-
-// Compile-time proof that spec satisfies the Subprocess contract.
-var _ runtime.Subprocess = spec{}
-
-func (spec) Validate(req runtime.Request) error {
-	if req.Model == "" {
-		return runtime.ErrMissingModel
-	}
-	if _, ok := models[req.Model]; !ok {
-		return fmt.Errorf("model %q: %w", req.Model, runtime.ErrUnsupportedModel)
-	}
-	if req.Effort != "" {
-		if _, ok := efforts[req.Effort]; !ok {
-			return fmt.Errorf("effort %q: %w", req.Effort, runtime.ErrUnsupportedEffort)
-		}
-	}
-	// SystemPrompt is always accepted; no check needed.
-	return nil
+var spec = runtime.Spec{
+	Name:               Name,
+	BinaryName:         binary,
+	Models:             models,
+	Efforts:            efforts,
+	AcceptSystemPrompt: true,
+	Args:               args,
+	Decode:             decode,
 }
 
-func (spec) Binary() string { return binary }
-
-func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, error) {
-	args := []string{
+func args(req runtime.Request) []string {
+	a := []string{
 		"-p",
 		"--output-format", "json",
 		"--model", string(req.Model),
 	}
 	if req.Effort != "" {
-		args = append(args, "--effort", string(req.Effort))
+		a = append(a, "--effort", string(req.Effort))
 	}
 	if req.SystemPrompt != "" {
-		args = append(args, "--system-prompt", req.SystemPrompt)
+		a = append(a, "--system-prompt", req.SystemPrompt)
 	}
-	args = append(args, "--dangerously-skip-permissions", req.Prompt)
+	return append(a, "--dangerously-skip-permissions", req.Prompt)
+}
 
-	cmd := exec.CommandContext(ctx, binary, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return runtime.Response{}, &ExecError{Err: err, Stderr: stderr.String()}
-	}
-
+func decode(stdout []byte) (runtime.Response, error) {
 	var env struct {
 		Result string `json:"result"`
 		Usage  struct {
@@ -79,8 +56,8 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 		} `json:"usage"`
 		TotalCostUSD float64 `json:"total_cost_usd"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		return runtime.Response{}, fmt.Errorf("claude-code: parse json: %w", err)
+	if err := json.Unmarshal(stdout, &env); err != nil {
+		return runtime.Response{}, fmt.Errorf("parse json: %w", err)
 	}
 	return runtime.Response{
 		Output: env.Result,
@@ -94,23 +71,5 @@ func (spec) Run(ctx context.Context, req runtime.Request) (runtime.Response, err
 }
 
 func init() {
-	runtime.Register(Name, spec{})
+	runtime.Register(Name, spec)
 }
-
-// ExecError is returned when the `claude` subprocess fails. It carries the
-// wrapped exec error and the verbatim stderr so callers (and `errors.Is` /
-// `errors.As`) can inspect each separately instead of digging through a
-// formatted string.
-type ExecError struct {
-	Err    error
-	Stderr string
-}
-
-func (e *ExecError) Error() string {
-	if e.Stderr == "" {
-		return "claude-code: " + e.Err.Error()
-	}
-	return fmt.Sprintf("claude-code: %s: %s", e.Err, strings.TrimSpace(e.Stderr))
-}
-
-func (e *ExecError) Unwrap() error { return e.Err }
