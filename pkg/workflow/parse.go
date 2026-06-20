@@ -611,8 +611,10 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 		deps = append(deps, d)
 	}
 
-	for _, m := range placeholderRe.FindAllStringSubmatch(prompt, -1) {
-		name := m[1]
+	// Task refs first, then param refs: this order makes the first error
+	// returned byte-identical to the pre-refactor two-loop scan.
+	taskRefs, paramRefs := scanPlaceholders(prompt)
+	for _, name := range taskRefs {
 		if _, ok := declaredSet[TaskID(name)]; ok {
 			continue
 		}
@@ -623,12 +625,31 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 		return nil, err
 	}
 
-	for _, m := range paramPlaceholderRe.FindAllStringSubmatch(prompt, -1) {
-		if _, ok := params[ParamName(m[1])]; !ok {
-			return nil, &UnknownParamError{Task: tid, Name: m[1]}
+	for _, name := range paramRefs {
+		if _, ok := params[ParamName(name)]; !ok {
+			return nil, &UnknownParamError{Task: tid, Name: name}
 		}
 	}
 	return deps, nil
+}
+
+// scanPlaceholders walks text in a SINGLE pass with combinedPlaceholderRe and
+// returns the task-id placeholder names and the param placeholder names in
+// source order. The combined regex disambiguates `{{params.x}}` (param branch,
+// capture group 1) from `{{id}}` (task branch, capture group 2), so the two
+// slices never cross-contaminate.
+func scanPlaceholders(text string) (taskRefs []string, paramRefs []string) {
+	for _, m := range combinedPlaceholderRe.FindAllStringSubmatch(text, -1) {
+		// combinedPlaceholderRe has two capture groups: group 1 is the param
+		// name (the `params.` branch), group 2 is the bare task id. Exactly one
+		// is non-empty per match.
+		if m[1] != "" {
+			paramRefs = append(paramRefs, m[1])
+		} else {
+			taskRefs = append(taskRefs, m[2])
+		}
+	}
+	return taskRefs, paramRefs
 }
 
 // brokenBraceRe matches any `{{...}}` token whose body contains no closing
@@ -663,13 +684,14 @@ func validateSystemPrompt(sp string, params map[ParamName]struct{}) error {
 	if sp == "" {
 		return nil
 	}
+	taskRefs, paramRefs := scanPlaceholders(sp)
 	// Task-id placeholders are never resolvable in system_prompt.
-	for _, m := range placeholderRe.FindAllStringSubmatch(sp, -1) {
-		return &SystemPlaceholderTaskRefError{Name: m[1]}
+	if len(taskRefs) > 0 {
+		return &SystemPlaceholderTaskRefError{Name: taskRefs[0]}
 	}
-	for _, m := range paramPlaceholderRe.FindAllStringSubmatch(sp, -1) {
-		if _, ok := params[ParamName(m[1])]; !ok {
-			return &UnknownParamError{Task: "", Name: m[1]}
+	for _, name := range paramRefs {
+		if _, ok := params[ParamName(name)]; !ok {
+			return &UnknownParamError{Task: "", Name: name}
 		}
 	}
 	if err := checkMalformedParamPlaceholders("", sp); err != nil {
@@ -686,8 +708,9 @@ func checkUnusedParams(wf *Workflow) error {
 	}
 	used := make(map[ParamName]struct{}, len(wf.Params))
 	scan := func(s string) {
-		for _, m := range paramPlaceholderRe.FindAllStringSubmatch(s, -1) {
-			used[ParamName(m[1])] = struct{}{}
+		_, paramRefs := scanPlaceholders(s)
+		for _, name := range paramRefs {
+			used[ParamName(name)] = struct{}{}
 		}
 	}
 	scan(wf.SystemPrompt)
@@ -716,6 +739,10 @@ func findCycle(wf *Workflow) ([]TaskID, bool) {
 		black = 2
 	)
 	color := make(map[TaskID]int, len(wf.Tasks))
+	// Forward depends-on edges (u -> each task u depends on) so a DFS that
+	// re-enters a gray node has found a true dependency cycle. This is the
+	// OPPOSITE direction from Plan's reverse dependents-edges; the two are kept
+	// separate on purpose, so no shared builder.
 	adj := make(map[TaskID][]TaskID, len(wf.Tasks))
 	for _, t := range wf.Tasks {
 		adj[t.ID] = t.DependsOn

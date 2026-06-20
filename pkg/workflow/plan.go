@@ -16,6 +16,10 @@ func (w *Workflow) Plan() []TaskID {
 		pos[t.ID] = i
 	}
 
+	// Reverse dependents-edges (dependency -> dependent) plus in-degrees so
+	// Kahn's algorithm can release a task once all its dependencies are done.
+	// This is the OPPOSITE direction from findCycle's forward depends-on edges;
+	// the two are kept separate on purpose, so no shared builder.
 	inDeg := make(map[TaskID]int, len(w.Tasks))
 	adj := make(map[TaskID][]TaskID, len(w.Tasks))
 	for _, t := range w.Tasks {
