@@ -1,8 +1,8 @@
 package workflow
 
 import (
-	"errors"
 	"fmt"
+	"math"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +21,7 @@ type InvalidBudgetError struct {
 	Value float64
 }
 
+// Error reports the invalid value that was rejected.
 func (e *InvalidBudgetError) Error() string {
 	return fmt.Sprintf("invalid budget max_cost_usd %v: must be a positive float", e.Value)
 }
@@ -29,8 +30,20 @@ func (e *InvalidBudgetError) Error() string {
 // `max_cost_usd`.
 type UnknownBudgetFieldError struct{ Field string }
 
+// Error reports the unrecognized field name.
 func (e *UnknownBudgetFieldError) Error() string {
 	return fmt.Sprintf("budget: unknown field %q", e.Field)
+}
+
+// MalformedBudgetError reports a structurally invalid `budget:` block: the node
+// was not a mapping, or a key inside it was not a scalar. It is typed (rather
+// than a bare errors.New) so callers can errors.As it apart from
+// InvalidBudgetError and UnknownBudgetFieldError.
+type MalformedBudgetError struct{ Reason string }
+
+// Error reports the reason the budget block's structure was rejected.
+func (e *MalformedBudgetError) Error() string {
+	return "budget: " + e.Reason
 }
 
 // parseBudget decodes a `budget:` mapping (workflow- or task-level) into a
@@ -42,13 +55,13 @@ func parseBudget(node yaml.Node) (*Budget, error) {
 		return nil, nil
 	}
 	if node.Kind != yaml.MappingNode {
-		return nil, errors.New("budget: must be a mapping")
+		return nil, &MalformedBudgetError{Reason: "must be a mapping"}
 	}
 	b := &Budget{}
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		k, v := node.Content[i], node.Content[i+1]
 		if k.Kind != yaml.ScalarNode {
-			return nil, errors.New("budget: key must be a scalar")
+			return nil, &MalformedBudgetError{Reason: "key must be a scalar"}
 		}
 		switch k.Value {
 		case "max_cost_usd":
@@ -59,7 +72,11 @@ func parseBudget(node yaml.Node) (*Budget, error) {
 			return nil, &UnknownBudgetFieldError{Field: k.Value}
 		}
 	}
-	if b.MaxCostUSD <= 0 {
+	// Reject anything that is not a finite positive float. The `<= 0` form would
+	// admit NaN (NaN <= 0 is false in IEEE 754), which silently disables
+	// enforcement downstream since `spent > NaN` is always false; `!(x > 0)`
+	// rejects NaN, zero, and negatives, and the IsInf guard rejects +Inf.
+	if !(b.MaxCostUSD > 0) || math.IsInf(b.MaxCostUSD, 1) {
 		return nil, &InvalidBudgetError{Value: b.MaxCostUSD}
 	}
 	return b, nil

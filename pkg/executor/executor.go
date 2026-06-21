@@ -194,6 +194,18 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 
 	var mu sync.Mutex
 
+	// budgetInFlight serializes budget-gated dispatches so the check-then-commit
+	// is atomic. A workflow budget is enforced against the cumulative cost of
+	// *completed* tasks, but a task's cost is only known after it runs; without
+	// serialization, two goroutines whose deps resolve concurrently both read a
+	// stale spend, both pass the check, and the concurrent subgraph overshoots
+	// the limit. Admitting at most one budget-gated task at a time guarantees its
+	// cost is recorded before the next task's check runs, bounding the overshoot
+	// to the single task that crosses the limit (matching the serial semantics).
+	// budgetReady wakes a waiter once the in-flight task records its cost.
+	budgetInFlight := false
+	budgetReady := sync.NewCond(&mu)
+
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tid := range order {
 		if _, seeded := opts.Seed[tid]; seeded {
@@ -245,18 +257,40 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 			// rather than start another task. Spend strictly greater than the
 			// limit is "exceeded"; landing exactly on it is allowed.
 			if wf.Budget != nil {
-				// Read and compare under the same lock so the check is atomic with
-				// respect to result-posting: a goroutine that acquires mu after a
-				// sibling's increment observes the updated spend rather than a stale
-				// snapshot. Splitting the read and the compare across an unlock would
-				// let concurrent subgraphs race on a value that is already obsolete.
+				// Wait until no other budget-gated task is in flight, then check and
+				// claim the slot under the same lock. This makes the check-then-commit
+				// atomic: the in-flight task's cost is recorded (and the slot
+				// released) before the next task is admitted, so concurrent subgraphs
+				// cannot each read a stale spend and collectively overshoot the limit.
 				mu.Lock()
+				for budgetInFlight {
+					budgetReady.Wait()
+					// A wake may come from a sibling's cancellation rather than a slot
+					// release; bail without claiming the slot so we never block g.Wait.
+					if gctx.Err() != nil {
+						mu.Unlock()
+						return gctx.Err()
+					}
+				}
 				spent := rep.Usage.TotalCostUSD
-				exceeded := spent > wf.Budget.MaxCostUSD
-				mu.Unlock()
-				if exceeded {
+				if spent > wf.Budget.MaxCostUSD {
+					// Wake peers so they re-evaluate and drain (each will also abort)
+					// rather than block forever on the slot this goroutine never takes.
+					budgetReady.Broadcast()
+					mu.Unlock()
 					return &BudgetExceededError{Limit: wf.Budget.MaxCostUSD, Spent: spent}
 				}
+				budgetInFlight = true
+				mu.Unlock()
+				// Release the slot once this task returns (after its cost is recorded
+				// on the success path, or immediately on a dispatch error), waking the
+				// next waiter.
+				defer func() {
+					mu.Lock()
+					budgetInFlight = false
+					budgetReady.Broadcast()
+					mu.Unlock()
+				}()
 			}
 
 			var (

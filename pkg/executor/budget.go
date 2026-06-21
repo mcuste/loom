@@ -11,6 +11,7 @@ type BudgetExceededError struct {
 	Spent float64
 }
 
+// Error formats the configured limit and the accumulated spend that exceeded it.
 func (e *BudgetExceededError) Error() string {
-	return fmt.Sprintf("cost budget exceeded: spent %.4f of %.4f limit", e.Spent, e.Limit)
+	return fmt.Sprintf("cost budget exceeded: spent %g of %g limit", e.Spent, e.Limit)
 }

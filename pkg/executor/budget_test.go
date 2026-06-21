@@ -149,12 +149,15 @@ func TestRun_OverBudgetAbortsBeforeDispatch(t *testing.T) {
 	}
 }
 
-// TestRun_PerTaskBudgetCapsRetries pins that a per-task budget caps that task's
-// retries: a runtime that always fails transiently at cost 0.5 per attempt,
-// under retry.max=10 but a 1.0 per-task budget, is invoked only until its
-// accumulated cost would exceed the budget — three attempts (0.5, 1.0, 1.5),
-// not the eleven that retry.max alone would permit.
-func TestRun_PerTaskBudgetCapsRetries(t *testing.T) {
+// TestRun_PerTaskBudgetStopsRetries pins how a per-task budget bounds retries:
+// the limit is a pre-attempt gate, not a hard ceiling on spend. A runtime that
+// always fails transiently at cost 0.5 per attempt, under retry.max=10 but a
+// 1.0 per-task budget, runs three attempts (0.5, 1.0, 1.5) before the next
+// attempt is blocked, not the eleven that retry.max alone would permit. Note
+// the final spend (1.5) exceeds the 1.0 limit: the attempt that crosses the
+// limit still completes; only the *following* attempt is aborted, mirroring the
+// workflow-level pre-dispatch rule.
+func TestRun_PerTaskBudgetStopsRetries(t *testing.T) {
 	t.Parallel()
 	flaky := &costFlakyRuntime{cost: 0.5, failErr: errors.New(transientMsg)}
 	name := "budget-flaky-" + t.Name() + "-" + strconv.FormatUint(budgetSeq.Add(1), 10)
@@ -185,5 +188,43 @@ func TestRun_PerTaskBudgetCapsRetries(t *testing.T) {
 	}
 	if n := flaky.callCount(); n != 3 {
 		t.Errorf("attempts = %d, want 3 (per-task budget caps retries)", n)
+	}
+}
+
+// TestRun_ConcurrentSubgraphEnforcesBudget pins that the workflow budget holds
+// across a concurrent subgraph, not just a serial chain. Three independent
+// tasks (no dependencies) share a 0.75 budget at cost 0.5 each, so all three
+// would dispatch at once. Serializing the check-then-commit means exactly two
+// complete (spend 0.5 then 1.0) before the third is aborted with a
+// BudgetExceededError; without it, all three would race past a stale spend
+// read and the limit would be silently exceeded with no error.
+func TestRun_ConcurrentSubgraphEnforcesBudget(t *testing.T) {
+	t.Parallel()
+	wf := &workflow.Workflow{
+		ID:      "wf",
+		Runtime: "budget-cost",
+		Model:   "m1",
+		Budget:  &workflow.Budget{MaxCostUSD: 0.75},
+		Tasks: []workflow.Task{
+			{ID: "a", Prompt: "x"},
+			{ID: "b", Prompt: "x"},
+			{ID: "c", Prompt: "x"},
+		},
+	}
+
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+
+	var got *executor.BudgetExceededError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As BudgetExceededError failed; err = %v", err)
+	}
+	if got.Limit != 0.75 {
+		t.Errorf("BudgetExceededError.Limit = %v, want 0.75", got.Limit)
+	}
+	if got.Spent != 1.0 {
+		t.Errorf("BudgetExceededError.Spent = %v, want 1.0", got.Spent)
+	}
+	if rep == nil || len(rep.Tasks) != 2 {
+		t.Errorf("rep.Tasks = %d, want 2 (one of three concurrent tasks aborted)", len(rep.Tasks))
 	}
 }

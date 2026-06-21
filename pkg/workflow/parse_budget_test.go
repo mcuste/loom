@@ -113,6 +113,31 @@ tasks:
 	}
 }
 
+// TestParse_RejectsEmptyBudgetMapping pins the distinct failure mode where the
+// `budget:` block is present but the `max_cost_usd` key is absent: the
+// zero-value path yields InvalidBudgetError{Value: 0}, not a malformed-structure
+// error.
+func TestParse_RejectsEmptyBudgetMapping(t *testing.T) {
+	t.Parallel()
+	src := `
+name: wf_budget
+runtime: test-rt
+model: m1
+budget: {}
+tasks:
+  - id: a
+    prompt: A
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.InvalidBudgetError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As InvalidBudgetError failed; err = %v", err)
+	}
+	if got.Value != 0 {
+		t.Errorf("InvalidBudgetError.Value = %v, want 0", got.Value)
+	}
+}
+
 // TestParse_RejectsNonPositivePerTaskBudget pins that a per-task max_cost_usd
 // that is not a positive float is rejected with InvalidBudgetError.
 func TestParse_RejectsNonPositivePerTaskBudget(t *testing.T) {

@@ -40,28 +40,34 @@ var transientRe = regexp.MustCompile(`(?i)(50[0234]\b|\b429\b|rate limit|too man
 // from one that exhausted its retries via errors.As. Spend landing exactly on
 // the limit still permits the next retry, mirroring the workflow-level rule.
 func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, attempt func() (TaskResult, error)) (TaskResult, error) {
-	res, err := attempt()
-	spent := res.Usage.TotalCostUSD
-	if err == nil || !t.Retry.Enabled() {
-		return res, err
-	}
-	for i := 1; i <= t.Retry.Max; i++ {
-		if !retryable(t.Retry, err) {
-			return res, err
-		}
+	var (
+		res   TaskResult
+		err   error
+		spent float64
+	)
+	for i := 0; ; i++ {
+		// Enforce the per-task budget BEFORE every attempt, including the first,
+		// mirroring the workflow-level pre-dispatch check. Spend strictly greater
+		// than the limit aborts with a typed *BudgetExceededError; landing exactly
+		// on the limit still permits the attempt. The first attempt (spent == 0)
+		// is never blocked, but the check lives at the top of the loop so the
+		// structure is symmetric with the workflow-level rule rather than special
+		// casing retries.
 		if t.Budget != nil && spent > t.Budget.MaxCostUSD {
 			return res, &BudgetExceededError{Limit: t.Budget.MaxCostUSD, Spent: spent}
 		}
-		if waitErr := sleepBackoff(ctx, t.Retry.Backoff, base, i); waitErr != nil {
-			return res, waitErr
-		}
 		res, err = attempt()
 		spent += res.Usage.TotalCostUSD
-		if err == nil {
-			return res, nil
+		if err == nil || !t.Retry.Enabled() {
+			return res, err
+		}
+		if i >= t.Retry.Max || !retryable(t.Retry, err) {
+			return res, err
+		}
+		if waitErr := sleepBackoff(ctx, t.Retry.Backoff, base, i+1); waitErr != nil {
+			return res, waitErr
 		}
 	}
-	return res, err
 }
 
 // retryable reports whether err belongs to a class the policy opts into. Each
