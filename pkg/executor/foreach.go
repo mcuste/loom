@@ -35,7 +35,7 @@ func runForEach(ctx context.Context, t *workflow.Task, mu *sync.Mutex, outputs m
 	var items []string
 	if t.ForEachSource != "" {
 		mu.Lock()
-		resolved := workflow.Substitute(t.ForEachSource, outputs, opts.Params, opts.State)
+		resolved := workflow.Substitute(t.ForEachSource, outputs, opts.Params, opts.State, nil)
 		mu.Unlock()
 		items = parseList(resolved)
 	} else {
@@ -76,7 +76,7 @@ func runForEach(ctx context.Context, t *workflow.Task, mu *sync.Mutex, outputs m
 			// before (not re-expanded across) the second pass.
 			withAs := strings.ReplaceAll(src, placeholder, item)
 			mu.Lock()
-			body := workflow.Substitute(withAs, outputs, opts.Params, opts.State)
+			body := workflow.Substitute(withAs, outputs, opts.Params, opts.State, nil)
 			mu.Unlock()
 
 			if t.IsShell() {

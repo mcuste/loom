@@ -110,14 +110,18 @@ func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 			t.Errorf("paramPlaceholderRe did not capture %q from {{params.%s}}; got %v — regex drift", s, s, m)
 		}
 		// combinedPlaceholderRe distinguishes branches via capture groups: group
-		// 1 is the param name, group 2 is the state key, group 3 is the task id.
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 4 || m[1] != s || m[2] != "" || m[3] != "" {
+		// 1 is the param name, group 2 is the state key, group 3 is the prev id,
+		// group 4 is the task id.
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 5 || m[1] != s || m[2] != "" || m[3] != "" || m[4] != "" {
 			t.Errorf("combinedPlaceholderRe param branch dropped %q from {{params.%s}}; got %v — regex drift", s, s, m)
 		}
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{state." + s + "}}"); len(m) != 4 || m[2] != s || m[1] != "" || m[3] != "" {
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{state." + s + "}}"); len(m) != 5 || m[2] != s || m[1] != "" || m[3] != "" || m[4] != "" {
 			t.Errorf("combinedPlaceholderRe state branch dropped %q from {{state.%s}}; got %v — regex drift", s, s, m)
 		}
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 4 || m[3] != s || m[1] != "" || m[2] != "" {
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{prev." + s + "}}"); len(m) != 5 || m[3] != s || m[1] != "" || m[2] != "" || m[4] != "" {
+			t.Errorf("combinedPlaceholderRe prev branch dropped %q from {{prev.%s}}; got %v — regex drift", s, s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 5 || m[4] != s || m[1] != "" || m[2] != "" || m[3] != "" {
 			t.Errorf("combinedPlaceholderRe task branch dropped %q from {{%s}}; got %v — regex drift", s, s, m)
 		}
 	}
@@ -134,6 +138,12 @@ func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 		}
 		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); m != nil {
 			t.Errorf("combinedPlaceholderRe param branch matched {{params.%s}}; got %v — regex drift", s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{state." + s + "}}"); m != nil {
+			t.Errorf("combinedPlaceholderRe state branch matched {{state.%s}}; got %v — regex drift", s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{prev." + s + "}}"); m != nil {
+			t.Errorf("combinedPlaceholderRe prev branch matched {{prev.%s}}; got %v — regex drift", s, m)
 		}
 		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); m != nil {
 			t.Errorf("combinedPlaceholderRe task branch matched {{%s}}; got %v — regex drift", s, m)

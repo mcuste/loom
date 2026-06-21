@@ -146,7 +146,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, nil, "", "", "")
 		} else {
 			st.mu.Lock()
-			body := workflow.Substitute(t.Command, st.rep.Outputs, opts.Params, opts.State)
+			body := workflow.Substitute(t.Command, st.rep.Outputs, opts.Params, opts.State, nil)
 			st.mu.Unlock()
 			res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 				return runShell(ctx, t, body)
@@ -158,7 +158,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		if !ok {
 			return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 		}
-		sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params, opts.State)
+		sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params, opts.State, nil)
 		if hooks.OnStart != nil {
 			hooks.OnStart(*t, rt, model, effort)
 		}
@@ -173,7 +173,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt)
 		} else {
 			st.mu.Lock()
-			body := workflow.Substitute(t.Prompt, st.rep.Outputs, opts.Params, opts.State)
+			body := workflow.Substitute(t.Prompt, st.rep.Outputs, opts.Params, opts.State, nil)
 			st.mu.Unlock()
 			dispatch := func() (TaskResult, error) {
 				return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {

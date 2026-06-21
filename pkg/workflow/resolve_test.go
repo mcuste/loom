@@ -51,7 +51,7 @@ func TestSubstitute(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workflow.Substitute(tc.in, outputs, nil, nil)
+			got := workflow.Substitute(tc.in, outputs, nil, nil, nil)
 			if got != tc.want {
 				t.Fatalf("Substitute(%q) = %q, want %q", tc.in, got, tc.want)
 			}
@@ -65,7 +65,7 @@ func TestSubstitute(t *testing.T) {
 func TestSubstituteSinglePassParamValue(t *testing.T) {
 	outputs := map[workflow.TaskID]string{"a": "Apple"}
 	params := workflow.ParamValues{"x": "{{a}}"}
-	got := workflow.Substitute("got {{params.x}}", outputs, params, nil)
+	got := workflow.Substitute("got {{params.x}}", outputs, params, nil, nil)
 	if got != "got {{a}}" {
 		t.Fatalf("Substitute = %q, want %q (param value must not be re-expanded)", got, "got {{a}}")
 	}
@@ -77,14 +77,14 @@ func TestSubstituteSinglePassParamValue(t *testing.T) {
 func TestSubstituteSinglePassTaskOutput(t *testing.T) {
 	outputs := map[workflow.TaskID]string{"a": "{{params.token}}"}
 	params := workflow.ParamValues{"token": "SECRET"}
-	got := workflow.Substitute("got {{a}}", outputs, params, nil)
+	got := workflow.Substitute("got {{a}}", outputs, params, nil, nil)
 	if got != "got {{params.token}}" {
 		t.Fatalf("Substitute = %q, want %q (task output must not be re-expanded)", got, "got {{params.token}}")
 	}
 }
 
 func TestSubstituteUnknownParamLeftInPlace(t *testing.T) {
-	got := workflow.Substitute("got {{params.ghost}}", nil, workflow.ParamValues{}, nil)
+	got := workflow.Substitute("got {{params.ghost}}", nil, workflow.ParamValues{}, nil, nil)
 	if got != "got {{params.ghost}}" {
 		t.Fatalf("Substitute = %q, want unchanged", got)
 	}
@@ -92,7 +92,7 @@ func TestSubstituteUnknownParamLeftInPlace(t *testing.T) {
 
 func TestSubstituteNilParamsMap(t *testing.T) {
 	outputs := map[workflow.TaskID]string{"a": "Apple"}
-	got := workflow.Substitute("got {{a}} and {{params.x}}", outputs, nil, nil)
+	got := workflow.Substitute("got {{a}} and {{params.x}}", outputs, nil, nil, nil)
 	if got != "got Apple and {{params.x}}" {
 		t.Fatalf("Substitute = %q, want %q", got, "got Apple and {{params.x}}")
 	}
@@ -102,7 +102,7 @@ func TestSubstituteNilParamsMap(t *testing.T) {
 // the matching state value.
 func TestSubstituteStateHit(t *testing.T) {
 	state := map[string]string{"done": "item-1"}
-	got := workflow.Substitute("skip {{state.done}}", nil, nil, state)
+	got := workflow.Substitute("skip {{state.done}}", nil, nil, state, nil)
 	if got != "skip item-1" {
 		t.Fatalf("Substitute = %q, want %q", got, "skip item-1")
 	}
@@ -112,7 +112,7 @@ func TestSubstituteStateHit(t *testing.T) {
 // state key with no entry substitutes to the empty string rather than being
 // left verbatim like an unknown task/param placeholder.
 func TestSubstituteStateMissCollapsesToEmpty(t *testing.T) {
-	got := workflow.Substitute("before {{state.ghost}} after", nil, nil, nil)
+	got := workflow.Substitute("before {{state.ghost}} after", nil, nil, nil, nil)
 	if got != "before  after" {
 		t.Fatalf("Substitute = %q, want %q", got, "before  after")
 	}
@@ -124,21 +124,22 @@ func TestSubstituteStateMissCollapsesToEmpty(t *testing.T) {
 func TestSubstituteStateNoDoubleExpansion(t *testing.T) {
 	outputs := map[workflow.TaskID]string{"a": "Apple"}
 	state := map[string]string{"x": "{{a}}"}
-	got := workflow.Substitute("got {{state.x}}", outputs, nil, state)
+	got := workflow.Substitute("got {{state.x}}", outputs, nil, state, nil)
 	if got != "got {{a}}" {
 		t.Fatalf("Substitute = %q, want %q (state value must not be re-expanded)", got, "got {{a}}")
 	}
 }
 
-// TestSubstituteAllThreeNamespaces pins that task, param, and state
+// TestSubstituteAllFourNamespaces pins that task, param, state, and prev
 // placeholders are spliced together in one pass.
-func TestSubstituteAllThreeNamespaces(t *testing.T) {
+func TestSubstituteAllFourNamespaces(t *testing.T) {
 	outputs := map[workflow.TaskID]string{"a": "A"}
 	params := workflow.ParamValues{"p": "P"}
 	state := map[string]string{"s": "S"}
-	got := workflow.Substitute("{{a}}-{{params.p}}-{{state.s}}", outputs, params, state)
-	if got != "A-P-S" {
-		t.Fatalf("Substitute = %q, want %q", got, "A-P-S")
+	prev := map[workflow.TaskID]string{"r": "R"}
+	got := workflow.Substitute("{{a}}-{{params.p}}-{{state.s}}-{{prev.r}}", outputs, params, state, prev)
+	if got != "A-P-S-R" {
+		t.Fatalf("Substitute = %q, want %q", got, "A-P-S-R")
 	}
 }
 

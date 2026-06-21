@@ -44,19 +44,18 @@ var (
 	// name must satisfy identifierClass, the same alphabet as a ParamName.
 	paramPlaceholderRe = regexp.MustCompile(`\{\{params\.(` + identifierClass + `)\}\}`)
 
-	// combinedPlaceholderRe matches `{{params.name}}`, `{{state.key}}`, and
-	// `{{id}}` in a single pass. Capture group 1 is the param name (non-empty
-	// for a param match); group 2 is the state key (non-empty for a state
-	// match); group 3 is the task id (non-empty for a task match). Used by
-	// Substitute to splice all three kinds of placeholder in one pass so a
-	// substituted value containing `{{taskid}}` text is never re-expanded.
-	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|state\.(` + identifierClass + `)|(` + identifierClass + `))\}\}`)
+	// combinedPlaceholderRe matches `{{params.name}}`, `{{state.key}}`,
+	// `{{prev.id}}`, and `{{id}}` in a single pass. Capture group 1 is the param
+	// name (non-empty for a param match); group 2 is the state key (non-empty for
+	// a state match); group 3 is the prev id (non-empty for a prev match); group 4
+	// is the task id (non-empty for a task match). Used by Substitute to splice
+	// all four kinds of placeholder in one pass so a substituted value containing
+	// `{{taskid}}` text is never re-expanded.
+	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|state\.(` + identifierClass + `)|prev\.(` + identifierClass + `)|(` + identifierClass + `))\}\}`)
 
 	// prevPlaceholderRe matches `{{prev.id}}` placeholders, which reference the
 	// prior iteration's output of a member task inside a scoped loop. The
 	// captured name must satisfy identifierClass, the same alphabet as a TaskID.
-	// The leading `prev.` segment carries a dot, so combinedPlaceholderRe never
-	// matches these tokens; the parser validates and substitutes them separately.
 	prevPlaceholderRe = regexp.MustCompile(`\{\{prev\.(` + identifierClass + `)\}\}`)
 )
 

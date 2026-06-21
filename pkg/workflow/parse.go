@@ -1021,20 +1021,25 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 // scanPlaceholders walks text in a SINGLE pass with combinedPlaceholderRe and
 // returns the task-id, param, and state placeholder names in source order. The
 // combined regex disambiguates `{{params.x}}` (group 1), `{{state.x}}` (group
-// 2), and `{{id}}` (group 3), so the three slices never cross-contaminate.
-// State refs are returned separately so callers can treat them as neither task
-// edges nor param references: they need no declaration and create no DAG edge.
+// 2), `{{prev.x}}` (group 3), and `{{id}}` (group 4), so the slices never
+// cross-contaminate. State refs are returned separately so callers can treat
+// them as neither task edges nor param references: they need no declaration and
+// create no DAG edge. Prev refs are skipped here: they reference a prior
+// iteration's output, so they create no DAG edge and are validated separately.
 func scanPlaceholders(text string) (taskRefs, paramRefs, stateRefs []string) {
 	for _, m := range combinedPlaceholderRe.FindAllStringSubmatch(text, -1) {
 		// Exactly one capture group is non-empty per match: group 1 is the param
-		// name, group 2 is the state key, group 3 is the bare task id.
+		// name, group 2 is the state key, group 3 is the prev id, group 4 is the
+		// bare task id.
 		switch {
 		case m[1] != "":
 			paramRefs = append(paramRefs, m[1])
 		case m[2] != "":
 			stateRefs = append(stateRefs, m[2])
+		case m[3] != "":
+			// prev ref: neither a task edge nor a param reference.
 		default:
-			taskRefs = append(taskRefs, m[3])
+			taskRefs = append(taskRefs, m[4])
 		}
 	}
 	return taskRefs, paramRefs, stateRefs
