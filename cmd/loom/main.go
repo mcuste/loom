@@ -91,7 +91,40 @@ func addParamFlags(cmd *cobra.Command, params *[]string) {
 		"set a workflow parameter (repeatable), e.g. -p env=prod")
 }
 
-// doRun passes an empty seed to runWorkflow so every task executes fresh.
+// check is the validation phase shared by `loom check` and `loom run`: it
+// parses the CLI params, resolves them against wf, and prints the execution
+// plan. Routing `run` through it is what makes "run does a check first" true --
+// both commands reach the same validate-and-print routine before anything
+// executes. file is the lower-precedence param tier (a record's stored params
+// on resume; nil otherwise). advisory downgrades a missing required param to a
+// warning so `loom check` doubles as a "what params does this workflow need?"
+// probe; `loom run` passes false so the same case is a hard failure. seeded
+// annotates the plan with carried-over tasks on resume. It returns the resolved
+// params (and CLI param map) for the caller to execute with.
+func check(w io.Writer, wf *workflow.Workflow, paramArgs []string, file map[string]string, advisory bool, seeded map[workflow.TaskID]bool) (workflow.ParamValues, map[string]string, error) {
+	cliParams, err := workflow.ParseParamArgs(paramArgs)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved, err := workflow.ResolveParams(wf, cliParams, file)
+	if err != nil {
+		var miss *workflow.MissingRequiredParamError
+		if !advisory || !errors.As(err, &miss) {
+			return nil, nil, err
+		}
+		if _, werr := fmt.Fprintf(w, "warning: required param %q not supplied\n", miss.Name); werr != nil {
+			return nil, nil, werr
+		}
+		// Rebuild a partial bag so MISSING entries still surface in the printed
+		// plan rather than the section truncating silently.
+		resolved = partialResolved(wf, cliParams)
+	}
+	printPlan(w, wf, resolved, cliParams, seeded)
+	return resolved, cliParams, nil
+}
+
+// doRun runs the shared check phase (validate + print the plan) and then, only
+// if it passes, executes the whole workflow fresh.
 func doRun(w io.Writer, path string, paramArgs []string) error {
 	manifest, err := os.ReadFile(path)
 	if err != nil {
@@ -101,46 +134,25 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	cliParams, err := workflow.ParseParamArgs(paramArgs)
+	resolved, _, err := check(w, wf, paramArgs, nil, false, nil)
 	if err != nil {
 		return err
 	}
-	resolved, err := workflow.ResolveParams(wf, cliParams, nil)
-	if err != nil {
+	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-	return runWorkflow(w, manifest, wf, resolved, cliParams, seedPlan{})
+	return runWorkflow(w, manifest, wf, resolved, seedPlan{})
 }
 
-// doCheck treats MissingRequiredParamError as advisory (warning + exit 0) so
-// `loom check` doubles as a "what params does this workflow need?" probe;
-// CLI-hygiene errors (unknown keys, malformed args, duplicates) are still
-// hard failures.
+// doCheck runs the shared check phase only: validate and print the plan, then
+// stop without executing.
 func doCheck(w io.Writer, path string, paramArgs []string) error {
 	wf, err := workflow.ParseFile(path)
 	if err != nil {
 		return err
 	}
-	cliParams, err := workflow.ParseParamArgs(paramArgs)
-	if err != nil {
-		return err
-	}
-	resolved, err := workflow.ResolveParams(wf, cliParams, nil)
-	if err != nil {
-		var miss *workflow.MissingRequiredParamError
-		if errors.As(err, &miss) {
-			if _, werr := fmt.Fprintf(w, "warning: required param %q not supplied\n", miss.Name); werr != nil {
-				return werr
-			}
-			// Rebuild a partial bag so MISSING entries still surface in the
-			// printed plan rather than the section truncating silently.
-			resolved = partialResolved(wf, cliParams)
-		} else {
-			return err
-		}
-	}
-	printPlan(w, wf, resolved, cliParams, nil)
-	return nil
+	_, _, err = check(w, wf, paramArgs, nil, true, nil)
+	return err
 }
 
 // partialResolved keeps the merge order identical to ResolveParams.

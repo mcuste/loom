@@ -36,6 +36,27 @@ type seedEntry struct {
 	output  string
 }
 
+// resolveSeed reduces a seedPlan to the set and per-task entries the run will
+// actually honor, dropping ids no longer present in the current workflow. An
+// id that no longer resolves cannot be re-gated, stamped, or skipped, so
+// dropping it here keeps the plan annotation, the stamped record, and the
+// executor's task count consistent. A zero plan yields nil maps.
+func resolveSeed(wf *workflow.Workflow, plan seedPlan) (map[workflow.TaskID]bool, map[workflow.TaskID]seedEntry) {
+	if len(plan.seed) == 0 {
+		return nil, nil
+	}
+	set := make(map[workflow.TaskID]bool, len(plan.seed))
+	entries := make(map[workflow.TaskID]seedEntry, len(plan.entries))
+	for _, s := range plan.entries {
+		if wf.ByID(s.id) == nil {
+			continue
+		}
+		entries[s.id] = s
+		set[s.id] = true
+	}
+	return set, entries
+}
+
 // runWorkflow is the unified run pipeline shared by doRun and runFromRecord.
 // It parses nothing itself; callers hand it the already-parsed workflow,
 // resolved params, and CLI param map (for plan provenance). plan carries the
@@ -44,32 +65,11 @@ type seedEntry struct {
 // record as already-ok, and tells the executor to skip them. The store's
 // Close error is reported independently so a write failure after a successful
 // run does not mask the nil return value.
-func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, cliParams map[string]string, plan seedPlan) error {
-	// Index seeded entries by id, keeping only those still present in the
-	// current workflow. An id that no longer resolves cannot be re-gated,
-	// stamped, or skipped, so dropping it here keeps the plan annotation, the
-	// stamped record, and the expected-task count consistent with what the
-	// executor will actually do.
-	var (
-		seededSet     map[workflow.TaskID]bool
-		seededEntries map[workflow.TaskID]seedEntry
-	)
-	if len(plan.seed) > 0 {
-		seededSet = make(map[workflow.TaskID]bool, len(plan.seed))
-		seededEntries = make(map[workflow.TaskID]seedEntry, len(plan.entries))
-		for _, s := range plan.entries {
-			if wf.ByID(s.id) == nil {
-				continue
-			}
-			seededEntries[s.id] = s
-			seededSet[s.id] = true
-		}
-	}
-
-	printPlan(w, wf, resolved, cliParams, seededSet)
-	if _, err := fmt.Fprintln(w); err != nil {
-		return err
-	}
+func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan) error {
+	// The plan was already printed by the check phase in the caller (doRun /
+	// runFromRecord), which validates and prints before any execution. Here we
+	// only need the seeded set the executor will actually honor.
+	seededSet, seededEntries := resolveSeed(wf, plan)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

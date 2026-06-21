@@ -78,14 +78,6 @@ func runFromRecord(w io.Writer, manifest []byte, rec *store.RunRecord, paramArgs
 	if err != nil {
 		return err
 	}
-	cliParams, err := workflow.ParseParamArgs(paramArgs)
-	if err != nil {
-		return err
-	}
-	resolved, err := workflow.ResolveParams(wf, cliParams, rec.Params)
-	if err != nil {
-		return err
-	}
 
 	inWorkflow := make(map[workflow.TaskID]bool, len(wf.Tasks))
 	for i := range wf.Tasks {
@@ -110,7 +102,18 @@ func runFromRecord(w io.Writer, manifest []byte, rec *store.RunRecord, paramArgs
 		})
 	}
 
-	return runWorkflow(w, manifest, wf, resolved, cliParams, plan)
+	// Run the shared check phase, annotating the plan with the seeded tasks,
+	// then execute. The record's params are the lower-precedence tier under any
+	// CLI overrides.
+	seeded, _ := resolveSeed(wf, plan)
+	resolved, _, err := check(w, wf, paramArgs, rec.Params, false, seeded)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return runWorkflow(w, manifest, wf, resolved, plan)
 }
 
 // findRunRecord resolves a user-supplied run id to a path under .loom/runs.

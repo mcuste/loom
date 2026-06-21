@@ -42,7 +42,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -78,7 +78,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, plan); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if !strings.Contains(buf.String(), "Seeded   : 1 task(s) from prior run") {
@@ -112,7 +112,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, plan); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -156,7 +156,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, plan); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -204,7 +204,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, plan); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -237,7 +237,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, plan); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()

@@ -50,7 +50,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	// Counter starts at 3: iterations emit work-2, work-1, then empty -> 3 runs.
@@ -79,7 +79,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if got := countRunRecords(t, "wf"); got != 3 {
@@ -108,7 +108,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	// "" -> x -> xx -> xxx (drain on the 4th pass).
@@ -145,7 +145,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, nil, plan); err != nil {
+	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if got := countRunRecords(t, "wf"); got != 1 {
