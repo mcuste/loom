@@ -120,9 +120,13 @@ type Report struct {
 // For a shell task, OnStart is invoked with empty runtime.Name, runtime.Model,
 // and runtime.Effort because those routing fields genuinely do not apply, but
 // their emptiness is not the contract: do not infer shell-ness from it.
+//
+// iter is the 1-based scoped-loop pass that produced the event and 0 for a
+// non-looped task, letting observers attribute a start/finish to the iteration
+// that generated it without inspecting TaskResult.
 type Hooks struct {
-	OnStart  func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort)
-	OnFinish func(t workflow.Task, res TaskResult, err error)
+	OnStart  func(t workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort)
+	OnFinish func(t workflow.Task, iter int, res TaskResult, err error)
 }
 
 // Options configures a Run call. The zero value is valid and runs the workflow
@@ -330,17 +334,17 @@ func runShell(ctx context.Context, t *workflow.Task, line string) (TaskResult, e
 // coupling their implementations. Nil function fields in any set are skipped.
 func JoinHooks(hs ...Hooks) Hooks {
 	return Hooks{
-		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+		OnStart: func(t workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort) {
 			for _, h := range hs {
 				if h.OnStart != nil {
-					h.OnStart(t, rt, m, e)
+					h.OnStart(t, iter, rt, m, e)
 				}
 			}
 		},
-		OnFinish: func(t workflow.Task, res TaskResult, err error) {
+		OnFinish: func(t workflow.Task, iter int, res TaskResult, err error) {
 			for _, h := range hs {
 				if h.OnFinish != nil {
-					h.OnFinish(t, res, err)
+					h.OnFinish(t, iter, res, err)
 				}
 			}
 		},

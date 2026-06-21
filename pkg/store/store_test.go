@@ -108,8 +108,8 @@ func TestOnStartOnFinishUpdatesTaskEntry(t *testing.T) {
 	}
 
 	task := workflow.Task{ID: "alpha"}
-	run.OnStart(task, "claude-code", "sonnet", "medium")
-	run.OnFinish(task, executor.TaskResult{
+	run.OnStart(task, 0, "claude-code", "sonnet", "medium")
+	run.OnFinish(task, 0, executor.TaskResult{
 		Prompt:  "substituted prompt",
 		Output:  "model output",
 		Usage:   runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5},
@@ -155,8 +155,8 @@ func TestOnFinishRecordsTaskError(t *testing.T) {
 	}
 
 	task := workflow.Task{ID: "beta"}
-	run.OnStart(task, "rt", "m", "")
-	run.OnFinish(task, executor.TaskResult{}, errors.New("kaboom"))
+	run.OnStart(task, 0, "rt", "m", "")
+	run.OnFinish(task, 0, executor.TaskResult{}, errors.New("kaboom"))
 
 	tasks := readRun(t, run.Path())["tasks"].([]any)
 	got := tasks[0].(map[string]any)
@@ -178,8 +178,8 @@ func TestCloseFinalizesAndLinksLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	run.OnFinish(workflow.Task{ID: "a"}, executor.TaskResult{Elapsed: 10 * time.Millisecond}, nil)
-	run.OnFinish(workflow.Task{ID: "b"}, executor.TaskResult{Elapsed: 20 * time.Millisecond}, nil)
+	run.OnFinish(workflow.Task{ID: "a"}, 0, executor.TaskResult{Elapsed: 10 * time.Millisecond}, nil)
+	run.OnFinish(workflow.Task{ID: "b"}, 0, executor.TaskResult{Elapsed: 20 * time.Millisecond}, nil)
 
 	summary := &store.Summary{
 		TaskCount: 2,
@@ -239,8 +239,8 @@ func TestAtomicRewriteLeavesNoTmp(t *testing.T) {
 	}
 	for i := range 5 {
 		task := workflow.Task{ID: workflow.TaskID(fmt.Sprintf("t%d", i))}
-		run.OnStart(task, "rt", "m", "")
-		run.OnFinish(task, executor.TaskResult{}, nil)
+		run.OnStart(task, 0, "rt", "m", "")
+		run.OnFinish(task, 0, executor.TaskResult{}, nil)
 	}
 	if _, err := os.Stat(run.Path() + ".tmp"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tmp file lingered: err=%v", err)
@@ -271,8 +271,8 @@ func TestConcurrentOnFinishIsSafe(t *testing.T) {
 			defer wg.Done()
 			id := workflow.TaskID(fmt.Sprintf("t%02d", i))
 			task := workflow.Task{ID: id}
-			run.OnStart(task, "rt", "m", "")
-			run.OnFinish(task, executor.TaskResult{Output: fmt.Sprintf("out-%d", i)}, nil)
+			run.OnStart(task, 0, "rt", "m", "")
+			run.OnFinish(task, 0, executor.TaskResult{Output: fmt.Sprintf("out-%d", i)}, nil)
 		}()
 	}
 	wg.Wait()
@@ -352,8 +352,8 @@ func TestShellTaskCommandRoundTrips(t *testing.T) {
 	// empty, matching what executor.runShell produces; no runtime/model/effort
 	// (executor passes empty strings for shell tasks).
 	shellTask := workflow.Task{ID: "shell-echo"}
-	run.OnStart(shellTask, "", "", "")
-	run.OnFinish(shellTask, executor.TaskResult{
+	run.OnStart(shellTask, 0, "", "", "")
+	run.OnFinish(shellTask, 0, executor.TaskResult{
 		Command: "echo hello world",
 		Output:  "hello world\n",
 		Elapsed: 50 * time.Millisecond,
@@ -361,8 +361,8 @@ func TestShellTaskCommandRoundTrips(t *testing.T) {
 
 	// LLM task: only Prompt set; Command must stay absent in JSON.
 	llmTask := workflow.Task{ID: "llm-summarise"}
-	run.OnStart(llmTask, "claude-code", "sonnet", "low")
-	run.OnFinish(llmTask, executor.TaskResult{
+	run.OnStart(llmTask, 0, "claude-code", "sonnet", "low")
+	run.OnFinish(llmTask, 0, executor.TaskResult{
 		Prompt:  "summarise this",
 		Output:  "summary here",
 		Usage:   runtime.Usage{InputTokens: 5, OutputTokens: 3},

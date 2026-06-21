@@ -75,10 +75,10 @@ tasks:
 
 	var events []string
 	hooks := executor.Hooks{
-		OnStart: func(t workflow.Task, _ runtime.Name, _ runtime.Model, _ runtime.Effort) {
+		OnStart: func(t workflow.Task, _ int, _ runtime.Name, _ runtime.Model, _ runtime.Effort) {
 			events = append(events, "start:"+string(t.ID))
 		},
-		OnFinish: func(t workflow.Task, _ executor.TaskResult, _ error) {
+		OnFinish: func(t workflow.Task, _ int, _ executor.TaskResult, _ error) {
 			events = append(events, "finish:"+string(t.ID))
 		},
 	}

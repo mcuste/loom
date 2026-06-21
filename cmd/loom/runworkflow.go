@@ -178,12 +178,12 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 				continue
 			}
 			if t.IsShell() {
-				sh.OnStart(*t, "", "", "")
+				sh.OnStart(*t, 0, "", "", "")
 			} else {
 				rt, m, e := wf.Effective(t)
-				sh.OnStart(*t, rt, m, e)
+				sh.OnStart(*t, 0, rt, m, e)
 			}
-			sh.OnFinish(*t, executor.TaskResult{
+			sh.OnFinish(*t, 0, executor.TaskResult{
 				TaskID:  id,
 				Prompt:  s.prompt,
 				Command: s.command,

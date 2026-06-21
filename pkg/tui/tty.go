@@ -24,6 +24,7 @@ import (
 // move a task between its pending/running/done/failed buckets.
 type taskStartMsg struct {
 	id       workflow.TaskID
+	iter     int
 	rt       runtime.Name
 	model    runtime.Model
 	effort   runtime.Effort
@@ -33,6 +34,7 @@ type taskStartMsg struct {
 
 type taskFinishMsg struct {
 	id    workflow.TaskID
+	iter  int
 	res   executor.TaskResult
 	err   error
 	shell bool
@@ -52,6 +54,7 @@ const (
 // scrollback summary.
 type liveTask struct {
 	id       workflow.TaskID
+	iter     int
 	rt       runtime.Name
 	model    runtime.Model
 	effort   runtime.Effort
@@ -168,6 +171,7 @@ func (m *runModel) onStart(msg taskStartMsg) {
 	m.order = append(m.order, msg.id)
 	m.tasks[msg.id] = &liveTask{
 		id:       msg.id,
+		iter:     msg.iter,
 		rt:       msg.rt,
 		model:    msg.model,
 		effort:   msg.effort,
@@ -235,7 +239,7 @@ func (m *runModel) View() string {
 		if t.retrying {
 			badge = renderBadge(badgeState{retrying: true}, m.sym) + " "
 		}
-		lines = append(lines, fmt.Sprintf("%s %s %s%s", m.spinner.View(), t.id, badge, descriptor(t)))
+		lines = append(lines, fmt.Sprintf("%s %s %s%s%s", m.spinner.View(), t.id, badge, descriptor(t), iterSuffix(t.iter)))
 	}
 
 	if len(lines) > budget {
@@ -289,20 +293,22 @@ func descriptor(t *liveTask) string {
 func finishLine(msg taskFinishMsg, sym symbolSet) string {
 	id := msg.id
 	elapsed := msg.res.Elapsed.Round(time.Millisecond)
+	var line string
 	switch {
 	case msg.err != nil:
-		return fmt.Sprintf("  %s %s FAIL after %s: %s", sym.failed, id, elapsed, strings.TrimSpace(msg.err.Error()))
+		line = fmt.Sprintf("  %s %s FAIL after %s: %s", sym.failed, id, elapsed, strings.TrimSpace(msg.err.Error()))
 	case msg.shell:
-		return fmt.Sprintf("  %s %s done %s  exit=0", sym.done, id, elapsed)
+		line = fmt.Sprintf("  %s %s done %s  exit=0", sym.done, id, elapsed)
 	case msg.res.Status == executor.StatusSkipped:
-		return fmt.Sprintf("  %s %s %s", renderBadge(badgeState{res: msg.res}, sym), id, elapsed)
+		line = fmt.Sprintf("  %s %s %s", renderBadge(badgeState{res: msg.res}, sym), id, elapsed)
 	case msg.res.CacheHit:
-		return fmt.Sprintf("  %s %s %s  $%.6f", renderBadge(badgeState{res: msg.res}, sym), id, elapsed, msg.res.Usage.TotalCostUSD)
+		line = fmt.Sprintf("  %s %s %s  $%.6f", renderBadge(badgeState{res: msg.res}, sym), id, elapsed, msg.res.Usage.TotalCostUSD)
 	default:
 		u := msg.res.Usage
-		return fmt.Sprintf("  %s %s done %s  in=%d out=%d cache=%d  $%.6f",
+		line = fmt.Sprintf("  %s %s done %s  in=%d out=%d cache=%d  $%.6f",
 			sym.done, id, elapsed, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.TotalCostUSD)
 	}
+	return line + iterSuffix(msg.iter)
 }
 
 // ttyRenderer drives the live `loom run` region through a bubbletea program in
@@ -399,6 +405,8 @@ func (t *ttyRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValues,
 	return t.plain.Plan(wf, resolved, cli, seeded)
 }
 
+// Warn delegates to the plain renderer. Warnings print during the check phase,
+// before the live region starts, so the plain writer handles them directly.
 func (t *ttyRenderer) Warn(msg string) error { return t.plain.Warn(msg) }
 
 // Hooks forwards executor callbacks into the live program as messages. When the
@@ -414,11 +422,14 @@ func (t *ttyRenderer) Hooks() executor.Hooks {
 		}
 	}
 	return executor.Hooks{
-		OnStart: func(task workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
-			send(taskStartMsg{id: task.ID, rt: rt, model: m, effort: e, shell: task.IsShell()})
+		// iter is forwarded into the messages so the live model can badge a
+		// looped task's running and finish lines with its pass number; iter is
+		// 0 for a non-looped task, where the badge is empty.
+		OnStart: func(task workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+			send(taskStartMsg{id: task.ID, iter: iter, rt: rt, model: m, effort: e, shell: task.IsShell()})
 		},
-		OnFinish: func(task workflow.Task, res executor.TaskResult, err error) {
-			send(taskFinishMsg{id: task.ID, res: res, err: err, shell: task.IsShell()})
+		OnFinish: func(task workflow.Task, iter int, res executor.TaskResult, err error) {
+			send(taskFinishMsg{id: task.ID, iter: iter, res: res, err: err, shell: task.IsShell()})
 		},
 	}
 }

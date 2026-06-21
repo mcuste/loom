@@ -110,8 +110,8 @@ func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
 			t.Parallel()
 			run := openRun(t)
 			task := workflow.Task{ID: "alpha"}
-			run.OnStart(task, tt.rt, tt.model, tt.effort)
-			run.OnFinish(task, tt.result, nil)
+			run.OnStart(task, 0, tt.rt, tt.model, tt.effort)
+			run.OnFinish(task, 0, tt.result, nil)
 
 			got := readRun(t, run.Path())["tasks"].([]any)[0].(map[string]any)
 			tt.want(t, got)

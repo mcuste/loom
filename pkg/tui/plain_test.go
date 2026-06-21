@@ -32,7 +32,9 @@ func parseWF(t *testing.T, body string) *workflow.Workflow {
 func TestPlainRenderer_HeaderPlainRun(t *testing.T) {
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Header(tui.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Total: 2})
+	if err := r.Header(tui.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Total: 2}); err != nil {
+		t.Fatalf("Header: %v", err)
+	}
 
 	want := "Run file : /runs/wf/abc.json\n" +
 		"Cwd      : /work\n\n"
@@ -46,12 +48,14 @@ func TestPlainRenderer_HeaderPlainRun(t *testing.T) {
 func TestPlainRenderer_HeaderLoopIteration(t *testing.T) {
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Header(tui.RunMeta{
+	if err := r.Header(tui.RunMeta{
 		RunFile: "/runs/wf/abc.json",
 		Cwd:     "/work",
 		Total:   2,
 		Loop:    &tui.LoopMeta{N: 1, Max: 10},
-	})
+	}); err != nil {
+		t.Fatalf("Header: %v", err)
+	}
 
 	want := "── iteration 1/10 ──\n\n" +
 		"Run file : /runs/wf/abc.json\n" +
@@ -66,7 +70,9 @@ func TestPlainRenderer_HeaderLoopIteration(t *testing.T) {
 func TestPlainRenderer_HeaderSeeded(t *testing.T) {
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Header(tui.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Seeded: 2, Total: 1})
+	if err := r.Header(tui.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Seeded: 2, Total: 1}); err != nil {
+		t.Fatalf("Header: %v", err)
+	}
 
 	want := "Run file : /runs/wf/abc.json\n" +
 		"Cwd      : /work\n\n" +
@@ -84,7 +90,9 @@ func TestPlainRenderer_PlanShellTask(t *testing.T) {
 
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Plan(wf, nil, nil, nil)
+	if err := r.Plan(wf, nil, nil, nil); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
 
 	want := "Workflow : demo\n" +
 		"Runtime  : -\n" +
@@ -110,7 +118,9 @@ func TestPlainRenderer_SummaryComplete(t *testing.T) {
 
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Summary(wf, rep, 2)
+	if err := r.Summary(wf, rep, 2); err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
 
 	want := "\n" + bar + "\n" +
 		"  total tokens : 10 in / 20 out / 5 cache-read\n" +
@@ -134,7 +144,9 @@ func TestPlainRenderer_SummaryPartial(t *testing.T) {
 
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Summary(wf, rep, 2)
+	if err := r.Summary(wf, rep, 2); err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
 
 	want := "\n" + bar + "\n" +
 		"  total tokens : 1 in / 2 out / 0 cache-read\n" +
@@ -162,23 +174,23 @@ func TestPlainRenderer_HooksRenderProgressLines(t *testing.T) {
 	}{
 		{
 			name: "llm start",
-			call: func(h executor.Hooks) { h.OnStart(llm, "claude-code", "opus", "high") },
+			call: func(h executor.Hooks) { h.OnStart(llm, 0, "claude-code", "opus", "high") },
 			want: "[1/3] draft (claude-code/opus/high)\n",
 		},
 		{
 			name: "llm start without effort omits suffix",
-			call: func(h executor.Hooks) { h.OnStart(llm, "claude-code", "opus", "") },
+			call: func(h executor.Hooks) { h.OnStart(llm, 0, "claude-code", "opus", "") },
 			want: "[1/3] draft (claude-code/opus)\n",
 		},
 		{
 			name: "shell start",
-			call: func(h executor.Hooks) { h.OnStart(shell, "", "", "") },
+			call: func(h executor.Hooks) { h.OnStart(shell, 0, "", "", "") },
 			want: "[1/3] build (shell)\n",
 		},
 		{
 			name: "llm finish reports tokens and cost",
 			call: func(h executor.Hooks) {
-				h.OnFinish(llm, executor.TaskResult{
+				h.OnFinish(llm, 0, executor.TaskResult{
 					Usage: runtime.Usage{InputTokens: 1, OutputTokens: 2, CacheReadTokens: 3, TotalCostUSD: 0.00001},
 				}, nil)
 			},
@@ -186,7 +198,7 @@ func TestPlainRenderer_HooksRenderProgressLines(t *testing.T) {
 		},
 		{
 			name: "shell finish reports exit zero",
-			call: func(h executor.Hooks) { h.OnFinish(shell, executor.TaskResult{}, nil) },
+			call: func(h executor.Hooks) { h.OnFinish(shell, 0, executor.TaskResult{}, nil) },
 			want: "  build done 0s  exit=0\n",
 		},
 	}

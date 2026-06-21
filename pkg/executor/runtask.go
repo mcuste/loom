@@ -98,7 +98,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		if !run {
 			res := TaskResult{TaskID: t.ID, Status: StatusSkipped, Iteration: st.iteration}
 			if hooks.OnFinish != nil {
-				hooks.OnFinish(*t, res, nil)
+				hooks.OnFinish(*t, st.iteration, res, nil)
 			}
 			st.mu.Lock()
 			st.rep.Outputs[t.ID] = ""
@@ -162,7 +162,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 	// opts.Params is read-only after Run starts).
 	if t.IsShell() {
 		if hooks.OnStart != nil {
-			hooks.OnStart(*t, "", "", "")
+			hooks.OnStart(*t, st.iteration, "", "", "")
 		}
 		if t.IsForEach() {
 			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, nil, "", "", "", st.prev)
@@ -182,7 +182,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		}
 		sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params, opts.State, nil)
 		if hooks.OnStart != nil {
-			hooks.OnStart(*t, rt, model, effort)
+			hooks.OnStart(*t, st.iteration, rt, model, effort)
 		}
 		if t.IsForEach() {
 			// Memoization keys on a single substituted prompt; a for_each task
@@ -214,8 +214,12 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		}
 	}
 
+	// Stamp the iteration before firing OnFinish so an observer reading
+	// res.Iteration inside the hook sees the loop pass, not a stale 0; the
+	// invariant on TaskResult.Iteration must already hold when the hook runs.
+	res.Iteration = st.iteration
 	if hooks.OnFinish != nil {
-		hooks.OnFinish(*t, res, runErr)
+		hooks.OnFinish(*t, st.iteration, res, runErr)
 	}
 	if runErr != nil {
 		// A task error aborts the run: the gate is left unclosed, errgroup
@@ -229,7 +233,6 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 	}
 
 	res.Status = StatusOK
-	res.Iteration = st.iteration
 	st.mu.Lock()
 	st.rep.Outputs[t.ID] = res.Output
 	st.succeeded[t.ID] = true

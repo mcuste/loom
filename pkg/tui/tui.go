@@ -228,17 +228,20 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 // rather than silently dropped.
 func (p *plainRenderer) Hooks() executor.Hooks {
 	return executor.Hooks{
-		OnStart: func(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+		// A looped task's start line carries an " iter N" annotation so its
+		// per-iteration progress is visible; iter is 0 for a non-looped task,
+		// where iterSuffix is empty and the output stays byte-identical.
+		OnStart: func(t workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort) {
 			n := p.step.Add(1)
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			if t.IsShell() {
-				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (shell)\n", n, p.total, t.ID)
+				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (shell)%s\n", n, p.total, t.ID, iterSuffix(iter))
 			} else {
-				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (%s/%s%s)\n", n, p.total, t.ID, rt, m, effortSuffix(e))
+				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (%s/%s%s)%s\n", n, p.total, t.ID, rt, m, effortSuffix(e), iterSuffix(iter))
 			}
 		},
-		OnFinish: func(t workflow.Task, res executor.TaskResult, err error) {
+		OnFinish: func(t workflow.Task, iter int, res executor.TaskResult, err error) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			if t.IsShell() {
@@ -288,6 +291,16 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// iterSuffix renders the loop-pass annotation appended to a looped task's
+// progress line (" iter N"). It is empty for iter 0 (a non-looped task) so
+// non-looped output stays byte-identical.
+func iterSuffix(iter int) string {
+	if iter <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" iter %d", iter)
 }
 
 func effortSuffix(e runtime.Effort) string {

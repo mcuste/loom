@@ -72,8 +72,17 @@ type Run struct {
 
 	mu     sync.Mutex
 	state  RunRecord
-	tasks  map[workflow.TaskID]int // task id -> index into state.Tasks
-	closed bool                    // Close is a no-op after the first call
+	tasks  map[taskKey]int // (task id, iteration) -> index into state.Tasks
+	closed bool            // Close is a no-op after the first call
+}
+
+// taskKey identifies a single task record. A looped task contributes one
+// record per pass, so the iteration is part of the key: keying by id alone
+// would collapse every iteration onto the first entry, losing all but the
+// last pass. iter is 0 for a non-looped task.
+type taskKey struct {
+	id   workflow.TaskID
+	iter int
 }
 
 // Config is the optional configuration for Open.
@@ -144,7 +153,7 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 			Params:     cfg.Params,
 			Cwd:        cfg.Cwd,
 		},
-		tasks: map[workflow.TaskID]int{},
+		tasks: map[taskKey]int{},
 	}
 	if err := r.flushLocked(); err != nil {
 		return nil, fmt.Errorf("store: write run file: %w", err)
@@ -162,16 +171,18 @@ func (r *Run) Path() string { return r.path }
 // its resolved routing fields and rewrites the run file. The store receiver
 // is the only captured state, so callers pass the method value directly
 // (executor.Hooks{OnStart: run.OnStart}).
-func (r *Run) OnStart(t workflow.Task, rt runtime.Name, m runtime.Model, e runtime.Effort) {
+func (r *Run) OnStart(t workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	idx, ok := r.tasks[t.ID]
+	key := taskKey{id: t.ID, iter: iter}
+	idx, ok := r.tasks[key]
 	if !ok {
 		r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
 		idx = len(r.state.Tasks) - 1
-		r.tasks[t.ID] = idx
+		r.tasks[key] = idx
 	}
 	tr := &r.state.Tasks[idx]
+	tr.Iteration = iter
 	tr.Runtime = string(rt)
 	tr.Model = string(m)
 	tr.Effort = string(e)
@@ -186,16 +197,18 @@ func (r *Run) OnStart(t workflow.Task, rt runtime.Name, m runtime.Model, e runti
 // prompt, output, usage, and status, then rewrites the run file. Errors are
 // surfaced via the configured OnError callback and do not propagate to the
 // caller. As with OnStart, callers pass the method value directly.
-func (r *Run) OnFinish(t workflow.Task, res executor.TaskResult, runErr error) {
+func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	idx, ok := r.tasks[t.ID]
+	key := taskKey{id: t.ID, iter: iter}
+	idx, ok := r.tasks[key]
 	if !ok {
 		r.state.Tasks = append(r.state.Tasks, TaskRecord{ID: string(t.ID)})
 		idx = len(r.state.Tasks) - 1
-		r.tasks[t.ID] = idx
+		r.tasks[key] = idx
 	}
 	tr := &r.state.Tasks[idx]
+	tr.Iteration = iter
 	tr.Prompt = res.Prompt
 	tr.Command = res.Command
 	tr.Output = res.Output
@@ -399,9 +412,12 @@ type RunRecord struct {
 	Tasks      []TaskRecord      `json:"tasks"`
 }
 
-// TaskRecord is the per-task entry within a [RunRecord].
+// TaskRecord is the per-task entry within a [RunRecord]. Iteration is the
+// 1-based scoped-loop pass that produced this record and 0 for a non-looped
+// task, so a looped task contributes one record per pass.
 type TaskRecord struct {
 	ID         string    `json:"id"`
+	Iteration  int       `json:"iteration,omitempty"`
 	Runtime    string    `json:"runtime,omitempty"`
 	Model      string    `json:"model,omitempty"`
 	Effort     string    `json:"effort,omitempty"`

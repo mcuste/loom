@@ -140,6 +140,33 @@ func TestFinishLine_ShellPaths(t *testing.T) {
 	}
 }
 
+// TestFinishLine_AppendsIterSuffix pins that finishLine annotates a looped
+// task's committed scrollback line with its 1-based pass ("iter 2") while a
+// non-looped task (iter 0) stays byte-identical, with no trailing annotation.
+func TestFinishLine_AppendsIterSuffix(t *testing.T) {
+	sym := symbolsFor(termenv.TrueColor)
+
+	looped := finishLine(taskFinishMsg{
+		id:    "draft",
+		iter:  2,
+		shell: true,
+		res:   executor.TaskResult{Elapsed: time.Second},
+	}, sym)
+	if !strings.Contains(looped, "iter 2") {
+		t.Fatalf("looped finish line = %q, want it to contain %q", looped, "iter 2")
+	}
+
+	plain := finishLine(taskFinishMsg{
+		id:    "draft",
+		iter:  0,
+		shell: true,
+		res:   executor.TaskResult{Elapsed: time.Second},
+	}, sym)
+	if strings.Contains(plain, "iter") {
+		t.Fatalf("non-looped finish line = %q, want no iter annotation", plain)
+	}
+}
+
 // TestDescriptor_ShellVsLLM pins descriptor's shell branch ("(shell)") against
 // the LLM branch that renders the runtime/model facts.
 func TestDescriptor_ShellVsLLM(t *testing.T) {
