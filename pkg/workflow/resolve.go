@@ -35,6 +35,19 @@ func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effo
 	return r, m, e
 }
 
+// CacheEnabled reports whether t opts into output memoization. The task's own
+// `cache:` override wins when set (*true opts in, *false opts out); a nil
+// override inherits the workflow-level Cache default. Shell-ness is not checked
+// here: the executor never memoizes shell tasks regardless.
+//
+// t must be non-nil.
+func (w *Workflow) CacheEnabled(t *Task) bool {
+	if t.Cache != nil {
+		return *t.Cache
+	}
+	return w.Cache
+}
+
 // Substitute replaces every `{{id}}`, `{{params.name}}`, and `{{state.key}}`
 // placeholder in prompt with outputs[id] / params[name] / state[key]
 // respectively, in a single pass.

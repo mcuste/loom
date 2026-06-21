@@ -45,6 +45,22 @@ type TaskResult struct {
 	// the task's `when:` expression evaluated false (Output is empty in that
 	// case) and StatusOK for a task that ran to completion.
 	Status string
+	// CacheHit is true when Output was replayed from a memoization cache rather
+	// than produced by the runtime this run. A cache hit reports zero Usage.
+	CacheHit bool
+}
+
+// Cache memoizes LLM task outputs across runs. The executor consults it before
+// dispatching a cacheable LLM task: on a hit it replays the stored output with
+// zero usage and skips the runtime; on a miss it runs the task and records the
+// output. A nil Options.Cache disables memoization. Shell tasks are never
+// memoized. Implementations must be safe for concurrent use.
+type Cache interface {
+	// Lookup returns the memoized output for the given task inputs and true when
+	// a prior run cached it, or ("", false, nil) on a miss.
+	Lookup(rt runtime.Name, model runtime.Model, effort runtime.Effort, systemPrompt, prompt string) (string, bool, error)
+	// Save records output for the given task inputs.
+	Save(rt runtime.Name, model runtime.Model, effort runtime.Effort, systemPrompt, prompt, output string) error
 }
 
 // Terminal task statuses surfaced on TaskResult.Status.
@@ -125,6 +141,10 @@ type Options struct {
 	// package state so concurrent Run calls (and parallel tests) never share a
 	// mutable delay.
 	RetryBaseDelay time.Duration
+	// Cache, when non-nil, memoizes the output of cacheable LLM tasks: the
+	// executor replays a stored output on a hit and records a fresh one on a
+	// miss. nil disables memoization. Shell tasks are never memoized.
+	Cache Cache
 }
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
@@ -273,18 +293,32 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 					hooks.OnStart(*t, rt, model, effort)
 				}
 				if t.IsForEach() {
+					// Memoization keys on a single substituted prompt; a for_each task
+					// has one body per instance, so caching it is unsupported. Surface
+					// the unsupported combination rather than silently ignoring the
+					// annotation.
+					if opts.Cache != nil && wf.CacheEnabled(t) {
+						return fmt.Errorf("task %q: cache is not supported on for_each tasks", t.ID)
+					}
 					res, runErr = runForEach(gctx, t, &mu, rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt)
 				} else {
 					mu.Lock()
 					body := workflow.Substitute(t.Prompt, rep.Outputs, opts.Params, opts.State)
 					mu.Unlock()
-					res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
-						r, err := runLLM(gctx, t, body, runner, model, effort, sysPrompt)
-						if err != nil {
-							return r, err
-						}
-						return r, validateSchema(t, r.Output)
-					})
+					dispatch := func() (TaskResult, error) {
+						return runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
+							r, err := runLLM(gctx, t, body, runner, model, effort, sysPrompt)
+							if err != nil {
+								return r, err
+							}
+							return r, validateSchema(t, r.Output)
+						})
+					}
+					if opts.Cache != nil && wf.CacheEnabled(t) {
+						res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, dispatch)
+					} else {
+						res, runErr = dispatch()
+					}
 				}
 			}
 
@@ -313,6 +347,30 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 
 	err := g.Wait()
 	return rep, err
+}
+
+// runCached wraps an LLM dispatch with hash-based memoization. It consults the
+// cache for the task's inputs first: on a hit it replays the stored output with
+// zero usage and the CacheHit marker, skipping the runtime entirely; on a miss
+// it dispatches and records the produced output for the next run. A failed
+// dispatch is returned as-is and never cached.
+func runCached(cache Cache, t *workflow.Task, rt runtime.Name, model runtime.Model, effort runtime.Effort, sysPrompt, prompt string, dispatch func() (TaskResult, error)) (TaskResult, error) {
+	out, hit, err := cache.Lookup(rt, model, effort, sysPrompt, prompt)
+	if err != nil {
+		return TaskResult{TaskID: t.ID, Prompt: prompt}, fmt.Errorf("cache lookup: %w", err)
+	}
+	if hit {
+		return TaskResult{TaskID: t.ID, Prompt: prompt, Output: out, CacheHit: true}, nil
+	}
+	res, err := dispatch()
+	if err != nil {
+		return res, err
+	}
+	// Cache persistence is best-effort: a successful LLM call must not be turned
+	// into a task failure by a transient write error (disk full, permissions).
+	// The next run simply re-computes on the resulting miss.
+	_ = cache.Save(rt, model, effort, sysPrompt, prompt, res.Output)
+	return res, nil
 }
 
 // runLLM executes one LLM task against its resolved runner. The substituted

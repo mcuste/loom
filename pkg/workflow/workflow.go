@@ -140,6 +140,10 @@ type Workflow struct {
 	// Budget, when non-nil, caps the workflow's cumulative cost in USD across
 	// all completed tasks. nil means no workflow-level cost limit.
 	Budget *Budget
+	// Cache is the workflow-level memoization default inherited by tasks that do
+	// not set their own `cache:` value. false means tasks are not memoized
+	// unless they opt in individually.
+	Cache bool
 
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
 	// nil for hand-constructed Workflow values, in which case ByID falls back
@@ -219,6 +223,10 @@ type Task struct {
 	// parses as JSON and matches Schema. nil means no validation. Only LLM
 	// tasks may set it; shell tasks are rejected by the parser.
 	Schema *Schema
+	// Cache, when non-nil, overrides Workflow.Cache for this task: *true opts the
+	// task into hash-based output memoization, *false opts it out. nil inherits
+	// the workflow-level default. Shell tasks are never memoized regardless.
+	Cache *bool
 }
 
 // Loop configures loop-until-dry execution. The run pipeline re-runs the

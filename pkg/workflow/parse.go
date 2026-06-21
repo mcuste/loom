@@ -71,6 +71,7 @@ func Parse(data []byte) (*Workflow, error) {
 		Model:        runtime.Model(raw.Model),
 		Effort:       runtime.Effort(raw.Effort),
 		SystemPrompt: raw.SystemPrompt,
+		Cache:        raw.Cache,
 		Params:       params,
 		Tasks:        make([]Task, 0, len(raw.Tasks)),
 		byID:         make(map[TaskID]int, len(raw.Tasks)),
@@ -177,6 +178,7 @@ func Parse(data []byte) (*Workflow, error) {
 			As:            rt.As,
 			Budget:        taskBudget,
 			Schema:        schema,
+			Cache:         rt.Cache,
 		})
 	}
 
@@ -265,6 +267,10 @@ type rawWorkflow struct {
 	// absent `budget:` key (no limit) from a present block whose max_cost_usd
 	// must be validated as a positive float.
 	Budget yaml.Node `yaml:"budget"`
+	// Cache is the workflow-level memoization default. A plain bool suffices: an
+	// absent `cache:` key decodes to false, which is exactly the "off unless a
+	// task opts in" default.
+	Cache bool `yaml:"cache"`
 }
 
 type rawTask struct {
@@ -295,6 +301,10 @@ type rawTask struct {
 	// absent per-task `schema:` key (no validation) from a present block whose
 	// type/required/properties must be validated.
 	Schema yaml.Node `yaml:"schema"`
+	// Cache is a pointer so an absent `cache:` key (nil, inherit the workflow
+	// default) is distinct from an explicit `cache: false` (opt out). Shell tasks
+	// are never memoized regardless, so no shell-vs-LLM rejection applies here.
+	Cache *bool `yaml:"cache"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`
