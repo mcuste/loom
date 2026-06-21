@@ -202,6 +202,9 @@ func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues
 	if wf.SystemPrompt != "" {
 		fmt.Fprintf(w, "System   : %s\n", wf.SystemPrompt)
 	}
+	if wf.Loop != nil {
+		fmt.Fprintf(w, "Loop     : until_empty=%s max=%d\n", wf.Loop.UntilEmpty, wf.Loop.Max)
+	}
 
 	if len(wf.Params) > 0 {
 		nameWidth := 0
@@ -245,8 +248,18 @@ func printPlan(w io.Writer, wf *workflow.Workflow, resolved workflow.ParamValues
 	for i, id := range order {
 		t := wf.ByID(id)
 		suffix := ""
+		if t.WritesState != "" {
+			suffix += "  writes_state=" + t.WritesState
+		}
+		if t.IsForEach() {
+			if t.ForEachSource != "" {
+				suffix += fmt.Sprintf("  for_each=dynamic<-%s as=%s", t.ForEachSource, t.As)
+			} else {
+				suffix += fmt.Sprintf("  for_each=static[%d] as=%s", len(t.ForEach), t.As)
+			}
+		}
 		if seeded[id] {
-			suffix = "  (seeded; using stored output)"
+			suffix += "  (seeded; using stored output)"
 		}
 		if t.IsShell() {
 			cmd := t.Command

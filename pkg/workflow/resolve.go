@@ -35,18 +35,21 @@ func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effo
 	return r, m, e
 }
 
-// Substitute replaces every `{{id}}` and `{{params.name}}` placeholder in
-// prompt with outputs[id] / params[name] respectively, in a single pass.
+// Substitute replaces every `{{id}}`, `{{params.name}}`, and `{{state.key}}`
+// placeholder in prompt with outputs[id] / params[name] / state[key]
+// respectively, in a single pass.
 //
-// The single-pass guarantee matters: substituting params first and then tasks
-// (or vice versa) would re-expand a value that happened to contain placeholder
-// text. By splicing both kinds in one scan, a param value of `{{a}}` survives
-// as the literal string `{{a}}` even if task `a` produced an output.
+// The single-pass guarantee matters: substituting one namespace before another
+// would re-expand a value that happened to contain placeholder text. By
+// splicing all three kinds in one scan, a param value of `{{a}}` survives as
+// the literal string `{{a}}` even if task `a` produced an output.
 //
-// Either map may be nil. An unknown placeholder (no entry in the corresponding
-// map) is left in place verbatim — mirrors the parser-time invariant that
-// every placeholder in a Workflow returned by Parse is guaranteed to resolve.
-func Substitute(prompt string, outputs map[TaskID]string, params ParamValues) string {
+// Any map may be nil. An unknown task or param placeholder is left in place
+// verbatim — mirroring the parser-time invariant that every such placeholder in
+// a Workflow returned by Parse is guaranteed to resolve. A missing state key,
+// by contrast, substitutes to the empty string: state is legitimately empty on
+// the first tick, so `{{state.key}}` must collapse rather than leak braces.
+func Substitute(prompt string, outputs map[TaskID]string, params ParamValues, state map[string]string) string {
 	matches := combinedPlaceholderRe.FindAllStringSubmatchIndex(prompt, -1)
 	if len(matches) == 0 {
 		return prompt
@@ -55,7 +58,8 @@ func Substitute(prompt string, outputs map[TaskID]string, params ParamValues) st
 	b.Grow(len(prompt))
 	last := 0
 	for _, m := range matches {
-		// m: [matchStart, matchEnd, paramStart, paramEnd, taskStart, taskEnd].
+		// m: [matchStart, matchEnd, paramStart, paramEnd, stateStart, stateEnd,
+		// taskStart, taskEnd].
 		b.WriteString(prompt[last:m[0]])
 		matched := prompt[m[0]:m[1]]
 		switch {
@@ -66,8 +70,10 @@ func Substitute(prompt string, outputs map[TaskID]string, params ParamValues) st
 			} else {
 				b.WriteString(matched)
 			}
-		case m[4] >= 0: // task branch.
-			id := TaskID(prompt[m[4]:m[5]])
+		case m[4] >= 0: // state branch: missing key -> empty string.
+			b.WriteString(state[prompt[m[4]:m[5]]])
+		case m[6] >= 0: // task branch.
+			id := TaskID(prompt[m[6]:m[7]])
 			if v, ok := outputs[id]; ok {
 				b.WriteString(v)
 			} else {

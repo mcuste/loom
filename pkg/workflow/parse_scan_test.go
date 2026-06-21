@@ -16,12 +16,20 @@ func TestScanPlaceholders_ReturnsTaskAndParamRefsInSourceOrder(t *testing.T) {
 		text       string
 		wantTasks  []string
 		wantParams []string
+		wantState  []string
 	}{
 		{
 			name:       "mixed task and param refs",
 			text:       "use {{a}} and {{params.x}} then {{b}} with {{params.y}}",
 			wantTasks:  []string{"a", "b"},
 			wantParams: []string{"x", "y"},
+		},
+		{
+			name:       "state refs are classified separately",
+			text:       "{{a}} {{params.x}} {{state.done}} {{b}} {{state.cursor}}",
+			wantTasks:  []string{"a", "b"},
+			wantParams: []string{"x"},
+			wantState:  []string{"done", "cursor"},
 		},
 		{
 			name:       "interleaved refs preserve source order",
@@ -70,12 +78,15 @@ func TestScanPlaceholders_ReturnsTaskAndParamRefsInSourceOrder(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotTasks, gotParams := scanPlaceholders(tc.text)
+			gotTasks, gotParams, gotState := scanPlaceholders(tc.text)
 			if !equalStringSlices(gotTasks, tc.wantTasks) {
 				t.Errorf("scanPlaceholders(%q) taskRefs = %v, want %v", tc.text, gotTasks, tc.wantTasks)
 			}
 			if !equalStringSlices(gotParams, tc.wantParams) {
 				t.Errorf("scanPlaceholders(%q) paramRefs = %v, want %v", tc.text, gotParams, tc.wantParams)
+			}
+			if !equalStringSlices(gotState, tc.wantState) {
+				t.Errorf("scanPlaceholders(%q) stateRefs = %v, want %v", tc.text, gotState, tc.wantState)
 			}
 		})
 	}

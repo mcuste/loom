@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -112,7 +113,7 @@ func Parse(data []byte) (*Workflow, error) {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
 			}
 		}
-		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet)
+		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet, rt.As)
 		if err != nil {
 			return nil, err
 		}
@@ -123,17 +124,28 @@ func Parse(data []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
+		if rt.WritesState != "" && !identifierRe.MatchString(rt.WritesState) {
+			return nil, &InvalidWritesStateError{Task: tid, Key: rt.WritesState}
+		}
+		forEach, forEachSource, err := parseForEach(tid, rt.ForEach, rt.As, deps, ids, paramSet)
+		if err != nil {
+			return nil, err
+		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
-			ID:          tid,
-			Prompt:      rt.Prompt,
-			Command:     rt.Command,
-			Description: rt.Description,
-			Runtime:     runtime.Name(rt.Runtime),
-			Model:       runtime.Model(rt.Model),
-			Effort:      runtime.Effort(rt.Effort),
-			DependsOn:   deps,
-			Retry:       retry,
+			ID:            tid,
+			Prompt:        rt.Prompt,
+			Command:       rt.Command,
+			Description:   rt.Description,
+			Runtime:       runtime.Name(rt.Runtime),
+			Model:         runtime.Model(rt.Model),
+			Effort:        runtime.Effort(rt.Effort),
+			DependsOn:     deps,
+			Retry:         retry,
+			WritesState:   rt.WritesState,
+			ForEach:       forEach,
+			ForEachSource: forEachSource,
+			As:            rt.As,
 		})
 	}
 
@@ -148,6 +160,12 @@ func Parse(data []byte) (*Workflow, error) {
 	if err := checkUnusedParams(wf); err != nil {
 		return nil, err
 	}
+
+	loop, err := parseLoop(raw.Loop, ids)
+	if err != nil {
+		return nil, err
+	}
+	wf.Loop = loop
 
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
@@ -202,6 +220,10 @@ type rawWorkflow struct {
 	SystemPrompt string    `yaml:"system_prompt"`
 	Params       yaml.Node `yaml:"params"`
 	Tasks        []rawTask `yaml:"tasks"`
+	// Loop is captured as a raw yaml.Node so the parser can distinguish an
+	// absent `loop:` key (the workflow runs once) from a present block whose
+	// fields must be validated against the task set.
+	Loop yaml.Node `yaml:"loop"`
 }
 
 type rawTask struct {
@@ -213,10 +235,16 @@ type rawTask struct {
 	Prompt      string   `yaml:"prompt"`
 	Command     string   `yaml:"command"`
 	DependsOn   []string `yaml:"depends_on"`
+	WritesState string   `yaml:"writes_state"`
+	As          string   `yaml:"as"`
 	// Retry is captured as a raw yaml.Node so the parser can distinguish an
 	// absent `retry:` key (zero value, no retry) from a present-but-partial
 	// block whose `backoff`/`on` defaults must be filled in.
 	Retry yaml.Node `yaml:"retry"`
+	// ForEach is captured as a raw yaml.Node so parseForEach can tell a literal
+	// sequence (static fanout) from a single-placeholder scalar (dynamic fanout)
+	// and reject other shapes.
+	ForEach yaml.Node `yaml:"for_each"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`
@@ -250,6 +278,9 @@ var (
 	// meaningless for shell tasks and rejected at the task level; workflow-level
 	// defaults are tolerated.
 	ErrShellTaskWithRuntime = errors.New("shell task must not set runtime, model, or effort")
+	// ErrLoopMissingUntilEmpty reports a `loop:` block that omits the required
+	// `until_empty` key naming the task whose empty output drains the loop.
+	ErrLoopMissingUntilEmpty = errors.New("loop: until_empty is required")
 )
 
 // DuplicateTaskIDError reports two tasks declaring the same id.
@@ -257,6 +288,91 @@ type DuplicateTaskIDError struct{ ID TaskID }
 
 func (e *DuplicateTaskIDError) Error() string {
 	return fmt.Sprintf("duplicate task id %q", e.ID)
+}
+
+// InvalidWritesStateError reports a `writes_state` value that fails the
+// `[A-Za-z0-9_]+` rule, the same alphabet as a state placeholder key.
+type InvalidWritesStateError struct {
+	Task TaskID
+	Key  string
+}
+
+func (e *InvalidWritesStateError) Error() string {
+	return fmt.Sprintf("task %q: invalid writes_state %q: must match [A-Za-z0-9_]+", e.Task, e.Key)
+}
+
+// UnknownLoopTaskError reports a `loop.until_empty` that names no task in the
+// workflow; the loop could never observe its output and so could never drain.
+type UnknownLoopTaskError struct{ Task TaskID }
+
+func (e *UnknownLoopTaskError) Error() string {
+	return fmt.Sprintf("loop: until_empty names unknown task %q", e.Task)
+}
+
+// InvalidLoopMaxError reports a `loop.max` below 1. Max caps the iteration
+// count and must permit at least one pass.
+type InvalidLoopMaxError struct{ Max int }
+
+func (e *InvalidLoopMaxError) Error() string {
+	return fmt.Sprintf("loop: invalid max %d: must be >= 1", e.Max)
+}
+
+// UnknownLoopFieldError reports a key inside the `loop:` mapping that is not
+// one of until_empty|max.
+type UnknownLoopFieldError struct{ Field string }
+
+func (e *UnknownLoopFieldError) Error() string {
+	return fmt.Sprintf("loop: unknown field %q", e.Field)
+}
+
+// MissingForEachAsError reports a `for_each:` task that omits the required
+// `as:` key naming the per-instance loop variable.
+type MissingForEachAsError struct{ Task TaskID }
+
+func (e *MissingForEachAsError) Error() string {
+	return fmt.Sprintf("task %q: for_each requires as", e.Task)
+}
+
+// ForEachAsWithoutForEachError reports an `as:` declared on a task that has no
+// `for_each:`; the loop variable would bind nothing.
+type ForEachAsWithoutForEachError struct{ Task TaskID }
+
+func (e *ForEachAsWithoutForEachError) Error() string {
+	return fmt.Sprintf("task %q: as set without for_each", e.Task)
+}
+
+// InvalidForEachAsError reports an `as:` value that fails the `[A-Za-z0-9_]+`
+// rule, the same alphabet as a placeholder name.
+type InvalidForEachAsError struct {
+	Task TaskID
+	As   string
+}
+
+func (e *InvalidForEachAsError) Error() string {
+	return fmt.Sprintf("task %q: invalid as %q: must match [A-Za-z0-9_]+", e.Task, e.As)
+}
+
+// ForEachAsCollisionError reports an `as:` loop variable whose name collides
+// with a task id or param name; Kind is "task" or "param".
+type ForEachAsCollisionError struct {
+	Task TaskID
+	As   string
+	Kind string
+}
+
+func (e *ForEachAsCollisionError) Error() string {
+	return fmt.Sprintf("task %q: as %q collides with a %s name", e.Task, e.As, e.Kind)
+}
+
+// InvalidForEachSourceError reports a scalar `for_each:` value that is not
+// exactly one `{{...}}` placeholder (the dynamic-fanout shape).
+type InvalidForEachSourceError struct {
+	Task   TaskID
+	Source string
+}
+
+func (e *InvalidForEachSourceError) Error() string {
+	return fmt.Sprintf("task %q: for_each source %q must be a single {{...}} placeholder", e.Task, e.Source)
 }
 
 // UnknownDependencyError reports a depends_on entry that does not match any
@@ -578,6 +694,122 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 	return r, nil
 }
 
+// parseLoop decodes the workflow-level `loop:` mapping into a *Loop. An absent
+// block (zero-value node) yields nil — the workflow runs exactly once. A
+// present block requires `until_empty` to name a known task and `max` to be a
+// positive integer; both fields are mandatory.
+func parseLoop(node yaml.Node, known map[TaskID]struct{}) (*Loop, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, errors.New("loop: must be a mapping")
+	}
+	l := &Loop{}
+	hasUntil := false
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k, v := node.Content[i], node.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			return nil, errors.New("loop: key must be a scalar")
+		}
+		switch k.Value {
+		case "until_empty":
+			var s string
+			if err := v.Decode(&s); err != nil {
+				return nil, fmt.Errorf("loop.until_empty: %w", err)
+			}
+			tid, err := NewTaskID(s)
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := known[tid]; !ok {
+				return nil, &UnknownLoopTaskError{Task: tid}
+			}
+			l.UntilEmpty = tid
+			hasUntil = true
+		case "max":
+			if err := v.Decode(&l.Max); err != nil {
+				return nil, fmt.Errorf("loop.max: %w", err)
+			}
+		default:
+			return nil, &UnknownLoopFieldError{Field: k.Value}
+		}
+	}
+	if !hasUntil {
+		return nil, ErrLoopMissingUntilEmpty
+	}
+	if l.Max < 1 {
+		return nil, &InvalidLoopMaxError{Max: l.Max}
+	}
+	return l, nil
+}
+
+// parseForEach decodes a task's `for_each:` node into a fanout spec. An absent
+// node (zero value) means no fanout — in which case a stray `as:` is rejected,
+// since the loop variable would bind nothing.
+//
+// A YAML sequence is a static fanout: its scalar entries become the literal
+// values (returned as forEach, possibly empty but non-nil). A YAML scalar is a
+// dynamic fanout: it must hold exactly one `{{...}}` placeholder, returned as
+// source; a `{{id}}` source must name a depends_on entry and a `{{params.x}}`
+// source a declared param (state sources need neither). Any other shape is an
+// error.
+//
+// When a fanout is present, `as` is required, must satisfy the identifier
+// alphabet, and must not collide with a task id or param name.
+func parseForEach(tid TaskID, node yaml.Node, as string, deps []TaskID, known map[TaskID]struct{}, params map[ParamName]struct{}) (forEach []string, source string, err error) {
+	if node.Kind == 0 {
+		if as != "" {
+			return nil, "", &ForEachAsWithoutForEachError{Task: tid}
+		}
+		return nil, "", nil
+	}
+	if as == "" {
+		return nil, "", &MissingForEachAsError{Task: tid}
+	}
+	if !identifierRe.MatchString(as) {
+		return nil, "", &InvalidForEachAsError{Task: tid, As: as}
+	}
+	if _, ok := known[TaskID(as)]; ok {
+		return nil, "", &ForEachAsCollisionError{Task: tid, As: as, Kind: "task"}
+	}
+	if _, ok := params[ParamName(as)]; ok {
+		return nil, "", &ForEachAsCollisionError{Task: tid, As: as, Kind: "param"}
+	}
+
+	switch node.Kind {
+	case yaml.SequenceNode:
+		vals := make([]string, 0, len(node.Content))
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode {
+				return nil, "", fmt.Errorf("task %q: for_each: list entries must be scalars", tid)
+			}
+			vals = append(vals, item.Value)
+		}
+		return vals, "", nil
+	case yaml.ScalarNode:
+		src := node.Value
+		taskRefs, paramRefs, stateRefs := scanPlaceholders(src)
+		if len(taskRefs)+len(paramRefs)+len(stateRefs) != 1 {
+			return nil, "", &InvalidForEachSourceError{Task: tid, Source: src}
+		}
+		if len(taskRefs) == 1 {
+			name := taskRefs[0]
+			if !slices.Contains(deps, TaskID(name)) {
+				return nil, "", &UnknownPlaceholderError{Task: tid, Name: name}
+			}
+		}
+		if len(paramRefs) == 1 {
+			if _, ok := params[ParamName(paramRefs[0])]; !ok {
+				return nil, "", &UnknownParamError{Task: tid, Name: paramRefs[0]}
+			}
+		}
+		return nil, src, nil
+	default:
+		return nil, "", fmt.Errorf("task %q: for_each must be a list or a single {{...}} placeholder", tid)
+	}
+}
+
 // buildDeps validates a task's depends_on list and checks that every
 // `{{x}}` and `{{params.x}}` placeholder in its prompt is well-defined.
 //
@@ -592,7 +824,11 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 // When a bare `{{x}}` placeholder is unknown to depends_on but happens to
 // match a declared param, the returned UnknownPlaceholderError carries a
 // hint suggesting `{{params.x}}` so users notice the missing prefix.
-func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]struct{}, params map[ParamName]struct{}) ([]TaskID, error) {
+//
+// loopVar, when non-empty, is a `for_each` task's `as` variable: a `{{loopVar}}`
+// placeholder is resolved per-instance at run time, not via the DAG, so it is
+// excluded from the task-ref check (it creates no dependency edge).
+func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]struct{}, params map[ParamName]struct{}, loopVar string) ([]TaskID, error) {
 	deps := make([]TaskID, 0, len(declared))
 	declaredSet := make(map[TaskID]struct{}, len(declared))
 
@@ -612,9 +848,13 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 	}
 
 	// Task refs first, then param refs: this order makes the first error
-	// returned byte-identical to the pre-refactor two-loop scan.
-	taskRefs, paramRefs := scanPlaceholders(prompt)
+	// returned byte-identical to the pre-refactor two-loop scan. State refs
+	// are ignored here: they need no declaration and create no dependency edge.
+	taskRefs, paramRefs, _ := scanPlaceholders(prompt)
 	for _, name := range taskRefs {
+		if name == loopVar {
+			continue
+		}
 		if _, ok := declaredSet[TaskID(name)]; ok {
 			continue
 		}
@@ -634,22 +874,25 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 }
 
 // scanPlaceholders walks text in a SINGLE pass with combinedPlaceholderRe and
-// returns the task-id placeholder names and the param placeholder names in
-// source order. The combined regex disambiguates `{{params.x}}` (param branch,
-// capture group 1) from `{{id}}` (task branch, capture group 2), so the two
-// slices never cross-contaminate.
-func scanPlaceholders(text string) (taskRefs []string, paramRefs []string) {
+// returns the task-id, param, and state placeholder names in source order. The
+// combined regex disambiguates `{{params.x}}` (group 1), `{{state.x}}` (group
+// 2), and `{{id}}` (group 3), so the three slices never cross-contaminate.
+// State refs are returned separately so callers can treat them as neither task
+// edges nor param references: they need no declaration and create no DAG edge.
+func scanPlaceholders(text string) (taskRefs, paramRefs, stateRefs []string) {
 	for _, m := range combinedPlaceholderRe.FindAllStringSubmatch(text, -1) {
-		// combinedPlaceholderRe has two capture groups: group 1 is the param
-		// name (the `params.` branch), group 2 is the bare task id. Exactly one
-		// is non-empty per match.
-		if m[1] != "" {
+		// Exactly one capture group is non-empty per match: group 1 is the param
+		// name, group 2 is the state key, group 3 is the bare task id.
+		switch {
+		case m[1] != "":
 			paramRefs = append(paramRefs, m[1])
-		} else {
-			taskRefs = append(taskRefs, m[2])
+		case m[2] != "":
+			stateRefs = append(stateRefs, m[2])
+		default:
+			taskRefs = append(taskRefs, m[3])
 		}
 	}
-	return taskRefs, paramRefs
+	return taskRefs, paramRefs, stateRefs
 }
 
 // brokenBraceRe matches any `{{...}}` token whose body contains no closing
@@ -684,8 +927,9 @@ func validateSystemPrompt(sp string, params map[ParamName]struct{}) error {
 	if sp == "" {
 		return nil
 	}
-	taskRefs, paramRefs := scanPlaceholders(sp)
-	// Task-id placeholders are never resolvable in system_prompt.
+	taskRefs, paramRefs, _ := scanPlaceholders(sp)
+	// Task-id placeholders are never resolvable in system_prompt. State refs
+	// are tolerated: they resolve against the cross-run state at run time.
 	if len(taskRefs) > 0 {
 		return &SystemPlaceholderTaskRefError{Name: taskRefs[0]}
 	}
@@ -708,7 +952,7 @@ func checkUnusedParams(wf *Workflow) error {
 	}
 	used := make(map[ParamName]struct{}, len(wf.Params))
 	scan := func(s string) {
-		_, paramRefs := scanPlaceholders(s)
+		_, paramRefs, _ := scanPlaceholders(s)
 		for _, name := range paramRefs {
 			used[ParamName(name)] = struct{}{}
 		}

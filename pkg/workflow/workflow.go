@@ -44,12 +44,13 @@ var (
 	// name must satisfy identifierClass, the same alphabet as a ParamName.
 	paramPlaceholderRe = regexp.MustCompile(`\{\{params\.(` + identifierClass + `)\}\}`)
 
-	// combinedPlaceholderRe matches BOTH `{{params.name}}` and `{{id}}` in a
-	// single pass. Capture group 1 is the param name (non-empty for a param
-	// match); capture group 2 is the task id (non-empty for a task match).
-	// Used by Substitute to splice both kinds of placeholder in one pass so a
-	// param value containing `{{taskid}}` text is never re-expanded.
-	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|(` + identifierClass + `))\}\}`)
+	// combinedPlaceholderRe matches `{{params.name}}`, `{{state.key}}`, and
+	// `{{id}}` in a single pass. Capture group 1 is the param name (non-empty
+	// for a param match); group 2 is the state key (non-empty for a state
+	// match); group 3 is the task id (non-empty for a task match). Used by
+	// Substitute to splice all three kinds of placeholder in one pass so a
+	// substituted value containing `{{taskid}}` text is never re-expanded.
+	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|state\.(` + identifierClass + `)|(` + identifierClass + `))\}\}`)
 )
 
 // NewWorkflowID validates s and returns it as a WorkflowID.
@@ -131,6 +132,11 @@ type Workflow struct {
 	Params []Param
 	// Tasks are the workflow's tasks in declaration order.
 	Tasks []Task
+	// Loop, when non-nil, makes the run pipeline re-run the whole DAG
+	// loop-until-dry: it repeats up to Loop.Max iterations, carrying cross-run
+	// state between them, and stops as soon as the Loop.UntilEmpty task yields
+	// empty trimmed output. nil means the workflow runs exactly once.
+	Loop *Loop
 
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
 	// nil for hand-constructed Workflow values, in which case ByID falls back
@@ -169,6 +175,40 @@ type Task struct {
 	// Retry is the task's retry policy. The zero value means "no retry"
 	// (Max == 0). Meaningful for both LLM and shell tasks.
 	Retry Retry
+	// WritesState, when non-empty, names the cross-run state key under which
+	// this task's trimmed output is recorded after the run. The executor only
+	// reads state for substitution; the write-back is performed by the CLI from
+	// Report.Outputs. Must satisfy the identifier alphabet. Allowed on both LLM
+	// and shell tasks.
+	WritesState string
+	// ForEach holds the literal values of a static fanout (`for_each: [a, b]`).
+	// Non-nil (possibly empty) for a static for_each task; nil otherwise. The
+	// executor runs one instance per value, binding {{As}} to it, and joins the
+	// instance outputs with newlines so a downstream {{ID}} reference sees them
+	// all. Mutually exclusive with ForEachSource.
+	ForEach []string
+	// ForEachSource is the single `{{...}}` placeholder of a dynamic fanout
+	// (`for_each: "{{discover}}"`); "" for a static or non-fanout task. The
+	// executor substitutes it, then parses the result as a list (JSON array or
+	// newline-split). Mutually exclusive with ForEach.
+	ForEachSource string
+	// As names the per-instance loop variable bound to each fanout value and
+	// referenced as {{As}} in the prompt or command. Required when ForEach or
+	// ForEachSource is set; empty otherwise. Never collides with a task id or
+	// param name.
+	As string
+}
+
+// Loop configures loop-until-dry execution. The run pipeline re-runs the
+// entire DAG, carrying cross-run state between iterations, until the
+// UntilEmpty task's trimmed output is empty or Max iterations have elapsed.
+// Each iteration produces its own run record. A nil Workflow.Loop means the
+// workflow runs exactly once.
+type Loop struct {
+	// UntilEmpty names the task whose empty trimmed output ends the loop.
+	UntilEmpty TaskID
+	// Max caps the number of iterations. Always >= 1 in a parsed Workflow.
+	Max int
 }
 
 // Backoff names the delay schedule applied between retry attempts.
@@ -203,6 +243,12 @@ func (r Retry) Enabled() bool {
 // LLM task. The parser enforces XOR between Prompt and Command, so this is a
 // reliable discriminator at the executor, CLI, and store layers.
 func (t Task) IsShell() bool { return t.Command != "" }
+
+// IsForEach reports whether t is a fanout task — one that runs its prompt or
+// command once per resolved list value. True for both static (ForEach set) and
+// dynamic (ForEachSource set) fanouts. The two sources are mutually exclusive,
+// enforced by the parser.
+func (t Task) IsForEach() bool { return t.ForEach != nil || t.ForEachSource != "" }
 
 // Param is a declared workflow parameter — a named value supplied at run time
 // via `-p key=val` (or a defaults block) and substituted into prompts via

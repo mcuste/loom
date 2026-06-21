@@ -301,6 +301,62 @@ func usageDTO(u runtime.Usage) usageJSON {
 	}
 }
 
+// LoadState reads the cross-run state map for wf from
+// <root>/state/<workflow_id>.json. A missing file is not an error: it returns
+// a fresh empty map so first-tick callers can write into it directly. root
+// defaults to ".loom" when empty, matching [Config.Root].
+func LoadState(root string, wf workflow.WorkflowID) (map[string]string, error) {
+	if root == "" {
+		root = ".loom"
+	}
+	path := statePath(root, wf)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("store: read state %s: %w", path, err)
+	}
+	state := map[string]string{}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("store: parse state %s: %w", path, err)
+	}
+	return state, nil
+}
+
+// SaveState atomically writes the cross-run state map for wf to
+// <root>/state/<workflow_id>.json. It mirrors [Run.flushLocked]: the bytes go
+// to a .tmp sibling and are renamed into place, so a crash mid-write never
+// leaves a half-written state file. root defaults to ".loom" when empty.
+func SaveState(root string, wf workflow.WorkflowID, state map[string]string) error {
+	if root == "" {
+		root = ".loom"
+	}
+	dir := filepath.Join(root, "state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("store: create state dir: %w", err)
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("store: marshal state: %w", err)
+	}
+	data = append(data, '\n')
+	path := statePath(root, wf)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("store: write state: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("store: rename state: %w", err)
+	}
+	return nil
+}
+
+// statePath is the on-disk location of a workflow's cross-run state file.
+func statePath(root string, wf workflow.WorkflowID) string {
+	return filepath.Join(root, "state", string(wf)+".json")
+}
+
 // Load reads a run record from path and decodes it into a [RunRecord]. Used
 // by the resume command to recover the persisted manifest, params, and per-
 // task outputs from a prior run. Errors are wrapped with the source path so

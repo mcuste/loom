@@ -28,6 +28,10 @@ func TestRawMirrorsPublic(t *testing.T) {
 			name:   "task",
 			raw:    rawTask{},
 			public: Task{},
+			// ForEachSource is derived by parseForEach from the raw `for_each`
+			// scalar (the dynamic-fanout case); a static `for_each` sequence
+			// decodes into ForEach instead. There is no separate raw field.
+			extraPublic: map[string]struct{}{"ForEachSource": {}},
 		},
 		{
 			name:   "param",
@@ -103,11 +107,14 @@ func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 			t.Errorf("paramPlaceholderRe did not capture %q from {{params.%s}}; got %v — regex drift", s, s, m)
 		}
 		// combinedPlaceholderRe distinguishes branches via capture groups: group
-		// 1 is the param name, group 2 is the task id.
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 3 || m[1] != s || m[2] != "" {
+		// 1 is the param name, group 2 is the state key, group 3 is the task id.
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 4 || m[1] != s || m[2] != "" || m[3] != "" {
 			t.Errorf("combinedPlaceholderRe param branch dropped %q from {{params.%s}}; got %v — regex drift", s, s, m)
 		}
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 3 || m[2] != s || m[1] != "" {
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{state." + s + "}}"); len(m) != 4 || m[2] != s || m[1] != "" || m[3] != "" {
+			t.Errorf("combinedPlaceholderRe state branch dropped %q from {{state.%s}}; got %v — regex drift", s, s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 4 || m[3] != s || m[1] != "" || m[2] != "" {
 			t.Errorf("combinedPlaceholderRe task branch dropped %q from {{%s}}; got %v — regex drift", s, s, m)
 		}
 	}

@@ -96,6 +96,10 @@ type Hooks struct {
 // with no parameters.
 type Options struct {
 	Params workflow.ParamValues // Params holds resolved parameter values; read-only after Run starts.
+	// State holds the cross-run state map (key → value) consulted for
+	// `{{state.key}}` substitution. Read-only, like Params: the executor never
+	// writes it. A missing key substitutes to empty string. May be nil.
+	State map[string]string
 	// Seed maps task ids to outputs that should be treated as already-produced.
 	// Seeded tasks have their gates closed with the supplied value before any
 	// goroutine launches, so unseeded downstream tasks see the seed via
@@ -163,43 +167,49 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				}
 			}
 
-			// Substitute the body for both task kinds before dispatch; IsShell
-			// selects Command vs Prompt as the source text. mu guards
-			// rep.Outputs; opts.Params is read-only after Run starts, no lock
-			// needed.
-			src := t.Prompt
-			if t.IsShell() {
-				src = t.Command
-			}
-			mu.Lock()
-			body := workflow.Substitute(src, rep.Outputs, opts.Params)
-			mu.Unlock()
-
 			var (
 				res    TaskResult
 				runErr error
 			)
 
+			// A for_each task resolves its list and substitutes per instance
+			// inside runForEach, so no single body is computed up front; a plain
+			// task substitutes its body once here (mu guards rep.Outputs;
+			// opts.Params is read-only after Run starts).
 			if t.IsShell() {
 				if hooks.OnStart != nil {
 					hooks.OnStart(*t, "", "", "")
 				}
-				res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
-					return runShell(gctx, t, body)
-				})
+				if t.IsForEach() {
+					res, runErr = runForEach(gctx, t, &mu, rep.Outputs, opts, baseDelay, nil, "", "", "")
+				} else {
+					mu.Lock()
+					body := workflow.Substitute(t.Command, rep.Outputs, opts.Params, opts.State)
+					mu.Unlock()
+					res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
+						return runShell(gctx, t, body)
+					})
+				}
 			} else {
 				rt, model, effort := wf.Effective(t)
 				runner, ok := runtime.Lookup(rt)
 				if !ok {
 					return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 				}
-				sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params)
+				sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params, opts.State)
 				if hooks.OnStart != nil {
 					hooks.OnStart(*t, rt, model, effort)
 				}
-				res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
-					return runLLM(gctx, t, body, runner, model, effort, sysPrompt)
-				})
+				if t.IsForEach() {
+					res, runErr = runForEach(gctx, t, &mu, rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt)
+				} else {
+					mu.Lock()
+					body := workflow.Substitute(t.Prompt, rep.Outputs, opts.Params, opts.State)
+					mu.Unlock()
+					res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
+						return runLLM(gctx, t, body, runner, model, effort, sysPrompt)
+					})
+				}
 			}
 
 			if hooks.OnFinish != nil {

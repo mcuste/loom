@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/mcuste/loom/pkg/executor"
@@ -73,22 +74,56 @@ func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved w
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Load cross-run state once. It is the continuity between loop iterations:
+	// each iteration substitutes `{{state.key}}` from it and folds its
+	// `writes_state` outputs back in. A missing file yields an empty map.
+	state, err := store.LoadState("", wf.ID)
+	if err != nil {
+		return err
+	}
+
+	// A loop runs only on a plain `loom run`. A resume (any seeded task) is
+	// single-shot and bypasses the loop wrapper, matching --resume-latest's
+	// "resume the last iteration's run" contract.
+	if wf.Loop == nil || len(seededSet) > 0 {
+		_, runErr := runOnce(ctx, w, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries)
+		return runErr
+	}
+
+	// loop-until-dry: re-run the whole DAG, carrying and flushing state each
+	// iteration, until the until_empty task's trimmed output is empty or Max
+	// iterations elapse. Each iteration writes its own run record.
+	for i := 0; i < wf.Loop.Max; i++ {
+		fmt.Fprintf(w, "── iteration %d/%d ──\n\n", i+1, wf.Loop.Max)
+		rep, runErr := runOnce(ctx, w, manifest, wf, resolved, state, nil, nil, nil)
+		if runErr != nil {
+			return runErr
+		}
+		if rep == nil || strings.TrimSpace(rep.Outputs[wf.Loop.UntilEmpty]) == "" {
+			break
+		}
+	}
+	return nil
+}
+
+// runOnce executes the DAG exactly once: it opens a fresh run record, stamps
+// any seeded tasks, runs the executor, prints the summary, and folds
+// `writes_state` outputs into state. state is read for substitution and
+// written back in place, so the loop wrapper can carry it across iterations.
+// The returned report is nil only when the store could not be opened.
+func runOnce(ctx context.Context, w io.Writer, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry) (rep *executor.Report, runErr error) {
 	run, err := store.Open(wf.ID, manifest, store.Config{
 		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
 		Params:  stringifyParams(resolved),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Close is idempotent and must run even if the executor panics, so defer
 	// it. rep and runErr are read at defer time, after the executor returns;
-	// the closure captures them by reference. The store's Close error is
-	// reported but does not mask runErr.
-	var (
-		rep    *executor.Report
-		runErr error
-	)
+	// the closure captures the named returns by reference. The store's Close
+	// error is reported but does not mask runErr.
 	defer func() {
 		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
 			fmt.Fprintf(w, "  store: %v\n", closeErr)
@@ -137,9 +172,36 @@ func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved w
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		hooks(w, expected),
 		sh,
-	), executor.Options{Params: resolved, Seed: plan.seed})
+	), executor.Options{Params: resolved, Seed: seed, State: state})
 	if rep != nil {
 		printSummary(w, wf, rep, expected)
+		// Persist write-backs: each task with `writes_state` records its trimmed
+		// output under the named key. Only completed tasks appear in
+		// rep.Outputs, so a partial run carries over what it managed to produce.
+		if persistState(state, wf, rep) {
+			if err := store.SaveState("", wf.ID, state); err != nil {
+				fmt.Fprintf(w, "  store: %v\n", err)
+			}
+		}
 	}
-	return runErr
+	return rep, runErr
+}
+
+// persistState folds each `writes_state` task's trimmed output into state and
+// reports whether any key changed (so the caller can skip a needless write).
+func persistState(state map[string]string, wf *workflow.Workflow, rep *executor.Report) bool {
+	changed := false
+	for i := range wf.Tasks {
+		t := &wf.Tasks[i]
+		if t.WritesState == "" {
+			continue
+		}
+		out, ok := rep.Outputs[t.ID]
+		if !ok {
+			continue
+		}
+		state[t.WritesState] = strings.TrimSpace(out)
+		changed = true
+	}
+	return changed
 }
