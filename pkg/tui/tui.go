@@ -68,10 +68,12 @@ type Renderer interface {
 	Close() error
 }
 
-// New returns the renderer for w. Always returns a plainRenderer for now;
-// a rich renderer will be returned when Rich(w) is true once it exists.
+// New returns the renderer for w: the live ttyRenderer when w is an interactive
+// terminal (Rich(w)), otherwise the plainRenderer for piped or non-TTY output.
 func New(w io.Writer) Renderer {
-	// TODO(tui): return a rich renderer when Rich(w) reports true.
+	if Rich(w) {
+		return newTTYRenderer(w)
+	}
 	return &plainRenderer{w: w}
 }
 
