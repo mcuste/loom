@@ -131,6 +131,10 @@ func Parse(data []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
+		taskBudget, err := parseBudget(rt.Budget)
+		if err != nil {
+			return nil, fmt.Errorf("task %q: %w", tid, err)
+		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
 			ID:            tid,
@@ -146,6 +150,7 @@ func Parse(data []byte) (*Workflow, error) {
 			ForEach:       forEach,
 			ForEachSource: forEachSource,
 			As:            rt.As,
+			Budget:        taskBudget,
 		})
 	}
 
@@ -166,6 +171,12 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, err
 	}
 	wf.Loop = loop
+
+	budget, err := parseBudget(raw.Budget)
+	if err != nil {
+		return nil, err
+	}
+	wf.Budget = budget
 
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
@@ -224,6 +235,10 @@ type rawWorkflow struct {
 	// absent `loop:` key (the workflow runs once) from a present block whose
 	// fields must be validated against the task set.
 	Loop yaml.Node `yaml:"loop"`
+	// Budget is captured as a raw yaml.Node so the parser can distinguish an
+	// absent `budget:` key (no limit) from a present block whose max_cost_usd
+	// must be validated as a positive float.
+	Budget yaml.Node `yaml:"budget"`
 }
 
 type rawTask struct {
@@ -245,6 +260,10 @@ type rawTask struct {
 	// sequence (static fanout) from a single-placeholder scalar (dynamic fanout)
 	// and reject other shapes.
 	ForEach yaml.Node `yaml:"for_each"`
+	// Budget is captured as a raw yaml.Node so the parser can distinguish an
+	// absent per-task `budget:` key (no limit) from a present block validated
+	// the same way as the workflow-level budget.
+	Budget yaml.Node `yaml:"budget"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`

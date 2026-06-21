@@ -167,6 +167,25 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				}
 			}
 
+			// Enforce the workflow cost budget BEFORE dispatching: once the
+			// cumulative cost of already-completed tasks exceeds the limit, abort
+			// rather than start another task. Spend strictly greater than the
+			// limit is "exceeded"; landing exactly on it is allowed.
+			if wf.Budget != nil {
+				// Read and compare under the same lock so the check is atomic with
+				// respect to result-posting: a goroutine that acquires mu after a
+				// sibling's increment observes the updated spend rather than a stale
+				// snapshot. Splitting the read and the compare across an unlock would
+				// let concurrent subgraphs race on a value that is already obsolete.
+				mu.Lock()
+				spent := rep.Usage.TotalCostUSD
+				exceeded := spent > wf.Budget.MaxCostUSD
+				mu.Unlock()
+				if exceeded {
+					return &BudgetExceededError{Limit: wf.Budget.MaxCostUSD, Spent: spent}
+				}
+			}
+
 			var (
 				res    TaskResult
 				runErr error

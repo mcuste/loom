@@ -137,6 +137,9 @@ type Workflow struct {
 	// state between them, and stops as soon as the Loop.UntilEmpty task yields
 	// empty trimmed output. nil means the workflow runs exactly once.
 	Loop *Loop
+	// Budget, when non-nil, caps the workflow's cumulative cost in USD across
+	// all completed tasks. nil means no workflow-level cost limit.
+	Budget *Budget
 
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
 	// nil for hand-constructed Workflow values, in which case ByID falls back
@@ -197,6 +200,10 @@ type Task struct {
 	// ForEachSource is set; empty otherwise. Never collides with a task id or
 	// param name.
 	As string
+	// Budget, when non-nil, caps the cumulative cost in USD spent on this task's
+	// retries. Once the task's accumulated cost would exceed it, no further
+	// retry is attempted. nil means no per-task cost limit.
+	Budget *Budget
 }
 
 // Loop configures loop-until-dry execution. The run pipeline re-runs the

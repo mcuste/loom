@@ -31,8 +31,16 @@ var transientRe = regexp.MustCompile(`(?i)(50[0234]\b|\b429\b|rate limit|too man
 // the base delay, honoring ctx cancellation during the wait. With retry
 // disabled (or a non-retryable error) it behaves exactly like a single attempt.
 // The returned TaskResult reflects the last attempt.
+//
+// A per-task budget (t.Budget) caps the retries: the cost of each attempt is
+// accumulated, and once the spend strictly exceeds the limit no further retry
+// is attempted. The cap returns a typed *BudgetExceededError (carrying the
+// limit and the spend so far) so callers can distinguish a budget-capped task
+// from one that exhausted its retries via errors.As. Spend landing exactly on
+// the limit still permits the next retry, mirroring the workflow-level rule.
 func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, attempt func() (TaskResult, error)) (TaskResult, error) {
 	res, err := attempt()
+	spent := res.Usage.TotalCostUSD
 	if err == nil || !t.Retry.Enabled() {
 		return res, err
 	}
@@ -40,10 +48,14 @@ func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, att
 		if !retryable(t.Retry, err) {
 			return res, err
 		}
+		if t.Budget != nil && spent > t.Budget.MaxCostUSD {
+			return res, &BudgetExceededError{Limit: t.Budget.MaxCostUSD, Spent: spent}
+		}
 		if waitErr := sleepBackoff(ctx, t.Retry.Backoff, base, i); waitErr != nil {
 			return res, waitErr
 		}
 		res, err = attempt()
+		spent += res.Usage.TotalCostUSD
 		if err == nil {
 			return res, nil
 		}
