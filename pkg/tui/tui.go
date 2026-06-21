@@ -122,8 +122,8 @@ func (p *plainRenderer) Header(meta RunMeta) error {
 	return ew.err
 }
 
-// Warn prints a pre-plan advisory line. The "warning: " prefix is added here so
-// the wording stays byte-identical to the inlined call this replaced.
+// Warn prints a pre-plan advisory line. The "warning: " prefix is added here,
+// not by the caller, to keep plain-output bytes stable across callers.
 func (p *plainRenderer) Warn(msg string) error {
 	_, err := fmt.Fprintf(p.w, "warning: %s\n", msg)
 	return err
@@ -168,7 +168,14 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		}
 	}
 
-	order := wf.Plan()
+	// Loop members are listed under their own Loops section below, not in the
+	// flat execution order, so each scoped loop's body is attributed to it.
+	order := make([]workflow.TaskID, 0, len(wf.Tasks))
+	for _, id := range wf.Plan() {
+		if t := wf.ByID(id); t != nil && t.Loop == "" {
+			order = append(order, id)
+		}
+	}
 	seedCount := 0
 	for _, id := range order {
 		if seeded[id] {
@@ -217,7 +224,41 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 				i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn), suffix)
 		}
 	}
+
+	for _, lg := range wf.Loops {
+		ew.printf("\nLoop %s: %s max=%d\n", lg.ID, loopConvergence(lg), lg.Max)
+		bodyWidth := 0
+		for _, id := range lg.Members {
+			if n := len(id); n > bodyWidth {
+				bodyWidth = n
+			}
+		}
+		for i, id := range lg.Members {
+			t := wf.ByID(id)
+			if t.IsShell() {
+				cmd := t.Command
+				if len(cmd) > 60 {
+					cmd = cmd[:60] + "…"
+				}
+				ew.printf("  %2d. %-*s  kind=shell  cmd=%q  deps=%s\n",
+					i+1, bodyWidth, id, cmd, depsList(t.DependsOn))
+				continue
+			}
+			rt, m, e := wf.Effective(t)
+			ew.printf("  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
+				i+1, bodyWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+		}
+	}
 	return ew.err
+}
+
+// loopConvergence renders a scoped loop's convergence target as
+// until_empty=<task> or until=<expr>, matching whichever field the loop uses.
+func loopConvergence(lg workflow.LoopGroup) string {
+	if lg.UntilEmpty != "" {
+		return "until_empty=" + string(lg.UntilEmpty)
+	}
+	return "until=" + lg.Until
 }
 
 // Hooks serializes concurrent OnStart/OnFinish writes behind a mutex so output
@@ -328,6 +369,9 @@ func plural(n int) string {
 	return "s"
 }
 
+// paramSource returns the provenance tag for p: "cli" if the name appears in
+// cli, "default" if resolvedHasValue is true, "MISSING" otherwise. The return
+// value is consumed by paramTag to render the colored provenance label.
 func paramSource(p workflow.Param, cli map[string]string, resolvedHasValue bool) string {
 	if _, ok := cli[string(p.Name)]; ok {
 		return "cli"

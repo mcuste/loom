@@ -29,13 +29,11 @@ func RenderPlan(wf *workflow.Workflow, resolved workflow.ParamValues, cli map[st
 	return renderRichPlan(wf, resolved, cli)
 }
 
-// rich plan styles. Colors degrade to plain text under the Ascii profile, so
-// the snapshot stays deterministic while terminals still get color.
-//
-// These styles render against lipgloss's global color profile, which is process
-// state set via lipgloss.SetColorProfile. Callers that need deterministic output
-// (tests, snapshots, piped output) MUST pin the profile first; otherwise the
-// rendering inherits whatever profile was last set in the process.
+// These styles render against lipgloss's global color profile (process state,
+// set via lipgloss.SetColorProfile). Colors degrade to plain text under the
+// Ascii profile, keeping snapshot output deterministic. Callers that need
+// deterministic output (tests, snapshots, piped output) MUST pin the profile
+// first; otherwise the rendering inherits whatever profile was last set.
 var (
 	cardStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -59,6 +57,10 @@ func renderRichPlan(wf *workflow.Workflow, resolved workflow.ParamValues, cli ma
 	}
 	b.WriteString("\n")
 	b.WriteString(richWaves(wf))
+	if len(wf.Loops) > 0 {
+		b.WriteString("\n")
+		b.WriteString(richLoops(wf))
+	}
 	return b.String()
 }
 
@@ -127,36 +129,93 @@ func paramTag(source string) string {
 func richWaves(wf *workflow.Workflow) string {
 	waves := wf.Waves()
 
-	// idWidth is just the widest task id; derive it from the declared tasks
-	// rather than re-running Plan (Waves already invoked it).
+	// idWidth is just the widest top-level task id; loop members are drawn under
+	// their own groups (see richLoops) and never appear in the wave section, so
+	// excluding them keeps this column from being padded for ids it never shows.
 	idWidth := 0
-	for _, t := range wf.Tasks {
+	for i := range wf.Tasks {
+		t := &wf.Tasks[i]
+		if t.Loop != "" {
+			continue
+		}
 		if n := len(t.ID); n > idWidth {
 			idWidth = n
 		}
 	}
 
+	// Loop members are drawn under their own loop groups (see richLoops), so the
+	// wave listing carries only the top-level DAG. Empty waves (every member
+	// pulled into a loop) are dropped and the remainder renumbered.
+	var topWaves [][]workflow.TaskID
+	for _, wave := range waves {
+		var top []workflow.TaskID
+		for _, id := range wave {
+			if t := wf.ByID(id); t != nil && t.Loop == "" {
+				top = append(top, id)
+			}
+		}
+		if len(top) > 0 {
+			topWaves = append(topWaves, top)
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render(fmt.Sprintf("Execution plan (%d wave%s)", len(waves), plural(len(waves)))))
+	b.WriteString(sectionStyle.Render(fmt.Sprintf("Execution plan (%d wave%s)", len(topWaves), plural(len(topWaves)))))
 	b.WriteString("\n")
-	for i, wave := range waves {
+	for i, wave := range topWaves {
 		b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", i+1, len(wave), plural(len(wave)))))
 		b.WriteString("\n")
 		for _, id := range wave {
-			t := wf.ByID(id)
-			if t.IsShell() {
-				cmd := t.Command
-				if len(cmd) > 60 {
-					cmd = cmd[:60] + "…"
-				}
-				fmt.Fprintf(&b, "    %-*s  kind=shell  cmd=%q  deps=%s\n",
-					idWidth, id, cmd, depsList(t.DependsOn))
-				continue
-			}
-			rt, m, e := wf.Effective(t)
-			fmt.Fprintf(&b, "    %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
-				idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+			b.WriteString(richTaskRow(wf, id, idWidth))
 		}
 	}
 	return b.String()
+}
+
+// richLoops draws one labeled group per scoped loop: its id, convergence target
+// (until_empty / until), iteration cap, and every body task with its effective
+// runtime/model/effort and deps, so the in-loop execution shape is visible
+// without running.
+func richLoops(wf *workflow.Workflow) string {
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render(fmt.Sprintf("Loops (%d)", len(wf.Loops))))
+	b.WriteString("\n")
+	for _, lg := range wf.Loops {
+		// idWidth is derived per loop from its own members, so a wide id in one
+		// loop never pads the body columns of another.
+		idWidth := 0
+		for _, id := range lg.Members {
+			if n := len(id); n > idWidth {
+				idWidth = n
+			}
+		}
+		b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s  max=%d, %d task%s)",
+			lg.ID, loopConvergence(lg), lg.Max, len(lg.Members), plural(len(lg.Members)))))
+		b.WriteString("\n")
+		for _, id := range lg.Members {
+			b.WriteString(richTaskRow(wf, id, idWidth))
+		}
+	}
+	return b.String()
+}
+
+// richTaskRow renders a single indented task row shared by the wave and loop
+// listings: a shell task shows its command, an LLM task its effective
+// runtime/model/effort. Both surface incoming deps.
+func richTaskRow(wf *workflow.Workflow, id workflow.TaskID, idWidth int) string {
+	t := wf.ByID(id)
+	if t == nil {
+		return ""
+	}
+	if t.IsShell() {
+		cmd := t.Command
+		if len(cmd) > 60 {
+			cmd = cmd[:60] + "…"
+		}
+		return fmt.Sprintf("    %-*s  kind=shell  cmd=%q  deps=%s\n",
+			idWidth, id, cmd, depsList(t.DependsOn))
+	}
+	rt, m, e := wf.Effective(t)
+	return fmt.Sprintf("    %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
+		idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
 }

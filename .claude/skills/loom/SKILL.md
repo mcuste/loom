@@ -55,7 +55,7 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 ## Placeholders and dependencies
 
 - `{{task_id}}` in a prompt is substituted with that upstream task's full string output at runtime.
-- Every `{{id}}` placeholder **must also appear in `depends_on`**. Placeholders never implicitly extend the DAG. Repeating a placeholder is fine; it's templating, not declaration.
+- Every `{{id}}` placeholder **must also appear in `depends_on`**. Placeholders never implicitly extend the DAG. Repeating a placeholder is fine; it's templating, not declaration. The one exception is the `{{prev.<id>}}` loop placeholder, which is explicitly exempt (see [Scoped loops](#scoped-loops)).
 - `depends_on` may list a task with no placeholder (pure ordering constraint).
 - Cycles, unknown deps, duplicate deps, and unknown placeholders fail `loom check`.
 
@@ -124,6 +124,52 @@ loom check examples/deploy.yaml -p env=prod
 ```
 
 Resolution order (right-to-left wins): declared defaults → `-p` values. Unknown keys or missing required params are hard errors.
+
+## Scoped loops
+
+A top-level `loops:` block declares one or more **scoped loops** — named subgraphs that the run pipeline re-executes until a convergence target is reached. Unlike a whole-workflow loop, a scoped loop re-runs only its own body tasks; the rest of the DAG runs once.
+
+Declare each loop as a list entry with a nested `tasks:` body:
+
+```yaml
+loops:
+  - id: <loop_id>            # required, [A-Za-z0-9_]+; unique, and distinct
+                             # from every task id and param name
+    until_empty: <member>    # converge when this member's trimmed output is empty
+    # — OR —
+    until: '{{member}} == "done"'  # converge when this when-style expression is true
+    max: 4                   # required, >= 1; hard cap on iterations
+    tasks:                   # required, non-empty; same task schema as top-level
+      - id: drain
+        depends_on: [seed]
+        prompt: drain {{seed}} {{prev.refine}}
+      - id: refine
+        depends_on: [drain]
+        prompt: refine {{drain}}
+```
+
+Rules (all surfaced by `loom check`):
+
+- **Convergence** — exactly one of `until_empty` or `until` per loop. `until_empty` names a body member whose empty trimmed output ends the loop; `until` is a `when`-style expression that may reference **only** members of the same loop.
+- **`max`** — required and `>= 1`; bounds iterations even if the target never converges.
+- **Body** — `tasks:` is non-empty and uses the identical task schema (prompt/command, model/effort, etc.). Each body task carries its loop id; a task belongs to at most one loop.
+- **Connected** — the body must form a single connected subgraph via its internal edges.
+
+### Edge semantics
+
+A loop body has three edge kinds, distinguished by where each `depends_on` endpoint lives:
+
+- **Entry edge** — a body task depends on a non-member (e.g. `drain` depends on the top-level `seed`). Entry edges are satisfied once, before the loop starts; the upstream output is the same for every iteration.
+- **Internal edge** — a body task depends on another member of the same loop (e.g. `refine` depends on `drain`). Internal edges order the tasks *within* each iteration.
+- **Exit edge** — a non-member depends on a body member. The downstream task runs once, after the loop converges, seeing the final iteration's output.
+
+### `prev.<id>` placeholder
+
+Inside a loop body, `{{prev.<member>}}` injects the **prior iteration's** output of a sibling member (empty on the first iteration). It lets an iteration build on the last one without forming a cycle — `drain` above reads `{{prev.refine}}` to carry state forward. A `prev` reference is valid only inside a loop body and may only name a member of that same loop; using it elsewhere or across loops fails `loom check`.
+
+Unlike a plain `{{id}}` placeholder, a `{{prev.<member>}}` reference is **exempt from the `depends_on` rule** and must *not* be listed in `depends_on`: it reads across iterations, not within one, so adding the edge would form a cycle. In the example above `drain` reads `{{prev.refine}}` yet only declares `depends_on: [seed]`.
+
+`loom check` renders each loop as a labeled group showing its id, convergence target (`until_empty=` / `until=`), `max`, and every body task with its deps, so the loop's execution shape is visible without running it.
 
 ## Runtime / model / effort
 
