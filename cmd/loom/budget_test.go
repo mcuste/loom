@@ -8,6 +8,7 @@ import (
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/tui"
 )
 
 // cmdCostRuntime is a no-binary fake registered for the budget surfacing test.
@@ -60,7 +61,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{})
+	err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{})
 
 	var got *executor.BudgetExceededError
 	if !errors.As(err, &got) {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -51,7 +52,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	// Counter starts at 3: iterations emit work-2, work-1, then empty -> 3 runs.
@@ -81,7 +82,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if got := countRunRecords(t, "wf"); got != 3 {
@@ -111,7 +112,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	// "" -> x -> xx -> xxx (drain on the 4th pass).
@@ -149,7 +150,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if got := countRunRecords(t, "wf"); got != 1 {

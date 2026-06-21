@@ -11,6 +11,7 @@ import (
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/store"
+	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -65,7 +66,7 @@ func resolveSeed(wf *workflow.Workflow, plan seedPlan) (map[workflow.TaskID]bool
 // already-ok and tells the executor to skip them. The store's Close error is
 // reported independently so a write failure after a successful run does not
 // mask the nil return value.
-func runWorkflow(w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan) error {
+func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan) error {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
 	// only need the seeded set the executor will actually honor.
@@ -96,7 +97,7 @@ func runWorkflow(w io.Writer, home string, manifest []byte, wf *workflow.Workflo
 	// single-shot and bypasses the loop wrapper, matching --resume-latest's
 	// "resume the last iteration's run" contract.
 	if wf.Loop == nil || len(seededSet) > 0 {
-		_, runErr := runOnce(ctx, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries)
+		_, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries, nil)
 		return runErr
 	}
 
@@ -104,8 +105,8 @@ func runWorkflow(w io.Writer, home string, manifest []byte, wf *workflow.Workflo
 	// iteration, until the until_empty task's trimmed output is empty or Max
 	// iterations elapse. Each iteration writes its own run record.
 	for i := 0; i < wf.Loop.Max; i++ {
-		fmt.Fprintf(w, "── iteration %d/%d ──\n\n", i+1, wf.Loop.Max)
-		rep, runErr := runOnce(ctx, w, home, cwd, manifest, wf, resolved, state, nil, nil, nil)
+		loop := &tui.LoopMeta{N: i + 1, Max: wf.Loop.Max}
+		rep, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, nil, nil, nil, loop)
 		if runErr != nil {
 			return runErr
 		}
@@ -121,11 +122,11 @@ func runWorkflow(w io.Writer, home string, manifest []byte, wf *workflow.Workflo
 // `writes_state` outputs into state. state is read for substitution and
 // written back in place, so the loop wrapper can carry it across iterations.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry) (rep *executor.Report, runErr error) {
+func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry, loop *tui.LoopMeta) (rep *executor.Report, runErr error) {
 	run, err := store.Open(wf.ID, manifest, store.Config{
 		Root:    home,
 		Cwd:     cwd,
-		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
+		OnError: func(e error) { _, _ = fmt.Fprintf(w, "  store: %v\n", e) },
 		Params:  stringifyParams(resolved),
 	})
 	if err != nil {
@@ -135,15 +136,27 @@ func runOnce(ctx context.Context, w io.Writer, home, cwd string, manifest []byte
 	// Close is idempotent and must run even if the executor panics, so defer
 	// it. rep and runErr are read at defer time, after the executor returns;
 	// the closure captures the named returns by reference. The store's Close
-	// error is reported but does not mask runErr.
+	// error is reported but does not mask runErr. The deferred Fprintf has no
+	// error channel, so its own write error is intentionally discarded.
 	defer func() {
 		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
-			fmt.Fprintf(w, "  store: %v\n", closeErr)
+			_, _ = fmt.Fprintf(w, "  store: %v\n", closeErr)
 		}
 	}()
 
-	fmt.Fprintf(w, "Run file : %s\n", run.Path())
-	fmt.Fprintf(w, "Cwd      : %s\n\n", cwd)
+	// The renderer is owned by the caller (doRun / runFromRecord) and shared
+	// across loop iterations, so runOnce neither creates nor closes it. Header
+	// resets the per-iteration progress counter and records the denominator.
+	expected := len(wf.Tasks) - len(seededSet)
+	if err := r.Header(tui.RunMeta{
+		RunFile: run.Path(),
+		Cwd:     cwd,
+		Seeded:  len(seededSet),
+		Total:   expected,
+		Loop:    loop,
+	}); err != nil {
+		return nil, err
+	}
 
 	// Stamp each seeded task into the new run record as an already-ok entry so
 	// a future resume of this run can find them. The executor fires no hooks
@@ -153,8 +166,6 @@ func runOnce(ctx context.Context, w io.Writer, home, cwd string, manifest []byte
 	// Suppressed entirely on a plain run so its output stays byte-identical.
 	sh := storeHooks(run)
 	if len(seededSet) > 0 {
-		fmt.Fprintf(w, "Seeded   : %d task(s) from prior run\n\n", len(seededSet))
-
 		// Stamp in topological (plan) order so a seeded task is never recorded
 		// before a seeded dependency it relies on.
 		for _, id := range wf.Plan() {
@@ -181,19 +192,22 @@ func runOnce(ctx context.Context, w io.Writer, home, cwd string, manifest []byte
 		}
 	}
 
-	expected := len(wf.Tasks) - len(seededSet)
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
-		hooks(w, expected),
+		r.Hooks(),
 		sh,
 	), executor.Options{Params: resolved, Seed: seed, State: state})
 	if rep != nil {
-		printSummary(w, wf, rep, expected)
+		// A summary write error does not mask a real run failure: surface it only
+		// when the run itself otherwise succeeded.
+		if err := r.Summary(wf, rep, expected); err != nil && runErr == nil {
+			runErr = err
+		}
 		// Persist write-backs: each task with `writes_state` records its trimmed
 		// output under the named key. Only completed tasks appear in
 		// rep.Outputs, so a partial run carries over what it managed to produce.
 		if persistState(state, wf, rep) {
 			if err := store.SaveState(home, wf.ID, state); err != nil {
-				fmt.Fprintf(w, "  store: %v\n", err)
+				_, _ = fmt.Fprintf(w, "  store: %v\n", err)
 			}
 		}
 	}

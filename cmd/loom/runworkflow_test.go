@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -43,7 +44,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -80,7 +81,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if !strings.Contains(buf.String(), "Seeded   : 1 task(s) from prior run") {
@@ -115,7 +116,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -160,7 +161,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -209,7 +210,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -243,7 +244,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()

@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/pkg/store"
+	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -117,7 +118,7 @@ func chdirToRecorded(w io.Writer, cwd string) error {
 // seeded task, the new run record gets a synthetic ok entry written through
 // the store hooks before the executor starts, so a subsequent resume of
 // THIS run finds them already-completed instead of re-dispatching.
-func runFromRecord(w io.Writer, home string, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
+func runFromRecord(w io.Writer, home string, manifest []byte, rec *store.RunRecord, paramArgs []string) (err error) {
 	wf, err := workflow.Parse(manifest)
 	if err != nil {
 		return err
@@ -150,14 +151,23 @@ func runFromRecord(w io.Writer, home string, manifest []byte, rec *store.RunReco
 	// then execute. The record's params are the lower-precedence tier under any
 	// CLI overrides.
 	seeded, _ := resolveSeed(wf, plan)
-	resolved, _, err := check(w, wf, paramArgs, rec.Params, false, seeded)
+	// One renderer drives the resume's check phase and the run that follows, so a
+	// stateful renderer keeps a unified display across both. Its teardown error
+	// surfaces unless a prior error already won.
+	r := tui.New(w)
+	defer func() {
+		if cerr := r.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	resolved, _, err := check(r, wf, paramArgs, rec.Params, false, seeded)
 	if err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-	return runWorkflow(w, home, manifest, wf, resolved, plan)
+	return runWorkflow(r, w, home, manifest, wf, resolved, plan)
 }
 
 // findRunRecord resolves a user-supplied run id to a path under
