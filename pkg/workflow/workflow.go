@@ -214,6 +214,11 @@ type Task struct {
 	// retries. Once the task's accumulated cost would exceed it, no further
 	// retry is attempted. nil means no per-task cost limit.
 	Budget *Budget
+	// Schema, when non-nil, is the JSON Schema subset the task's output must
+	// satisfy. After an LLM task produces output, the executor validates it
+	// parses as JSON and matches Schema. nil means no validation. Only LLM
+	// tasks may set it; shell tasks are rejected by the parser.
+	Schema *Schema
 }
 
 // Loop configures loop-until-dry execution. The run pipeline re-runs the

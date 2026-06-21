@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"time"
 
@@ -68,6 +69,13 @@ func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, att
 // any registered classifier matches it. Class names with no classifier (none
 // can be admitted by the parser, per the drift guard) are ignored.
 func retryable(r workflow.Retry, err error) bool {
+	// A schema mismatch is retryable whenever the policy is enabled, regardless
+	// of its `on:` classes: the model can produce a conforming output on a fresh
+	// attempt, and the task wording ties the retry to "a retry policy is set".
+	var schemaErr *SchemaError
+	if errors.As(err, &schemaErr) {
+		return true
+	}
 	for _, class := range r.On {
 		classify, ok := classifiers[workflow.RetryClass(class)]
 		if ok && classify(err) {

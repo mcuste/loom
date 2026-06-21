@@ -87,7 +87,11 @@ func runForEach(ctx context.Context, t *workflow.Task, mu *sync.Mutex, outputs m
 				return
 			}
 			res, err := runWithRetry(ctx, t, base, func() (TaskResult, error) {
-				return runLLM(ctx, t, body, runner, model, effort, sysPrompt)
+				r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt)
+				if err != nil {
+					return r, err
+				}
+				return r, validateSchema(t, r.Output)
 			})
 			results[i] = instResult{res: res, err: err}
 		}()

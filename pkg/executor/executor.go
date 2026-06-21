@@ -279,7 +279,11 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 					body := workflow.Substitute(t.Prompt, rep.Outputs, opts.Params, opts.State)
 					mu.Unlock()
 					res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
-						return runLLM(gctx, t, body, runner, model, effort, sysPrompt)
+						r, err := runLLM(gctx, t, body, runner, model, effort, sysPrompt)
+						if err != nil {
+							return r, err
+						}
+						return r, validateSchema(t, r.Output)
 					})
 				}
 			}

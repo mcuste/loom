@@ -113,6 +113,13 @@ func Parse(data []byte) (*Workflow, error) {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
 			}
 		}
+		schema, err := parseSchema(rt.Schema)
+		if err != nil {
+			return nil, fmt.Errorf("task %q: %w", tid, err)
+		}
+		if schema != nil && rt.Command != "" {
+			return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
+		}
 		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet, rt.As)
 		if err != nil {
 			return nil, err
@@ -169,6 +176,7 @@ func Parse(data []byte) (*Workflow, error) {
 			ForEachSource: forEachSource,
 			As:            rt.As,
 			Budget:        taskBudget,
+			Schema:        schema,
 		})
 	}
 
@@ -283,6 +291,10 @@ type rawTask struct {
 	// absent per-task `budget:` key (no limit) from a present block validated
 	// the same way as the workflow-level budget.
 	Budget yaml.Node `yaml:"budget"`
+	// Schema is captured as a raw yaml.Node so the parser can distinguish an
+	// absent per-task `schema:` key (no validation) from a present block whose
+	// type/required/properties must be validated.
+	Schema yaml.Node `yaml:"schema"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`
