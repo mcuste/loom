@@ -125,7 +125,9 @@ type Hooks struct {
 // Options configures a Run call. The zero value is valid and runs the workflow
 // with no parameters.
 type Options struct {
-	Params workflow.ParamValues // Params holds resolved parameter values; read-only after Run starts.
+	// Params holds resolved parameter values passed via --param flags. Read-only
+	// after Run starts: goroutines read it without the lock.
+	Params workflow.ParamValues
 	// State holds the cross-run state map (key → value) consulted for
 	// `{{state.key}}` substitution. Read-only, like Params: the executor never
 	// writes it. A missing key substitutes to empty string. May be nil.
@@ -360,6 +362,13 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				hooks.OnFinish(*t, res, runErr)
 			}
 			if runErr != nil {
+				// A task error aborts the run: the gate is left unclosed, errgroup
+				// cancels gctx, and downstream goroutines exit at their <-gctx.Done()
+				// wait before ever reaching their own when: evaluation. Consequently
+				// failed(id) cannot observe a runtime failure of id in a live run
+				// (it is reachable-true only for a never-succeeded, never-skipped
+				// disposition, which a future continue-on-error mode would produce).
+				// TestRun_WhenFailedDepAbortsRun pins this behavior.
 				return fmt.Errorf("task %q: %w", t.ID, runErr)
 			}
 

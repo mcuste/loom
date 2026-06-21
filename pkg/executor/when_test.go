@@ -239,3 +239,35 @@ func TestRun_WhenFailedOfSkippedSkips(t *testing.T) {
 		t.Errorf("Outputs[on_failure] = %q, want empty (must not run)", rep.Outputs["on_failure"])
 	}
 }
+
+// TestRun_WhenFailedDepAbortsRun documents the current executor semantics that
+// make failed(id) a no-op against a *runtime* failure: when a dependency exits
+// non-zero, the run aborts (Run returns an error) and the failed()-guarded task
+// never reaches its when: evaluation, so it produces no output. This is the
+// regression anchor for that behavior; a future continue-on-error executor
+// would flip it (the guarded task would run) and must update this test.
+func TestRun_WhenFailedDepAbortsRun(t *testing.T) {
+	src := `
+name: wf
+runtime: exec-echo
+model: m1
+tasks:
+  - id: build
+    command: "exit 1"
+  - id: on_failure
+    depends_on: [build]
+    when: failed(build)
+    prompt: "recover"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+	if err == nil {
+		t.Fatal("Run returned nil error, want failure from build's non-zero exit")
+	}
+	if rep.Outputs["on_failure"] != "" {
+		t.Errorf("Outputs[on_failure] = %q, want empty (failed dep aborts the run before the guard runs)", rep.Outputs["on_failure"])
+	}
+}

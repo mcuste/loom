@@ -26,8 +26,12 @@ tasks:
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	if wf.Tasks[1].When != `{{gate}} == "go"` {
-		t.Errorf("task guarded When = %q, want %q", wf.Tasks[1].When, `{{gate}} == "go"`)
+	guarded := wf.ByID("guarded")
+	if guarded == nil {
+		t.Fatal("no task with id guarded in parsed workflow")
+	}
+	if guarded.When != `{{gate}} == "go"` {
+		t.Errorf("task guarded When = %q, want %q", guarded.When, `{{gate}} == "go"`)
 	}
 }
 

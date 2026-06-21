@@ -65,6 +65,18 @@ func TestConditionEval(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "gt at boundary",
+			expr: `{{count}} > 3`,
+			env:  workflow.Env{Outputs: map[workflow.TaskID]string{"count": "3"}},
+			want: false,
+		},
+		{
+			name: "lt at boundary",
+			expr: `{{count}} < 3`,
+			env:  workflow.Env{Outputs: map[workflow.TaskID]string{"count": "3"}},
+			want: false,
+		},
+		{
 			name: "contains present",
 			expr: `contains({{log}}, "error")`,
 			env:  workflow.Env{Outputs: map[workflow.TaskID]string{"log": "an error happened"}},
@@ -89,15 +101,29 @@ func TestConditionEval(t *testing.T) {
 			want: false,
 		},
 		{
+			// failed(id) is true when the task is absent from both Succeeded and
+			// Skipped: it neither completed successfully nor was guarded out. This
+			// is the realistic production state for a failure (the executor only
+			// ever writes succeeded[id]=true or skipped[id]=true), unlike a
+			// Succeeded[id]=false entry which is never produced.
 			name: "failed true",
 			expr: `failed(build)`,
-			env:  workflow.Env{Succeeded: map[workflow.TaskID]bool{"build": false}},
+			env:  workflow.Env{},
 			want: true,
 		},
 		{
 			name: "failed false",
 			expr: `failed(build)`,
 			env:  workflow.Env{Succeeded: map[workflow.TaskID]bool{"build": true}},
+			want: false,
+		},
+		{
+			// A task skipped by its own when: guard is neither succeeded nor
+			// failed: failed(id) must stay false so a failure-branch does not fire
+			// on a skip.
+			name: "failed false when skipped",
+			expr: `failed(build)`,
+			env:  workflow.Env{Skipped: map[workflow.TaskID]bool{"build": true}},
 			want: false,
 		},
 	}
@@ -117,6 +143,20 @@ func TestConditionEval(t *testing.T) {
 				t.Errorf("Eval(%q) = %v, want %v", tc.expr, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestConditionEval_NonIntegerOutputErrors pins that a numeric comparison
+// against an output that does not parse as an integer is an Eval error, not a
+// silent false. This is the only Eval path that returns a non-nil error.
+func TestConditionEval_NonIntegerOutputErrors(t *testing.T) {
+	cond, err := workflow.ParseCondition(`{{count}} < 3`, known("count"))
+	if err != nil {
+		t.Fatalf("ParseCondition returned error: %v", err)
+	}
+	_, err = cond.Eval(workflow.Env{Outputs: map[workflow.TaskID]string{"count": "not-a-number"}})
+	if err == nil {
+		t.Fatal("Eval returned nil error for a non-integer output, want error")
 	}
 }
 

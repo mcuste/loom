@@ -90,7 +90,7 @@ func ParseCondition(expr string, known map[TaskID]bool) (*Condition, error) {
 		if !known[ref] {
 			return nil, &UnknownConditionRefError{Expr: raw, Ref: string(ref)}
 		}
-		return &Condition{raw: raw, op: "contains", ref: ref, literal: m[2]}, nil
+		return &Condition{raw: raw, op: "contains", ref: ref, literal: unescapeLiteral(m[2])}, nil
 	}
 
 	if m := comparisonRe.FindStringSubmatch(expr); m != nil {
@@ -104,7 +104,7 @@ func ParseCondition(expr string, known map[TaskID]bool) (*Condition, error) {
 			if lit == nil {
 				return nil, &MalformedConditionError{Expr: raw, Reason: fmt.Sprintf("operator %q expects a quoted string", op)}
 			}
-			return &Condition{raw: raw, op: op, ref: ref, literal: lit[1]}, nil
+			return &Condition{raw: raw, op: op, ref: ref, literal: unescapeLiteral(lit[1])}, nil
 		case "<", ">":
 			if !intLitRe.MatchString(rhs) {
 				return nil, &MalformedConditionError{Expr: raw, Reason: fmt.Sprintf("operator %q expects an integer", op)}
@@ -141,14 +141,35 @@ func (c *Condition) Eval(env Env) (bool, error) {
 		got := env.Outputs[c.ref]
 		n, err := strconv.Atoi(strings.TrimSpace(got))
 		if err != nil {
-			return false, fmt.Errorf("when %q: output of %q is not an integer: %q", c.raw, c.ref, got)
+			return false, fmt.Errorf("%q: output of %q is not an integer: %q", c.raw, c.ref, got)
 		}
 		if c.op == "<" {
 			return n < c.num, nil
 		}
 		return n > c.num, nil
 	}
-	return false, fmt.Errorf("when %q: unsupported operator %q", c.raw, c.op)
+	return false, fmt.Errorf("%q: unsupported operator %q", c.raw, c.op)
+}
+
+// unescapeLiteral resolves backslash escapes in a string literal captured by
+// the condition grammar. The grammar's `\\.` alternative guarantees every
+// backslash is followed by some character; this drops the backslash and keeps
+// that character verbatim, so `\"` becomes `"` and `\\` becomes `\`. Without
+// this, a literal like "say \"hi\"" would retain its backslashes and never
+// match the runtime output `say "hi"`.
+func unescapeLiteral(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // MalformedConditionError reports a `when:` expression that does not satisfy
