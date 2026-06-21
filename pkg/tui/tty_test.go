@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+	"github.com/muesli/termenv"
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
@@ -118,11 +119,12 @@ func TestRunModel_ViewBoundsHeightWithOverflow(t *testing.T) {
 // shell task reports exit=0 (no token/cost columns), while a failed one reports
 // FAIL with the error, diverging from the LLM finish format.
 func TestFinishLine_ShellPaths(t *testing.T) {
+	sym := symbolsFor(termenv.TrueColor)
 	ok := finishLine(taskFinishMsg{
 		id:    "build",
 		shell: true,
 		res:   executor.TaskResult{Elapsed: 1500 * time.Millisecond},
-	})
+	}, sym)
 	if !strings.Contains(ok, "exit=0") || strings.Contains(ok, "in=") {
 		t.Fatalf("shell success line = %q, want exit=0 and no token columns", ok)
 	}
@@ -132,7 +134,7 @@ func TestFinishLine_ShellPaths(t *testing.T) {
 		shell: true,
 		err:   errors.New("boom"),
 		res:   executor.TaskResult{Elapsed: time.Second},
-	})
+	}, sym)
 	if !strings.Contains(fail, "FAIL") || !strings.Contains(fail, "boom") {
 		t.Fatalf("shell failure line = %q, want FAIL and the error", fail)
 	}

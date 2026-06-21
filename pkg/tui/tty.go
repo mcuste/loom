@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/muesli/termenv"
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
@@ -22,11 +23,12 @@ import (
 // taskStartMsg, OnFinish to a taskFinishMsg; the live model consumes them to
 // move a task between its pending/running/done/failed buckets.
 type taskStartMsg struct {
-	id     workflow.TaskID
-	rt     runtime.Name
-	model  runtime.Model
-	effort runtime.Effort
-	shell  bool
+	id       workflow.TaskID
+	rt       runtime.Name
+	model    runtime.Model
+	effort   runtime.Effort
+	shell    bool
+	retrying bool
 }
 
 type taskFinishMsg struct {
@@ -49,12 +51,13 @@ const (
 // holds enough to render the spinner line and, on finish, the committed
 // scrollback summary.
 type liveTask struct {
-	id     workflow.TaskID
-	rt     runtime.Name
-	model  runtime.Model
-	effort runtime.Effort
-	shell  bool
-	state  taskState
+	id       workflow.TaskID
+	rt       runtime.Name
+	model    runtime.Model
+	effort   runtime.Effort
+	shell    bool
+	state    taskState
+	retrying bool
 }
 
 // runModel is the bubbletea model for the live `loom run` region. It tracks
@@ -72,8 +75,13 @@ type runModel struct {
 	// usage accumulates across finished tasks for the status bar.
 	usage runtime.Usage
 
-	order []workflow.TaskID         // running-task render order
+	order []workflow.TaskID // running-task render order
 	tasks map[workflow.TaskID]*liveTask
+
+	sym     symbolSet         // badge/gauge glyphs for this terminal's profile
+	maxCost float64           // workflow budget ceiling (0 when wf.Budget is nil)
+	loop    *LoopMeta         // loop-iteration ribbon source, nil on a plain run
+	seeded  []workflow.TaskID // resume-seeded tasks, in plan order
 
 	started  time.Time
 	width    int
@@ -93,15 +101,24 @@ func newRunModel(meta RunMeta, cancel context.CancelFunc) *runModel {
 		spinner: sp,
 		total:   meta.Total,
 		tasks:   make(map[workflow.TaskID]*liveTask),
+		sym:     symbolsFor(termenv.TrueColor),
+		loop:    meta.Loop,
 		started: time.Now(),
 		width:   80,
 		height:  24,
 	}
 }
 
-// Init starts the spinner tick.
+// Init starts the spinner tick and commits a seed badge line to scrollback for
+// each resume-seeded task. Seeded tasks fire no executor hooks, so the live
+// view would otherwise never surface them; emitting their badges up front keeps
+// a resume's skipped steps visible.
 func (m *runModel) Init() tea.Cmd {
-	return m.spinner.Tick
+	cmds := []tea.Cmd{m.spinner.Tick}
+	for _, id := range m.seeded {
+		cmds = append(cmds, tea.Println(fmt.Sprintf("  %s %s", renderBadge(badgeState{seeded: true}, m.sym), id)))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update folds task start/finish messages and key presses into model state. A
@@ -145,16 +162,18 @@ func (m *runModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *runModel) onStart(msg taskStartMsg) {
 	if t, ok := m.tasks[msg.id]; ok {
 		t.state = stateRunning
+		t.retrying = msg.retrying
 		return
 	}
 	m.order = append(m.order, msg.id)
 	m.tasks[msg.id] = &liveTask{
-		id:     msg.id,
-		rt:     msg.rt,
-		model:  msg.model,
-		effort: msg.effort,
-		shell:  msg.shell,
-		state:  stateRunning,
+		id:       msg.id,
+		rt:       msg.rt,
+		model:    msg.model,
+		effort:   msg.effort,
+		shell:    msg.shell,
+		state:    stateRunning,
+		retrying: msg.retrying,
 	}
 	m.running++
 }
@@ -178,7 +197,7 @@ func (m *runModel) onFinish(msg taskFinishMsg) string {
 		m.running--
 		m.dropTask(msg.id)
 	}
-	return finishLine(msg)
+	return finishLine(msg, m.sym)
 }
 
 // dropTask removes a finished task from the running render order so the live
@@ -212,7 +231,11 @@ func (m *runModel) View() string {
 		if t == nil || t.state != stateRunning {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s %s %s", m.spinner.View(), t.id, descriptor(t)))
+		badge := ""
+		if t.retrying {
+			badge = renderBadge(badgeState{retrying: true}, m.sym) + " "
+		}
+		lines = append(lines, fmt.Sprintf("%s %s %s%s", m.spinner.View(), t.id, badge, descriptor(t)))
 	}
 
 	if len(lines) > budget {
@@ -233,11 +256,20 @@ func (m *runModel) View() string {
 }
 
 // statusBar is the one-line summary at the bottom of the live region:
-// done/total, running count, accrued cost, and elapsed wall time.
+// done/total, running count, accrued cost, and elapsed wall time. A loop
+// ribbon (iteration n/max) and a budget gauge (spend over MaxCostUSD) are
+// appended when the run carries that metadata.
 func (m *runModel) statusBar() string {
 	elapsed := time.Since(m.started).Round(time.Second)
-	return fmt.Sprintf("%d/%d done · %d running · $%.6f · %s",
+	bar := fmt.Sprintf("%d/%d done · %d running · $%.6f · %s",
 		m.done, m.total, m.running, m.usage.TotalCostUSD, elapsed)
+	if r := loopRibbon(RunMeta{Loop: m.loop}); r != "" {
+		bar += " · " + r
+	}
+	if g := budgetGauge(m.usage.TotalCostUSD, m.maxCost, m.sym); g != "" {
+		bar += " · " + g
+	}
+	return bar
 }
 
 // descriptor renders the runtime facts shown after a running task's id.
@@ -250,19 +282,27 @@ func descriptor(t *liveTask) string {
 
 // finishLine builds the permanent scrollback summary for a finished task,
 // mirroring the plain renderer's per-task finish line so scrollback reads the
-// same whether or not the live view is active.
-func finishLine(msg taskFinishMsg) string {
+// same whether or not the live view is active. A leading state badge (drawn
+// with glyph set sym) distinguishes a failure, a cache hit, and a when-skip
+// from a plain completion; a failure shows the trimmed error inline before the
+// summary columns.
+func finishLine(msg taskFinishMsg, sym symbolSet) string {
 	id := msg.id
 	elapsed := msg.res.Elapsed.Round(time.Millisecond)
-	if msg.err != nil {
-		return fmt.Sprintf("  %s FAIL after %s: %v", id, elapsed, msg.err)
+	switch {
+	case msg.err != nil:
+		return fmt.Sprintf("  %s %s FAIL after %s: %s", sym.failed, id, elapsed, strings.TrimSpace(msg.err.Error()))
+	case msg.shell:
+		return fmt.Sprintf("  %s %s done %s  exit=0", sym.done, id, elapsed)
+	case msg.res.Status == executor.StatusSkipped:
+		return fmt.Sprintf("  %s %s %s", renderBadge(badgeState{res: msg.res}, sym), id, elapsed)
+	case msg.res.CacheHit:
+		return fmt.Sprintf("  %s %s %s  $%.6f", renderBadge(badgeState{res: msg.res}, sym), id, elapsed, msg.res.Usage.TotalCostUSD)
+	default:
+		u := msg.res.Usage
+		return fmt.Sprintf("  %s %s done %s  in=%d out=%d cache=%d  $%.6f",
+			sym.done, id, elapsed, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.TotalCostUSD)
 	}
-	if msg.shell {
-		return fmt.Sprintf("  %s done %s  exit=0", id, elapsed)
-	}
-	u := msg.res.Usage
-	return fmt.Sprintf("  %s done %s  in=%d out=%d cache=%d  $%.6f",
-		id, elapsed, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.TotalCostUSD)
 }
 
 // ttyRenderer drives the live `loom run` region through a bubbletea program in
@@ -274,6 +314,12 @@ type ttyRenderer struct {
 	w      io.Writer
 	plain  plainRenderer
 	cancel context.CancelFunc
+
+	// seeded and maxCost are captured from Plan (which runs before the live
+	// program starts) and threaded into the model in start: seeded drives the
+	// resume seed badges, maxCost the status-bar budget gauge.
+	seeded  []workflow.TaskID
+	maxCost float64
 
 	mu     sync.Mutex
 	prog   *tea.Program
@@ -313,11 +359,17 @@ func (t *ttyRenderer) start(meta RunMeta) {
 		return
 	}
 	m := newRunModel(meta, t.cancel)
-	t.prog = tea.NewProgram(m, tea.WithOutput(t.w))
+	m.sym = symbolsFor(termenv.NewOutput(t.w).Profile)
+	m.maxCost = t.maxCost
+	m.seeded = t.seeded
+	prog := tea.NewProgram(m, tea.WithOutput(t.w))
+	t.prog = prog
 	t.done = make(chan struct{})
 	go func() {
 		defer close(t.done)
-		_, err := t.prog.Run()
+		// Use the captured prog, not t.prog: stop() clears t.prog under t.mu
+		// while this goroutine runs, so reading the field here would race.
+		_, err := prog.Run()
 		// The program has exited (q/ctrl-c, or an early write/terminal
 		// failure). Clear prog so Hooks' send() stops forwarding into a dead
 		// program, and record the error so Close can surface it to the caller.
@@ -331,6 +383,19 @@ func (t *ttyRenderer) start(meta RunMeta) {
 // Plan delegates to the plain renderer; the plan prints during the check phase,
 // before the live region starts.
 func (t *ttyRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string, seeded map[workflow.TaskID]bool) error {
+	// Capture the seeded set in plan order and the budget ceiling here, before
+	// the live program starts: the live view learns about seeded tasks (which
+	// fire no executor hooks) and the budget gauge ceiling only through this
+	// call.
+	t.seeded = nil
+	for _, id := range wf.Plan() {
+		if seeded[id] {
+			t.seeded = append(t.seeded, id)
+		}
+	}
+	if wf.Budget != nil {
+		t.maxCost = wf.Budget.MaxCostUSD
+	}
 	return t.plain.Plan(wf, resolved, cli, seeded)
 }
 
