@@ -175,6 +175,16 @@ type Task struct {
 	// `depends_on` in YAML; the parser validates that every `{{id}}` placeholder
 	// in the prompt appears here but does not extend this list implicitly.
 	DependsOn []TaskID
+	// When holds the raw `when:` conditional expression, "" when absent. It is
+	// preserved for diagnostics and round-tripping; the executor evaluates the
+	// compiled Cond, not this text.
+	When string
+	// Cond is the compiled form of When, produced by ParseCondition at load
+	// time and nil when When is empty. The executor evaluates it once all
+	// dependencies resolve and skips the task (status "skipped", empty output)
+	// when it evaluates false, still closing the task's gate so downstream tasks
+	// proceed. Storing it here avoids re-parsing on every execution.
+	Cond *Condition
 	// Retry is the task's retry policy. The zero value means "no retry"
 	// (Max == 0). Meaningful for both LLM and shell tasks.
 	Retry Retry

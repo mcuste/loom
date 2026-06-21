@@ -135,6 +135,22 @@ func Parse(data []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, fmt.Errorf("task %q: %w", tid, err)
 		}
+		// A `when:` expression may only reference this task's dependencies: the
+		// executor evaluates it after the dependency gates close, so a reference
+		// to any other task (or the task's own id) could read an output that has
+		// not been written yet. Bounding ParseCondition by depSet rejects those
+		// at load time.
+		var cond *Condition
+		if rt.When != "" {
+			depSet := make(map[TaskID]bool, len(deps))
+			for _, d := range deps {
+				depSet[d] = true
+			}
+			cond, err = ParseCondition(rt.When, depSet)
+			if err != nil {
+				return nil, fmt.Errorf("task %q: %w", tid, err)
+			}
+		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
 			ID:            tid,
@@ -145,6 +161,8 @@ func Parse(data []byte) (*Workflow, error) {
 			Model:         runtime.Model(rt.Model),
 			Effort:        runtime.Effort(rt.Effort),
 			DependsOn:     deps,
+			When:          rt.When,
+			Cond:          cond,
 			Retry:         retry,
 			WritesState:   rt.WritesState,
 			ForEach:       forEach,
@@ -251,6 +269,7 @@ type rawTask struct {
 	Command     string   `yaml:"command"`
 	DependsOn   []string `yaml:"depends_on"`
 	WritesState string   `yaml:"writes_state"`
+	When        string   `yaml:"when"`
 	As          string   `yaml:"as"`
 	// Retry is captured as a raw yaml.Node so the parser can distinguish an
 	// absent `retry:` key (zero value, no retry) from a present-but-partial

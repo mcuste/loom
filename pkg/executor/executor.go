@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"strings"
 	"sync"
@@ -40,7 +41,20 @@ type TaskResult struct {
 	Output  string
 	Usage   runtime.Usage
 	Elapsed time.Duration
+	// Status records the task's terminal disposition. It is StatusSkipped when
+	// the task's `when:` expression evaluated false (Output is empty in that
+	// case) and StatusOK for a task that ran to completion.
+	Status string
 }
+
+// Terminal task statuses surfaced on TaskResult.Status.
+const (
+	// StatusOK marks a task that ran to completion.
+	StatusOK = "ok"
+	// StatusSkipped marks a task whose `when:` expression evaluated false: it
+	// produced no output but still closed its gate so downstream tasks proceed.
+	StatusSkipped = "skipped"
+)
 
 // ShellError reports a non-zero exit from a shell task. The wrapped command's
 // stderr is captured verbatim so callers can surface it without re-running
@@ -50,8 +64,8 @@ type ShellError struct {
 	Stderr   string
 }
 
-// Error implements error. Includes the exit code and the trimmed stderr so a
-// single line conveys both why the task failed and what the process said.
+// Error includes the exit code and trimmed stderr so a single line conveys
+// both why the task failed and what the process said.
 func (e *ShellError) Error() string {
 	s := strings.TrimSpace(e.Stderr)
 	if s == "" {
@@ -140,12 +154,20 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		gates[tid] = make(chan struct{})
 	}
 
+	// succeeded records, per completed task, whether it ran to completion;
+	// skipped records, per task, whether its `when:` guard skipped it. The two
+	// are distinct so failed()/succeeded() never conflate a skip with a failure.
+	// Both are read under mu like rep.Outputs.
+	succeeded := make(map[workflow.TaskID]bool, len(order))
+	skipped := make(map[workflow.TaskID]bool, len(order))
+
 	// Close seeded gates and stamp their outputs before spawning any
 	// goroutine. Downstream waiters see the seed via {{id}} substitution
 	// just as if the task had run this invocation. Unknown ids are ignored.
 	for _, tid := range order {
 		if v, ok := opts.Seed[tid]; ok {
 			rep.Outputs[tid] = v
+			succeeded[tid] = true
 			close(gates[tid])
 		}
 	}
@@ -164,6 +186,37 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				case <-gates[dep]:
 				case <-gctx.Done():
 					return gctx.Err()
+				}
+			}
+
+			// Evaluate the task's `when:` guard once its dependencies have
+			// resolved. A false result skips the task: it produces empty output
+			// and StatusSkipped, but still closes its gate so downstream tasks
+			// proceed. Cond was compiled and validated at load time.
+			if t.Cond != nil {
+				mu.Lock()
+				env := workflow.Env{
+					Outputs:   maps.Clone(rep.Outputs),
+					Succeeded: maps.Clone(succeeded),
+					Skipped:   maps.Clone(skipped),
+				}
+				mu.Unlock()
+				run, err := t.Cond.Eval(env)
+				if err != nil {
+					return fmt.Errorf("task %q: when: %w", t.ID, err)
+				}
+				if !run {
+					res := TaskResult{TaskID: t.ID, Status: StatusSkipped}
+					if hooks.OnFinish != nil {
+						hooks.OnFinish(*t, res, nil)
+					}
+					mu.Lock()
+					rep.Outputs[t.ID] = ""
+					skipped[t.ID] = true
+					rep.Tasks = append(rep.Tasks, res)
+					mu.Unlock()
+					close(gates[t.ID])
+					return nil
 				}
 			}
 
@@ -238,8 +291,10 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 				return fmt.Errorf("task %q: %w", t.ID, runErr)
 			}
 
+			res.Status = StatusOK
 			mu.Lock()
 			rep.Outputs[t.ID] = res.Output
+			succeeded[t.ID] = true
 			rep.Tasks = append(rep.Tasks, res)
 			rep.Usage.InputTokens += res.Usage.InputTokens
 			rep.Usage.OutputTokens += res.Usage.OutputTokens

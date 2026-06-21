@@ -30,8 +30,9 @@ func TestRawMirrorsPublic(t *testing.T) {
 			public: Task{},
 			// ForEachSource is derived by parseForEach from the raw `for_each`
 			// scalar (the dynamic-fanout case); a static `for_each` sequence
-			// decodes into ForEach instead. There is no separate raw field.
-			extraPublic: map[string]struct{}{"ForEachSource": {}},
+			// decodes into ForEach instead. Cond is compiled by ParseCondition
+			// from the raw `when:` text. Neither has a separate raw field.
+			extraPublic: map[string]struct{}{"ForEachSource": {}, "Cond": {}},
 		},
 		{
 			name:   "param",
