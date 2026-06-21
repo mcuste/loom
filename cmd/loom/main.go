@@ -66,7 +66,7 @@ func newRunCmd() *cobra.Command {
 	}
 	addParamFlags(cmd, &paramArgs)
 	cmd.Flags().BoolVar(&resumeLatest, "resume-latest", false,
-		"seed ok tasks from .loom/runs/<wf>/latest.json and re-run the remainder")
+		"seed ok tasks from $LOOM_HOME/runs/<wf>/latest.json (default $HOME/.loom) and re-run the remainder")
 	return cmd
 }
 
@@ -141,7 +141,11 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-	return runWorkflow(w, manifest, wf, resolved, seedPlan{})
+	home, err := loomHome()
+	if err != nil {
+		return err
+	}
+	return runWorkflow(w, home, manifest, wf, resolved, seedPlan{})
 }
 
 // doCheck runs the shared check phase only: validate and print the plan, then

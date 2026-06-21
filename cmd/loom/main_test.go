@@ -47,8 +47,9 @@ func writeWorkflow(t *testing.T, body string) string {
 }
 
 // chdirTo cd's into dir for the rest of the test, restoring the original
-// cwd via t.Cleanup. The store writes to ./.loom by default, so tests that
-// drive `loom run` end-to-end must isolate that side-effect per test.
+// cwd via t.Cleanup. e2e tests pair this with loomHomeForTest so the store
+// roots under an isolated $LOOM_HOME and the run's recorded cwd is the temp
+// dir rather than the test process's working directory.
 func chdirTo(t *testing.T, dir string) {
 	t.Helper()
 	orig, err := os.Getwd()
@@ -76,6 +77,7 @@ tasks:
   - id: a
     prompt: hello {{params.env}}
 `)
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	var buf bytes.Buffer
@@ -92,8 +94,8 @@ tasks:
 		t.Errorf("error %q does not name the offending param %q", err.Error(), "ghost")
 	}
 	// Run file should never have been created — bail-out happened before store.Open.
-	if _, statErr := os.Stat(".loom"); !os.IsNotExist(statErr) {
-		t.Errorf(".loom directory exists after rejected run; statErr=%v", statErr)
+	if _, statErr := os.Stat(testRunsDir(t)); !os.IsNotExist(statErr) {
+		t.Errorf("runs directory exists after rejected run; statErr=%v", statErr)
 	}
 }
 
@@ -215,6 +217,7 @@ tasks:
   - id: greet
     command: echo hello
 `)
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	var buf bytes.Buffer
@@ -258,6 +261,7 @@ tasks:
   - id: greet
     prompt: hello {{params.who}}
 `)
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	var buf bytes.Buffer
@@ -271,7 +275,7 @@ tasks:
 	}
 
 	// Read the run record via latest.json so we don't have to glob a run id.
-	latest := filepath.Join(".loom", "runs", "wf", "latest.json")
+	latest := filepath.Join(testRunsDir(t), "wf", "latest.json")
 	data, err := os.ReadFile(latest)
 	if err != nil {
 		t.Fatalf("read latest.json: %v", err)

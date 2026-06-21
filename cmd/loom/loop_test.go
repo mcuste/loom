@@ -15,7 +15,7 @@ import (
 // writes one record per iteration, so this is the iteration count.
 func countRunRecords(t *testing.T, wfID string) int {
 	t.Helper()
-	dir := filepath.Join(".loom", "runs", wfID)
+	dir := filepath.Join(testRunsDir(t), wfID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("readdir %s: %v", dir, err)
@@ -36,6 +36,7 @@ func countRunRecords(t *testing.T, wfID string) int {
 // then empty output once drained. The loop must stop on the first empty
 // until_empty output and write one run record per iteration.
 func TestRunWorkflow_LoopDrainsAndStops(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -50,7 +51,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	// Counter starts at 3: iterations emit work-2, work-1, then empty -> 3 runs.
@@ -65,6 +66,7 @@ tasks:
 // TestRunWorkflow_LoopRespectsMax pins that a loop whose until_empty task never
 // empties stops after exactly Max iterations.
 func TestRunWorkflow_LoopRespectsMax(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -79,7 +81,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if got := countRunRecords(t, "wf"); got != 3 {
@@ -93,6 +95,7 @@ tasks:
 // reaches "xxx". With max=10 the loop must stop at iteration 4 on drain, not
 // on the cap, proving state carried between iterations.
 func TestRunWorkflow_LoopCarriesState(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -108,7 +111,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	// "" -> x -> xx -> xxx (drain on the 4th pass).
@@ -122,6 +125,7 @@ tasks:
 // bypassed and exactly one run record is written, despite the until_empty task
 // never emptying.
 func TestRunWorkflow_LoopBypassedOnResume(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -145,7 +149,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if got := countRunRecords(t, "wf"); got != 1 {

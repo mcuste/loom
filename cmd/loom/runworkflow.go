@@ -58,14 +58,14 @@ func resolveSeed(wf *workflow.Workflow, plan seedPlan) (map[workflow.TaskID]bool
 }
 
 // runWorkflow is the unified run pipeline shared by doRun and runFromRecord.
-// It parses nothing itself; callers hand it the already-parsed workflow,
-// resolved params, and CLI param map (for plan provenance). plan carries the
-// optional seed: a zero plan runs the whole workflow, while a non-empty plan
-// annotates the printed plan, stamps each seeded task into the fresh run
-// record as already-ok, and tells the executor to skip them. The store's
-// Close error is reported independently so a write failure after a successful
-// run does not mask the nil return value.
-func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan) error {
+// It parses nothing itself; callers hand it the already-parsed workflow and
+// resolved params after the check phase has already validated and printed the
+// plan. plan carries the optional seed: a zero plan runs the whole workflow,
+// while a non-empty plan stamps each seeded task into the fresh run record as
+// already-ok and tells the executor to skip them. The store's Close error is
+// reported independently so a write failure after a successful run does not
+// mask the nil return value.
+func runWorkflow(w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan) error {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
 	// only need the seeded set the executor will actually honor.
@@ -74,10 +74,20 @@ func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved w
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// home is resolved once by the caller (before any resume-time chdir) so a
+	// relative LOOM_HOME cannot split the store across two dirs. Resolve only the
+	// invocation cwd here, then thread both into every run record so the store
+	// roots under the home directory and a later resume can restore the
+	// directory the run was launched from.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+
 	// Load cross-run state once. It is the continuity between loop iterations:
 	// each iteration substitutes `{{state.key}}` from it and folds its
 	// `writes_state` outputs back in. A missing file yields an empty map.
-	state, err := store.LoadState("", wf.ID)
+	state, err := store.LoadState(home, wf.ID)
 	if err != nil {
 		return err
 	}
@@ -86,7 +96,7 @@ func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved w
 	// single-shot and bypasses the loop wrapper, matching --resume-latest's
 	// "resume the last iteration's run" contract.
 	if wf.Loop == nil || len(seededSet) > 0 {
-		_, runErr := runOnce(ctx, w, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries)
+		_, runErr := runOnce(ctx, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries)
 		return runErr
 	}
 
@@ -95,7 +105,7 @@ func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved w
 	// iterations elapse. Each iteration writes its own run record.
 	for i := 0; i < wf.Loop.Max; i++ {
 		fmt.Fprintf(w, "── iteration %d/%d ──\n\n", i+1, wf.Loop.Max)
-		rep, runErr := runOnce(ctx, w, manifest, wf, resolved, state, nil, nil, nil)
+		rep, runErr := runOnce(ctx, w, home, cwd, manifest, wf, resolved, state, nil, nil, nil)
 		if runErr != nil {
 			return runErr
 		}
@@ -111,8 +121,10 @@ func runWorkflow(w io.Writer, manifest []byte, wf *workflow.Workflow, resolved w
 // `writes_state` outputs into state. state is read for substitution and
 // written back in place, so the loop wrapper can carry it across iterations.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, w io.Writer, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry) (rep *executor.Report, runErr error) {
+func runOnce(ctx context.Context, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry) (rep *executor.Report, runErr error) {
 	run, err := store.Open(wf.ID, manifest, store.Config{
+		Root:    home,
+		Cwd:     cwd,
 		OnError: func(e error) { fmt.Fprintf(w, "  store: %v\n", e) },
 		Params:  stringifyParams(resolved),
 	})
@@ -130,7 +142,8 @@ func runOnce(ctx context.Context, w io.Writer, manifest []byte, wf *workflow.Wor
 		}
 	}()
 
-	fmt.Fprintf(w, "Run file : %s\n\n", run.Path())
+	fmt.Fprintf(w, "Run file : %s\n", run.Path())
+	fmt.Fprintf(w, "Cwd      : %s\n\n", cwd)
 
 	// Stamp each seeded task into the new run record as an already-ok entry so
 	// a future resume of this run can find them. The executor fires no hooks
@@ -179,7 +192,7 @@ func runOnce(ctx context.Context, w io.Writer, manifest []byte, wf *workflow.Wor
 		// output under the named key. Only completed tasks appear in
 		// rep.Outputs, so a partial run carries over what it managed to produce.
 		if persistState(state, wf, rep) {
-			if err := store.SaveState("", wf.ID, state); err != nil {
+			if err := store.SaveState(home, wf.ID, state); err != nil {
 				fmt.Fprintf(w, "  store: %v\n", err)
 			}
 		}

@@ -23,6 +23,7 @@ tasks:
   - id: greet
     prompt: hello world
 `)
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	var buf bytes.Buffer
@@ -35,7 +36,7 @@ tasks:
 		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
 	}
 
-	data, err := os.ReadFile(filepath.Join(".loom", "runs", "wf", "latest.json"))
+	data, err := os.ReadFile(filepath.Join(testRunsDir(t), "wf", "latest.json"))
 	if err != nil {
 		t.Fatalf("read latest.json: %v", err)
 	}

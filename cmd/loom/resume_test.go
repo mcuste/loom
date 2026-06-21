@@ -38,7 +38,7 @@ func init() { runtime.Register("cmd-fail", cmdFailRuntime{}) }
 // are used by the seeding logic, so the test passes only those.
 func writeRunRecord(t *testing.T, wfID, runID, manifest string, tasks []map[string]any, params map[string]string) string {
 	t.Helper()
-	dir := filepath.Join(".loom", "runs", wfID)
+	dir := filepath.Join(testRunsDir(t), wfID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir runs: %v", err)
 	}
@@ -68,7 +68,7 @@ func writeRunRecord(t *testing.T, wfID, runID, manifest string, tasks []map[stri
 // the named run file. Required for tests that resolve "latest".
 func linkLatest(t *testing.T, wfID, runID string) {
 	t.Helper()
-	dir := filepath.Join(".loom", "runs", wfID)
+	dir := filepath.Join(testRunsDir(t), wfID)
 	link := filepath.Join(dir, "latest.json")
 	_ = os.Remove(link)
 	if err := os.Symlink(runID+".json", link); err != nil {
@@ -81,7 +81,7 @@ func linkLatest(t *testing.T, wfID, runID string) {
 // having to predict its (timestamp + random) run id.
 func readNewRun(t *testing.T, wfID, skipID string) map[string]any {
 	t.Helper()
-	dir := filepath.Join(".loom", "runs", wfID)
+	dir := filepath.Join(testRunsDir(t), wfID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
@@ -124,6 +124,7 @@ func readNewRun(t *testing.T, wfID, skipID string) map[string]any {
 // trips into Output. The new run record's b.prompt then proves the seed
 // flowed through Substitute.
 func TestResumeCommand_SeedsOkTasksAndRerunsFailed(t *testing.T) {
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -172,6 +173,7 @@ tasks:
 // literal run id. Without this, users would have to copy-paste the random
 // suffix every time they wanted to retry the most recent run.
 func TestResumeCommand_LatestResolvesSymlink(t *testing.T) {
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -209,6 +211,7 @@ tasks:
 // The workflow YAML on disk supplies the manifest (the run record is only
 // consulted for the seeded outputs and the original params).
 func TestRunCommand_ResumeLatestFlag(t *testing.T) {
+	loomHomeForTest(t)
 	dir := t.TempDir()
 	chdirTo(t, dir)
 
@@ -266,6 +269,7 @@ tasks:
 // the absent id into the new run record (it would mislead a future resume),
 // and (c) succeed end-to-end by running only the tasks the new YAML declares.
 func TestResumeCommand_DropsSeedForIDsRemovedFromWorkflow(t *testing.T) {
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	// Original record has `a` (ok) and `b` (failed, depended on `a`); the
@@ -341,6 +345,7 @@ tasks:
 // record stores params={"who":"alice"}; the resume command is called with
 // no -p flag and must succeed.
 func TestResumeCommand_ReusesOriginalParams(t *testing.T) {
+	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf

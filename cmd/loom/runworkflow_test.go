@@ -30,6 +30,7 @@ func parseAndResolve(t *testing.T, manifest string, cli, lower map[string]string
 // summary, with no "Seeded" line anywhere in the output. This guards the
 // byte-identity of a plain `loom run` after the de-duplication.
 func TestRunWorkflow_PlainRunCompletesWithoutSeededLine(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -42,11 +43,11 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
-	if strings.Contains(out, "Seeded") {
+	if strings.Contains(out, "Seeded   :") {
 		t.Errorf("plain run emitted a Seeded line:\n%s", out)
 	}
 	if !strings.Contains(out, `✓ workflow "wf" complete`) {
@@ -57,6 +58,7 @@ tasks:
 // TestRunWorkflow_SeededRunPrintsSeededCount pins that a non-empty seedPlan
 // prints the "Seeded   : N task(s) from prior run" line with the seed count.
 func TestRunWorkflow_SeededRunPrintsSeededCount(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -78,7 +80,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if !strings.Contains(buf.String(), "Seeded   : 1 task(s) from prior run") {
@@ -91,6 +93,7 @@ tasks:
 // executor ran it. Success plus the downstream prompt carrying the seed value
 // proves the seed bypassed the runtime and fed `b` via substitution.
 func TestRunWorkflow_SeededRunSkipsSeededTask(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -112,7 +115,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -135,6 +138,7 @@ tasks:
 // starts, so a later resume of this run finds it complete rather than
 // re-dispatching it.
 func TestRunWorkflow_SeededRunStampsSeedIntoRecord(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -156,7 +160,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -183,6 +187,7 @@ tasks:
 // to run only the remainder: expected = len(tasks) - len(seed). With 2 tasks
 // and 1 seed, the per-task progress denominator must read /1, not /2.
 func TestRunWorkflow_SeededRunReducesExpectedCount(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -204,7 +209,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -220,6 +225,7 @@ tasks:
 // expected count (denominator stays /1, not /0), and no record is stamped for
 // it.
 func TestRunWorkflow_SeededEntryAbsentFromWorkflowIsDropped(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -237,11 +243,11 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(&buf, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, plan); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
-	if strings.Contains(out, "Seeded") {
+	if strings.Contains(out, "Seeded   :") {
 		t.Errorf("out-of-workflow seed should not print a Seeded line:\n%s", out)
 	}
 	if !strings.Contains(out, "[1/1]") {

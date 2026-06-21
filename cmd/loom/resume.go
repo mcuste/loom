@@ -31,9 +31,16 @@ func newResumeCmd() *cobra.Command {
 
 // doResume loads the named run record and re-runs the workflow with `ok`
 // tasks seeded with their stored output. The literal id "latest" follows the
-// most-recently-updated .loom/runs/<wf>/latest.json symlink.
+// most-recently-updated $LOOM_HOME/runs/<wf>/latest.json symlink. When the
+// record carries the directory the original run was invoked from, this chdirs
+// into it before re-running so the resumed run's shell tasks and relative paths
+// resolve against the original dir rather than the resume's launch dir.
 func doResume(w io.Writer, runID string, paramArgs []string) error {
-	path, err := findRunRecord(runID)
+	home, err := loomHome()
+	if err != nil {
+		return err
+	}
+	path, err := findRunRecord(home, runID)
 	if err != nil {
 		return err
 	}
@@ -41,13 +48,23 @@ func doResume(w io.Writer, runID string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	return runFromRecord(w, []byte(rec.Manifest), rec, paramArgs)
+	if err := chdirToRecorded(w, rec.Cwd); err != nil {
+		return err
+	}
+	return runFromRecord(w, home, []byte(rec.Manifest), rec, paramArgs)
 }
 
 // doRunResumeLatest is the --resume-latest entry point for `loom run`. The
 // workflow body comes from the YAML on disk; the record only supplies the
 // seeded outputs and the original params.
 func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
+	home, err := loomHome()
+	if err != nil {
+		return err
+	}
+	// The YAML path arg is relative to the CURRENT cwd, so read and parse the
+	// manifest BEFORE any chdir; otherwise a relative path would resolve against
+	// the recorded dir and miss the file the user pointed at.
 	manifest, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -56,12 +73,39 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	recPath := filepath.Join(".loom", "runs", string(wf.ID), "latest.json")
+	recPath := filepath.Join(home, "runs", string(wf.ID), "latest.json")
 	rec, err := store.Load(recPath)
 	if err != nil {
 		return err
 	}
-	return runFromRecord(w, manifest, rec, paramArgs)
+	if err := chdirToRecorded(w, rec.Cwd); err != nil {
+		return err
+	}
+	return runFromRecord(w, home, manifest, rec, paramArgs)
+}
+
+// chdirToRecorded changes into cwd (the directory the original run was invoked
+// from) when it is recorded and differs from the current dir, so a resumed
+// run's shell tasks and relative paths resolve against it. A blank cwd or one
+// already matching the current dir is a no-op.
+func chdirToRecorded(w io.Writer, cwd string) error {
+	if cwd == "" {
+		return nil
+	}
+	here, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	if cwd == here {
+		return nil
+	}
+	if err := os.Chdir(cwd); err != nil {
+		return fmt.Errorf("chdir to recorded run dir %s: %w", cwd, err)
+	}
+	if _, err := fmt.Fprintf(w, "Cwd      : %s (restored from run record)\n", cwd); err != nil {
+		return err
+	}
+	return nil
 }
 
 // runFromRecord drives a resume invocation: parse the manifest, merge the
@@ -73,7 +117,7 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 // seeded task, the new run record gets a synthetic ok entry written through
 // the store hooks before the executor starts, so a subsequent resume of
 // THIS run finds them already-completed instead of re-dispatching.
-func runFromRecord(w io.Writer, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
+func runFromRecord(w io.Writer, home string, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
 	wf, err := workflow.Parse(manifest)
 	if err != nil {
 		return err
@@ -113,17 +157,17 @@ func runFromRecord(w io.Writer, manifest []byte, rec *store.RunRecord, paramArgs
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-	return runWorkflow(w, manifest, wf, resolved, plan)
+	return runWorkflow(w, home, manifest, wf, resolved, plan)
 }
 
-// findRunRecord resolves a user-supplied run id to a path under .loom/runs.
-// The literal "latest" follows the most-recently-updated latest.json
-// symlink across all workflows; any other id is matched verbatim against
-// .loom/runs/<wf>/<runID>.json across every workflow directory. The runID
-// must be a single path component (no separators, no `..`) so an attacker
-// cannot point the loader at an arbitrary file via `..` traversal.
-func findRunRecord(runID string) (string, error) {
-	root := filepath.Join(".loom", "runs")
+// findRunRecord resolves a user-supplied run id to a path under
+// $LOOM_HOME/runs. The literal "latest" follows the most-recently-updated
+// latest.json symlink across all workflows; any other id is matched verbatim
+// against <home>/runs/<wf>/<runID>.json across every workflow directory. The
+// runID must be a single path component (no separators) so an attacker cannot
+// point the loader at an arbitrary file via `..` traversal.
+func findRunRecord(home, runID string) (string, error) {
+	root := filepath.Join(home, "runs")
 	if runID == "latest" {
 		return findLatestRecord(root)
 	}
@@ -146,22 +190,24 @@ func findRunRecord(runID string) (string, error) {
 	return "", fmt.Errorf("run id %q: not found under %s", runID, root)
 }
 
-// validateRunID rejects ids that contain path separators or `..` segments;
-// without this, filepath.Join silently cleans `../../foo` to a path outside
-// .loom/runs and Load reads an arbitrary file off disk.
+// validateRunID rejects ids that contain a path separator; without this,
+// filepath.Join silently cleans `../../foo` to a path outside the runs root and
+// Load reads an arbitrary file off disk. The `..` traversal vectors (`../`,
+// `..\`) all carry a separator, so the separator check covers them; a bare `..`
+// substring (e.g. `a..b`) is a legitimate id and must not be rejected.
 func validateRunID(runID string) error {
 	if runID == "" {
 		return errors.New("run id: empty")
 	}
-	if strings.ContainsAny(runID, `/\`) || strings.Contains(runID, "..") {
+	if strings.ContainsAny(runID, `/\`) {
 		return fmt.Errorf("run id %q: must be a single path component", runID)
 	}
 	return nil
 }
 
-// findLatestRecord picks the most-recently-modified .loom/runs/*/latest.json
+// findLatestRecord picks the most-recently-modified <home>/runs/*/latest.json
 // link, so `loom resume latest` resolves to the user's most recent run even
-// when several workflows share the .loom directory.
+// when several workflows share the home directory.
 func findLatestRecord(root string) (string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -186,7 +232,7 @@ func findLatestRecord(root string) (string, error) {
 		}
 	}
 	if best == "" {
-		return "", errors.New("no latest run found under .loom/runs")
+		return "", fmt.Errorf("no latest run found under %s", root)
 	}
 	return best, nil
 }

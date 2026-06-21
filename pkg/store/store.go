@@ -1,8 +1,9 @@
 // Package store persists the artifacts of a loom run to disk so users can
 // inspect prompts, outputs, and accounting after the fact.
 //
-// A Run is opened against a root directory (typically ".loom") and writes a
-// single self-contained JSON file per run:
+// A Run is opened against a root directory (loom's home directory: $LOOM_HOME,
+// or $HOME/.loom by default; ".loom" is the fallback when no root is given) and
+// writes a single self-contained JSON file per run:
 //
 //	<root>/runs/<workflow_id>/<run_id>.json
 //	<root>/runs/<workflow_id>/latest.json -> <run_id>.json
@@ -91,6 +92,10 @@ type Config struct {
 	// Params holds resolved parameter values (key → value) for this run.
 	// Stored verbatim; no provenance is recorded.
 	Params map[string]string
+	// Cwd is the working directory the run was invoked from. Recorded so a
+	// later resume can restore it before re-running shell tasks and relative
+	// paths. Empty means it is not recorded.
+	Cwd string
 }
 
 // Open creates a new run JSON file for workflowID under cfg.Root, seeded
@@ -137,6 +142,7 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 			Status:     StatusRunning,
 			Manifest:   string(manifest),
 			Params:     cfg.Params,
+			Cwd:        cfg.Cwd,
 		},
 		tasks: map[workflow.TaskID]int{},
 	}
@@ -380,6 +386,7 @@ func Load(path string) (*RunRecord, error) {
 type RunRecord struct {
 	RunID      string            `json:"run_id"`
 	WorkflowID string            `json:"workflow_id"`
+	Cwd        string            `json:"cwd,omitempty"`
 	StartedAt  time.Time         `json:"started_at"`
 	FinishedAt time.Time         `json:"finished_at,omitzero"`
 	ElapsedMs  int64             `json:"elapsed_ms,omitempty"`

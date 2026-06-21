@@ -39,6 +39,7 @@ func init() {
 // three-task chain at cost 0.5 each overruns the 0.75 budget before its last
 // task is dispatched.
 func TestRunWorkflow_SurfacesBudgetExceeded(t *testing.T) {
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
 	manifest := `name: wf
@@ -59,7 +60,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	err := runWorkflow(&buf, []byte(manifest), wf, resolved, seedPlan{})
+	err := runWorkflow(&buf, home, []byte(manifest), wf, resolved, seedPlan{})
 
 	var got *executor.BudgetExceededError
 	if !errors.As(err, &got) {
