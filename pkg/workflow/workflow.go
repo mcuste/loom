@@ -51,6 +51,13 @@ var (
 	// Substitute to splice all three kinds of placeholder in one pass so a
 	// substituted value containing `{{taskid}}` text is never re-expanded.
 	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|state\.(` + identifierClass + `)|(` + identifierClass + `))\}\}`)
+
+	// prevPlaceholderRe matches `{{prev.id}}` placeholders, which reference the
+	// prior iteration's output of a member task inside a scoped loop. The
+	// captured name must satisfy identifierClass, the same alphabet as a TaskID.
+	// The leading `prev.` segment carries a dot, so combinedPlaceholderRe never
+	// matches these tokens; the parser validates and substitutes them separately.
+	prevPlaceholderRe = regexp.MustCompile(`\{\{prev\.(` + identifierClass + `)\}\}`)
 )
 
 // NewWorkflowID validates s and returns it as a WorkflowID.
@@ -137,6 +144,11 @@ type Workflow struct {
 	// state between them, and stops as soon as the Loop.UntilEmpty task yields
 	// empty trimmed output. nil means the workflow runs exactly once.
 	Loop *Loop
+	// Loops are the workflow's scoped loops in declaration order. Each LoopGroup
+	// re-runs a named subgraph of Tasks until its convergence target drains.
+	// Empty when the workflow declares no `loops:` block. Distinct from the
+	// whole-workflow Loop above.
+	Loops []LoopGroup
 	// Budget, when non-nil, caps the workflow's cumulative cost in USD across
 	// all completed tasks. nil means no workflow-level cost limit.
 	Budget *Budget
@@ -227,6 +239,10 @@ type Task struct {
 	// task into hash-based output memoization, *false opts it out. nil inherits
 	// the workflow-level default. Shell tasks are never memoized regardless.
 	Cache *bool
+	// Loop is the id of the scoped loop this task belongs to, or "" for a
+	// top-level task. A task is defined in exactly one place, so it belongs to at
+	// most one loop. Set by Parse from the enclosing `loops:` entry.
+	Loop LoopID
 }
 
 // Loop configures loop-until-dry execution. The run pipeline re-runs the

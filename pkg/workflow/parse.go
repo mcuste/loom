@@ -55,7 +55,19 @@ func Parse(data []byte) (*Workflow, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	rawLoops, err := parseRawLoops(raw.Loops)
+	if err != nil {
+		return nil, err
+	}
+
+	// A zero top-level task set is rejected, but the sentinel depends on whether
+	// any loops are declared: an empty workflow gets ErrNoTasks, while a
+	// loops-only workflow gets the clearer ErrLoopsWithoutTopLevelTask.
 	if len(raw.Tasks) == 0 {
+		if len(rawLoops) > 0 {
+			return nil, fmt.Errorf("workflow %q: %w", id, ErrLoopsWithoutTopLevelTask)
+		}
 		return nil, fmt.Errorf("workflow %q: %w", id, ErrNoTasks)
 	}
 
@@ -85,9 +97,30 @@ func Parse(data []byte) (*Workflow, error) {
 		paramSet[n] = struct{}{}
 	}
 
-	ids := make(map[TaskID]struct{}, len(raw.Tasks))
+	// allTasks is the flat union of top-level and every loop's nested tasks, in
+	// declaration order, each tagged with its owning loop ("" for top-level). The
+	// whole parser runs over this list so wf.Tasks ends up flat and ordered, and
+	// existing code over wf.Tasks (Plan, ByID, Effective, the scheduler) is
+	// unchanged by the addition of scoped loops.
+	type loopTask struct {
+		rt   rawTask
+		loop LoopID
+	}
+	allTasks := make([]loopTask, 0, len(raw.Tasks))
 	for _, rt := range raw.Tasks {
-		tid, err := NewTaskID(rt.ID)
+		allTasks = append(allTasks, loopTask{rt: rt, loop: ""})
+	}
+	for _, rl := range rawLoops {
+		for _, rt := range rl.tasks {
+			allTasks = append(allTasks, loopTask{rt: rt, loop: rl.id})
+		}
+	}
+
+	// Global task-id uniqueness across top-level and every loop's nested tasks: a
+	// task lives in a single flat namespace regardless of which loop defines it.
+	ids := make(map[TaskID]struct{}, len(allTasks))
+	for _, lt := range allTasks {
+		tid, err := NewTaskID(lt.rt.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +130,41 @@ func Parse(data []byte) (*Workflow, error) {
 		ids[tid] = struct{}{}
 	}
 
-	for _, rt := range raw.Tasks {
+	// Loop ids share the global namespace: each must be distinct from every task
+	// id and param name, and unique across loops.
+	seenLoops := make(map[LoopID]struct{}, len(rawLoops))
+	for _, rl := range rawLoops {
+		if _, ok := ids[TaskID(rl.id)]; ok {
+			return nil, &LoopIDCollisionError{Loop: rl.id, Kind: "task"}
+		}
+		if _, ok := paramIdx[ParamName(rl.id)]; ok {
+			return nil, &LoopIDCollisionError{Loop: rl.id, Kind: "param"}
+		}
+		if _, dup := seenLoops[rl.id]; dup {
+			return nil, &DuplicateLoopIDError{Loop: rl.id}
+		}
+		seenLoops[rl.id] = struct{}{}
+	}
+
+	// depsByID feeds the per-loop connectivity check; it is built from the raw
+	// depends_on text (unknown-dependency rejection happens later in buildDeps).
+	depsByID := make(map[TaskID][]TaskID, len(allTasks))
+	for _, lt := range allTasks {
+		ds := make([]TaskID, 0, len(lt.rt.DependsOn))
+		for _, d := range lt.rt.DependsOn {
+			ds = append(ds, TaskID(d))
+		}
+		depsByID[TaskID(lt.rt.ID)] = ds
+	}
+
+	loops, memberByLoop, err := buildLoopGroups(rawLoops, depsByID)
+	if err != nil {
+		return nil, err
+	}
+	wf.Loops = loops
+
+	for _, lt := range allTasks {
+		rt := lt.rt
 		tid := TaskID(rt.ID)
 		switch {
 		case rt.Prompt == "" && rt.Command == "":
@@ -179,7 +246,12 @@ func Parse(data []byte) (*Workflow, error) {
 			Budget:        taskBudget,
 			Schema:        schema,
 			Cache:         rt.Cache,
+			Loop:          lt.loop,
 		})
+	}
+
+	if err := checkPrevPlaceholders(wf, memberByLoop); err != nil {
+		return nil, err
 	}
 
 	if err := validateSystemPrompt(wf.SystemPrompt, paramSet); err != nil {
@@ -263,6 +335,11 @@ type rawWorkflow struct {
 	// absent `loop:` key (the workflow runs once) from a present block whose
 	// fields must be validated against the task set.
 	Loop yaml.Node `yaml:"loop"`
+	// Loops is captured as a raw yaml.Node so the parser can walk each scoped-loop
+	// entry, flatten its nested tasks into Workflow.Tasks, and validate ids,
+	// connectivity, and convergence against the full task set. Absent key means
+	// no scoped loops.
+	Loops yaml.Node `yaml:"loops"`
 	// Budget is captured as a raw yaml.Node so the parser can distinguish an
 	// absent `budget:` key (no limit) from a present block whose max_cost_usd
 	// must be validated as a positive float.
@@ -273,6 +350,10 @@ type rawWorkflow struct {
 	Cache bool `yaml:"cache"`
 }
 
+// rawTask mirrors the per-task YAML schema. It exists so the parser can apply
+// its own validation before promoting values to the typed Task. Several fields
+// are yaml.Node to let the parser distinguish an absent key (zero value, inherit
+// default) from a present-but-partial block that must be validated.
 type rawTask struct {
 	ID          string   `yaml:"id"`
 	Description string   `yaml:"description"`
@@ -322,6 +403,10 @@ type rawParam struct {
 var (
 	// ErrNoTasks is returned when the workflow YAML declares no tasks.
 	ErrNoTasks = errors.New("workflow has no tasks")
+	// ErrLoopsWithoutTopLevelTask is returned when a workflow declares `loops:`
+	// blocks but no top-level `tasks:`. A scoped loop refines a workflow that
+	// must have at least one top-level task to seed it.
+	ErrLoopsWithoutTopLevelTask = errors.New("loops require at least one top-level task")
 	// ErrMissingPrompt is returned when a task declares no prompt.
 	ErrMissingPrompt = errors.New("task has no prompt")
 	// ErrMissingParamName is returned when a params entry omits the name field.
