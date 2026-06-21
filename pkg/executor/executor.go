@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"os/exec"
 	"strings"
 	"sync"
@@ -161,10 +160,6 @@ type Options struct {
 // of the caller's ctx propagates the same way.
 func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
 	order := wf.Plan()
-	baseDelay := opts.RetryBaseDelay
-	if baseDelay <= 0 {
-		baseDelay = defaultRetryBaseDelay
-	}
 	rep := &Report{
 		Tasks:   make([]TaskResult, 0, len(order)),
 		Outputs: make(map[workflow.TaskID]string, len(order)),
@@ -205,8 +200,14 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	// cost is recorded before the next task's check runs, bounding the overshoot
 	// to the single task that crosses the limit (matching the serial semantics).
 	// budgetReady wakes a waiter once the in-flight task records its cost.
-	budgetInFlight := false
-	budgetReady := sync.NewCond(&mu)
+	st := &runState{
+		rep:         rep,
+		succeeded:   succeeded,
+		skipped:     skipped,
+		gates:       gates,
+		mu:          &mu,
+		budgetReady: sync.NewCond(&mu),
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tid := range order {
@@ -215,176 +216,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		}
 		t := wf.ByID(tid)
 		g.Go(func() error {
-			for _, dep := range t.DependsOn {
-				select {
-				case <-gates[dep]:
-				case <-gctx.Done():
-					return gctx.Err()
-				}
-			}
-
-			// Evaluate the task's `when:` guard once its dependencies have
-			// resolved. A false result skips the task: it produces empty output
-			// and StatusSkipped, but still closes its gate so downstream tasks
-			// proceed. Cond was compiled and validated at load time.
-			if t.Cond != nil {
-				mu.Lock()
-				env := workflow.Env{
-					Outputs:   maps.Clone(rep.Outputs),
-					Succeeded: maps.Clone(succeeded),
-					Skipped:   maps.Clone(skipped),
-				}
-				mu.Unlock()
-				run, err := t.Cond.Eval(env)
-				if err != nil {
-					return fmt.Errorf("task %q: when: %w", t.ID, err)
-				}
-				if !run {
-					res := TaskResult{TaskID: t.ID, Status: StatusSkipped}
-					if hooks.OnFinish != nil {
-						hooks.OnFinish(*t, res, nil)
-					}
-					mu.Lock()
-					rep.Outputs[t.ID] = ""
-					skipped[t.ID] = true
-					rep.Tasks = append(rep.Tasks, res)
-					mu.Unlock()
-					close(gates[t.ID])
-					return nil
-				}
-			}
-
-			// Enforce the workflow cost budget BEFORE dispatching: once the
-			// cumulative cost of already-completed tasks exceeds the limit, abort
-			// rather than start another task. Spend strictly greater than the
-			// limit is "exceeded"; landing exactly on it is allowed.
-			if wf.Budget != nil {
-				// Wait until no other budget-gated task is in flight, then check and
-				// claim the slot under the same lock. This makes the check-then-commit
-				// atomic: the in-flight task's cost is recorded (and the slot
-				// released) before the next task is admitted, so concurrent subgraphs
-				// cannot each read a stale spend and collectively overshoot the limit.
-				mu.Lock()
-				for budgetInFlight {
-					budgetReady.Wait()
-					// A wake may come from a sibling's cancellation rather than a slot
-					// release; bail without claiming the slot so we never block g.Wait.
-					if gctx.Err() != nil {
-						mu.Unlock()
-						return gctx.Err()
-					}
-				}
-				spent := rep.Usage.TotalCostUSD
-				if spent > wf.Budget.MaxCostUSD {
-					// Wake peers so they re-evaluate and drain (each will also abort)
-					// rather than block forever on the slot this goroutine never takes.
-					budgetReady.Broadcast()
-					mu.Unlock()
-					return &BudgetExceededError{Limit: wf.Budget.MaxCostUSD, Spent: spent}
-				}
-				budgetInFlight = true
-				mu.Unlock()
-				// Release the slot once this task returns (after its cost is recorded
-				// on the success path, or immediately on a dispatch error), waking the
-				// next waiter.
-				defer func() {
-					mu.Lock()
-					budgetInFlight = false
-					budgetReady.Broadcast()
-					mu.Unlock()
-				}()
-			}
-
-			var (
-				res    TaskResult
-				runErr error
-			)
-
-			// A for_each task resolves its list and substitutes per instance
-			// inside runForEach, so no single body is computed up front; a plain
-			// task substitutes its body once here (mu guards rep.Outputs;
-			// opts.Params is read-only after Run starts).
-			if t.IsShell() {
-				if hooks.OnStart != nil {
-					hooks.OnStart(*t, "", "", "")
-				}
-				if t.IsForEach() {
-					res, runErr = runForEach(gctx, t, &mu, rep.Outputs, opts, baseDelay, nil, "", "", "")
-				} else {
-					mu.Lock()
-					body := workflow.Substitute(t.Command, rep.Outputs, opts.Params, opts.State)
-					mu.Unlock()
-					res, runErr = runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
-						return runShell(gctx, t, body)
-					})
-				}
-			} else {
-				rt, model, effort := wf.Effective(t)
-				runner, ok := runtime.Lookup(rt)
-				if !ok {
-					return fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
-				}
-				sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params, opts.State)
-				if hooks.OnStart != nil {
-					hooks.OnStart(*t, rt, model, effort)
-				}
-				if t.IsForEach() {
-					// Memoization keys on a single substituted prompt; a for_each task
-					// has one body per instance, so caching it is unsupported. Surface
-					// the unsupported combination rather than silently ignoring the
-					// annotation.
-					if opts.Cache != nil && wf.CacheEnabled(t) {
-						return fmt.Errorf("task %q: cache is not supported on for_each tasks", t.ID)
-					}
-					res, runErr = runForEach(gctx, t, &mu, rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt)
-				} else {
-					mu.Lock()
-					body := workflow.Substitute(t.Prompt, rep.Outputs, opts.Params, opts.State)
-					mu.Unlock()
-					dispatch := func() (TaskResult, error) {
-						return runWithRetry(gctx, t, baseDelay, func() (TaskResult, error) {
-							r, err := runLLM(gctx, t, body, runner, model, effort, sysPrompt)
-							if err != nil {
-								return r, err
-							}
-							return r, validateSchema(t, r.Output)
-						})
-					}
-					if opts.Cache != nil && wf.CacheEnabled(t) {
-						res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, dispatch)
-					} else {
-						res, runErr = dispatch()
-					}
-				}
-			}
-
-			if hooks.OnFinish != nil {
-				hooks.OnFinish(*t, res, runErr)
-			}
-			if runErr != nil {
-				// A task error aborts the run: the gate is left unclosed, errgroup
-				// cancels gctx, and downstream goroutines exit at their <-gctx.Done()
-				// wait before ever reaching their own when: evaluation. Consequently
-				// failed(id) cannot observe a runtime failure of id in a live run
-				// (it is reachable-true only for a never-succeeded, never-skipped
-				// disposition, which a future continue-on-error mode would produce).
-				// TestRun_WhenFailedDepAbortsRun pins this behavior.
-				return fmt.Errorf("task %q: %w", t.ID, runErr)
-			}
-
-			res.Status = StatusOK
-			mu.Lock()
-			rep.Outputs[t.ID] = res.Output
-			succeeded[t.ID] = true
-			rep.Tasks = append(rep.Tasks, res)
-			rep.Usage.InputTokens += res.Usage.InputTokens
-			rep.Usage.OutputTokens += res.Usage.OutputTokens
-			rep.Usage.CacheReadTokens += res.Usage.CacheReadTokens
-			rep.Usage.TotalCostUSD += res.Usage.TotalCostUSD
-			mu.Unlock()
-
-			close(gates[t.ID])
-			return nil
+			return runTask(gctx, wf, t, st, hooks, opts)
 		})
 	}
 
