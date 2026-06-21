@@ -22,13 +22,37 @@ import (
 // the per-task dispatch body live in runTask and be reused by a future loop
 // driver.
 type runState struct {
-	rep            *Report
-	succeeded      map[workflow.TaskID]bool
-	skipped        map[workflow.TaskID]bool
-	gates          map[workflow.TaskID]chan struct{}
-	mu             *sync.Mutex
-	budgetInFlight bool
+	rep       *Report
+	succeeded map[workflow.TaskID]bool
+	skipped   map[workflow.TaskID]bool
+	gates     map[workflow.TaskID]chan struct{}
+	mu        *sync.Mutex
+	// budgetInFlight is a pointer so a scoped-loop iteration's derived runState
+	// (fresh gates, but the same report, mutex, and budget slot) serializes
+	// budget-gated dispatch against the outer schedule rather than against a
+	// private copy of the flag.
+	budgetInFlight *bool
 	budgetReady    *sync.Cond
+	// prev maps a loop member id to its prior-iteration output, consulted for
+	// `{{prev.id}}` substitution inside a scoped-loop body. nil outside a loop
+	// (and on the first iteration), where prev placeholders collapse to empty.
+	prev map[workflow.TaskID]string
+	// iteration is the 1-based loop pass stamped onto every result produced in
+	// this scope, and 0 outside a scoped loop.
+	iteration int
+}
+
+// forLoopIteration derives a runState for one scoped-loop pass: it shares the
+// report, succeeded/skipped maps, mutex, and budget slot with st (so usage and
+// budget accounting stay global) but swaps in a fresh per-iteration gate set,
+// the prior iteration's outputs for prev substitution, and the 1-based pass
+// number stamped onto results.
+func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int) *runState {
+	inner := *st
+	inner.gates = gates
+	inner.prev = prev
+	inner.iteration = iteration
+	return &inner
 }
 
 // runTask executes one task end to end: it waits for the task's dependency
@@ -42,8 +66,6 @@ type runState struct {
 // unblocks sibling goroutines at their gate waits. The returned error is
 // already wrapped with the task id.
 func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options) error {
-	// runTask is the single dispatch path Run's scheduler invokes per task, so a
-	// future loop driver can reuse identical semantics by calling it directly.
 	baseDelay := opts.RetryBaseDelay
 	if baseDelay <= 0 {
 		baseDelay = defaultRetryBaseDelay
@@ -74,7 +96,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			return fmt.Errorf("task %q: when: %w", t.ID, err)
 		}
 		if !run {
-			res := TaskResult{TaskID: t.ID, Status: StatusSkipped}
+			res := TaskResult{TaskID: t.ID, Status: StatusSkipped, Iteration: st.iteration}
 			if hooks.OnFinish != nil {
 				hooks.OnFinish(*t, res, nil)
 			}
@@ -99,7 +121,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		// released) before the next task is admitted, so concurrent subgraphs
 		// cannot each read a stale spend and collectively overshoot the limit.
 		st.mu.Lock()
-		for st.budgetInFlight {
+		for *st.budgetInFlight {
 			st.budgetReady.Wait()
 			// A wake may come from a sibling's cancellation rather than a slot
 			// release; bail without claiming the slot so we never block g.Wait.
@@ -116,14 +138,14 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			st.mu.Unlock()
 			return &BudgetExceededError{Limit: wf.Budget.MaxCostUSD, Spent: spent}
 		}
-		st.budgetInFlight = true
+		*st.budgetInFlight = true
 		st.mu.Unlock()
 		// Release the slot once this task returns (after its cost is recorded
 		// on the success path, or immediately on a dispatch error), waking the
 		// next waiter.
 		defer func() {
 			st.mu.Lock()
-			st.budgetInFlight = false
+			*st.budgetInFlight = false
 			st.budgetReady.Broadcast()
 			st.mu.Unlock()
 		}()
@@ -143,10 +165,10 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			hooks.OnStart(*t, "", "", "")
 		}
 		if t.IsForEach() {
-			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, nil, "", "", "")
+			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, nil, "", "", "", st.prev)
 		} else {
 			st.mu.Lock()
-			body := workflow.Substitute(t.Command, st.rep.Outputs, opts.Params, opts.State, nil)
+			body := workflow.Substitute(t.Command, st.rep.Outputs, opts.Params, opts.State, st.prev)
 			st.mu.Unlock()
 			res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 				return runShell(ctx, t, body)
@@ -170,10 +192,10 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			if opts.Cache != nil && wf.CacheEnabled(t) {
 				return fmt.Errorf("task %q: cache is not supported on for_each tasks", t.ID)
 			}
-			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt)
+			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt, st.prev)
 		} else {
 			st.mu.Lock()
-			body := workflow.Substitute(t.Prompt, st.rep.Outputs, opts.Params, opts.State, nil)
+			body := workflow.Substitute(t.Prompt, st.rep.Outputs, opts.Params, opts.State, st.prev)
 			st.mu.Unlock()
 			dispatch := func() (TaskResult, error) {
 				return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
@@ -207,6 +229,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 	}
 
 	res.Status = StatusOK
+	res.Iteration = st.iteration
 	st.mu.Lock()
 	st.rep.Outputs[t.ID] = res.Output
 	st.succeeded[t.ID] = true

@@ -31,11 +31,13 @@ const forEachConcurrency = 8
 //
 // runner/model/effort/sysPrompt are used for LLM tasks and ignored for shell
 // tasks (pass the zero values). mu guards outputs, shared with the caller's Run.
-func runForEach(ctx context.Context, t *workflow.Task, mu *sync.Mutex, outputs map[workflow.TaskID]string, opts Options, base time.Duration, runner runtime.Runner, model runtime.Model, effort runtime.Effort, sysPrompt string) (TaskResult, error) {
+// prev supplies `{{prev.id}}` values when the task is a scoped-loop body member,
+// and is nil otherwise.
+func runForEach(ctx context.Context, t *workflow.Task, mu *sync.Mutex, outputs map[workflow.TaskID]string, opts Options, base time.Duration, runner runtime.Runner, model runtime.Model, effort runtime.Effort, sysPrompt string, prev map[workflow.TaskID]string) (TaskResult, error) {
 	var items []string
 	if t.ForEachSource != "" {
 		mu.Lock()
-		resolved := workflow.Substitute(t.ForEachSource, outputs, opts.Params, opts.State, nil)
+		resolved := workflow.Substitute(t.ForEachSource, outputs, opts.Params, opts.State, prev)
 		mu.Unlock()
 		items = parseList(resolved)
 	} else {
@@ -76,7 +78,7 @@ func runForEach(ctx context.Context, t *workflow.Task, mu *sync.Mutex, outputs m
 			// before (not re-expanded across) the second pass.
 			withAs := strings.ReplaceAll(src, placeholder, item)
 			mu.Lock()
-			body := workflow.Substitute(withAs, outputs, opts.Params, opts.State, nil)
+			body := workflow.Substitute(withAs, outputs, opts.Params, opts.State, prev)
 			mu.Unlock()
 
 			if t.IsShell() {
@@ -139,7 +141,6 @@ func parseList(s string) []string {
 	return trimDropEmpty(strings.Split(s, "\n"))
 }
 
-// trimDropEmpty trims each entry and drops the ones that become empty.
 func trimDropEmpty(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, v := range in {

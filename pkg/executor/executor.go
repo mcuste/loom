@@ -47,6 +47,10 @@ type TaskResult struct {
 	// CacheHit is true when Output was replayed from a memoization cache rather
 	// than produced by the runtime this run. A cache hit reports zero Usage.
 	CacheHit bool
+	// Iteration is the 1-based loop pass that produced this result for a task
+	// that is a member of a scoped loop, and 0 for a non-looped task. It lets
+	// callers attribute a result to the pass that generated it.
+	Iteration int
 }
 
 // Cache memoizes LLM task outputs across runs. The executor consults it before
@@ -201,17 +205,40 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	// to the single task that crosses the limit (matching the serial semantics).
 	// budgetReady wakes a waiter once the in-flight task records its cost.
 	st := &runState{
-		rep:         rep,
-		succeeded:   succeeded,
-		skipped:     skipped,
-		gates:       gates,
-		mu:          &mu,
-		budgetReady: sync.NewCond(&mu),
+		rep:            rep,
+		succeeded:      succeeded,
+		skipped:        skipped,
+		gates:          gates,
+		mu:             &mu,
+		budgetInFlight: new(bool),
+		budgetReady:    sync.NewCond(&mu),
+	}
+
+	// Each scoped loop collapses its body into a single synthetic node in the
+	// outer schedule: the body's member tasks are not scheduled individually
+	// here (a per-loop driver runs them iteratively), and an outside task that
+	// depends on a member waits on that member's gate, which the driver closes
+	// only once the loop converges. memberOf records which loop owns each body
+	// task so the scheduler can skip it.
+	memberOf := make(map[workflow.TaskID]int, len(wf.Loops))
+	for i := range wf.Loops {
+		for _, m := range wf.Loops[i].Members {
+			memberOf[m] = i
+		}
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
+	for i := range wf.Loops {
+		lg := &wf.Loops[i]
+		g.Go(func() error {
+			return runLoop(gctx, wf, lg, st, hooks, opts)
+		})
+	}
 	for _, tid := range order {
 		if _, seeded := opts.Seed[tid]; seeded {
+			continue
+		}
+		if _, looped := memberOf[tid]; looped {
 			continue
 		}
 		t := wf.ByID(tid)
