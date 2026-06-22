@@ -14,8 +14,8 @@ import (
 // feeds a two-member loop {drain, refine}: drain depends on seed (an entry
 // edge) and on the prior iteration's refine (via {{prev.refine}}); refine
 // depends on drain (an internal edge). The loop converges by until_empty on
-// drain. It exercises the loop-group rendering: id, convergence target, max,
-// and body tasks with their deps.
+// drain. It exercises the loop-group rendering: id, description, convergence
+// target, max, and body tasks with their deps.
 const loopPlanFixture = `
 name: demo_loops
 description: Loop demo
@@ -27,6 +27,7 @@ tasks:
     prompt: seed it
 loops:
   - id: work
+    description: drains the queue each pass
     until_empty: drain
     max: 4
     tasks:
@@ -107,6 +108,45 @@ func TestRenderPlan_RichNamesLoopAndConvergenceTarget(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("rich loop group label missing %q in %q\nfull:\n%s", want, line, got)
 		}
+	}
+}
+
+// TestRenderPlan_RichShowsLoopDescription pins that the rich plan surfaces the
+// loop's description under its group label, so the loop's purpose is visible
+// without running. Sliced from the loop group label rather than searched bare,
+// since a description could otherwise pass by matching unrelated output.
+func TestRenderPlan_RichShowsLoopDescription(t *testing.T) {
+	forceASCIIProfile(t)
+	wf := parsePlan(t, loopPlanFixture)
+
+	got := tui.RenderPlan(wf, nil, nil, true)
+	idx := strings.Index(got, "Loop work")
+	if idx < 0 {
+		t.Fatalf("loop group label \"Loop work\" not found in:\n%s", got)
+	}
+	if !strings.Contains(got[idx:], "drains the queue each pass") {
+		t.Errorf("loop description not shown under loop group in:\n%s", got)
+	}
+}
+
+// TestRenderPlan_PlainShowsLoopDescription pins that the plain renderer also
+// surfaces the loop's description under its group, so check output is
+// informative without a TTY.
+func TestRenderPlan_PlainShowsLoopDescription(t *testing.T) {
+	t.Parallel()
+	wf := parsePlan(t, loopPlanFixture)
+
+	var buf bytes.Buffer
+	if err := tui.New(&buf).Plan(wf, nil, nil, nil); err != nil {
+		t.Fatalf("plain Plan: %v", err)
+	}
+	got := buf.String()
+	idx := strings.Index(got, "Loop work")
+	if idx < 0 {
+		t.Fatalf("loop group label \"Loop work\" not found in:\n%s", got)
+	}
+	if !strings.Contains(got[idx:], "drains the queue each pass") {
+		t.Errorf("loop description not shown under loop group in:\n%s", got)
 	}
 }
 

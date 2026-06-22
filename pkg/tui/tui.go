@@ -213,6 +213,9 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 
 	for _, lg := range wf.Loops {
 		ew.printf("\nLoop %s: %s max=%d\n", lg.ID, loopConvergence(lg), lg.Max)
+		if lg.Description != "" {
+			ew.printf("    desc: %s\n", lg.Description)
+		}
 		bodyWidth := 0
 		for _, id := range lg.Members {
 			if n := len(id); n > bodyWidth {

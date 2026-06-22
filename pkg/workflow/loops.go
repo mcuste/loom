@@ -29,6 +29,8 @@ type LoopGroup struct {
 	// ID names the loop; unique across loops and distinct from every task id and
 	// param name.
 	ID LoopID
+	// Description is shown in plan output; not sent to the model.
+	Description string
 	// UntilEmpty names the member task whose empty trimmed output ends the loop.
 	// Set when the loop converges by emptiness; "" when Until is used. Exactly
 	// one of UntilEmpty / Until is set.
@@ -49,6 +51,7 @@ type LoopGroup struct {
 // until_empty / until is set (a present-but-empty value still counts as set).
 type rawLoop struct {
 	id            LoopID
+	description   string
 	untilEmpty    string
 	hasUntilEmpty bool
 	until         string
@@ -93,6 +96,10 @@ func parseRawLoops(node yaml.Node) ([]rawLoop, error) {
 				}
 				rl.id = lid
 				hasID = true
+			case "description":
+				if err := v.Decode(&rl.description); err != nil {
+					return nil, fmt.Errorf("loop: description: %w", err)
+				}
 			case "until_empty":
 				if err := v.Decode(&rl.untilEmpty); err != nil {
 					return nil, fmt.Errorf("loop: until_empty: %w", err)
@@ -193,7 +200,7 @@ func buildLoopGroups(rawLoops []rawLoop, depsByID map[TaskID][]TaskID) ([]LoopGr
 		}
 		memberByLoop[rl.id] = memberSet
 
-		lg := LoopGroup{ID: rl.id, Max: rl.max, Members: members}
+		lg := LoopGroup{ID: rl.id, Description: rl.description, Max: rl.max, Members: members}
 		if rl.hasUntilEmpty {
 			target := TaskID(rl.untilEmpty)
 			if !memberSet[target] {

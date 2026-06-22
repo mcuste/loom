@@ -188,6 +188,9 @@ func richLoops(wf *workflow.Workflow) string {
 		b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s  max=%d, %d task%s)",
 			lg.ID, loopConvergence(lg), lg.Max, len(lg.Members), plural(len(lg.Members)))))
 		b.WriteString("\n")
+		if lg.Description != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n", labelStyle.Render("desc"), lg.Description))
+		}
 		for _, id := range lg.Members {
 			b.WriteString(richTaskRow(wf, id, idWidth))
 		}
