@@ -17,23 +17,16 @@ import (
 )
 
 // RunMeta carries the per-run facts the renderer prints in its header block
-// before execution: the run-record path, the invocation cwd, the seeded-task
-// count (0 on a plain run), and an optional loop-iteration marker. Total is the
-// progress denominator for the per-task lines (the expected task count, i.e.
-// total tasks minus seeded ones); the Hooks() printer needs it but the executor
-// never reports it, so the caller threads it in here.
+// before execution: the run-record path, the invocation cwd, and the
+// seeded-task count (0 on a plain run). Total is the progress denominator for
+// the per-task lines (the expected task count, i.e. total tasks minus seeded
+// ones); the Hooks() printer needs it but the executor never reports it, so the
+// caller threads it in here.
 type RunMeta struct {
 	RunFile string
 	Cwd     string
 	Seeded  int
 	Total   int
-	Loop    *LoopMeta
-}
-
-// LoopMeta is the optional loop-iteration marker on RunMeta. N is 1-based.
-type LoopMeta struct {
-	N   int
-	Max int
 }
 
 // Renderer is the rendering seam. A command obtains one via New, prints the
@@ -103,17 +96,13 @@ func (e *errWriter) printf(format string, a ...any) {
 	_, e.err = fmt.Fprintf(e.w, format, a...)
 }
 
-// Header prints the optional iteration banner, the run-file/cwd block, and the
-// optional seeded line, then records the progress denominator for Hooks() and
-// resets the per-task step counter so each iteration's progress restarts at 1
-// (a single shared renderer drives every loop iteration).
+// Header prints the run-file/cwd block and the optional seeded line, then
+// records the progress denominator for Hooks() and resets the per-task step
+// counter so progress starts at 1.
 func (p *plainRenderer) Header(meta RunMeta) error {
 	p.total = meta.Total
 	p.step.Store(0)
 	ew := &errWriter{w: p.w}
-	if meta.Loop != nil {
-		ew.printf("── iteration %d/%d ──\n\n", meta.Loop.N, meta.Loop.Max)
-	}
 	ew.printf("Run file : %s\n", meta.RunFile)
 	ew.printf("Cwd      : %s\n\n", meta.Cwd)
 	if meta.Seeded > 0 {
@@ -144,9 +133,6 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 	ew.printf("Effort   : %s\n", orDash(string(wf.Effort)))
 	if wf.SystemPrompt != "" {
 		ew.printf("System   : %s\n", wf.SystemPrompt)
-	}
-	if wf.Loop != nil {
-		ew.printf("Loop     : until_empty=%s max=%d\n", wf.Loop.UntilEmpty, wf.Loop.Max)
 	}
 
 	if len(wf.Params) > 0 {

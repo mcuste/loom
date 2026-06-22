@@ -126,12 +126,3 @@ func TestSymbols_ASCIIFallbackEmitsOnlyASCII(t *testing.T) {
 		}
 	}
 }
-
-// TestLoopRibbon_ShowsIterationOverMax pins that the loop ribbon surfaces the
-// current iteration over the maximum from RunMeta's loop metadata.
-func TestLoopRibbon_ShowsIterationOverMax(t *testing.T) {
-	got := loopRibbon(RunMeta{Loop: &LoopMeta{N: 2, Max: 5}})
-	if !strings.Contains(got, "2/5") {
-		t.Fatalf("loopRibbon = %q, want it to show iteration 2/5", got)
-	}
-}

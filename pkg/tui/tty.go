@@ -83,7 +83,6 @@ type runModel struct {
 
 	sym     symbolSet         // badge/gauge glyphs for this terminal's profile
 	maxCost float64           // workflow budget ceiling (0 when wf.Budget is nil)
-	loop    *LoopMeta         // loop-iteration ribbon source, nil on a plain run
 	seeded  []workflow.TaskID // resume-seeded tasks, in plan order
 
 	started  time.Time
@@ -105,7 +104,6 @@ func newRunModel(meta RunMeta, cancel context.CancelFunc) *runModel {
 		total:   meta.Total,
 		tasks:   make(map[workflow.TaskID]*liveTask),
 		sym:     symbolsFor(termenv.TrueColor),
-		loop:    meta.Loop,
 		started: time.Now(),
 		width:   80,
 		height:  24,
@@ -260,16 +258,12 @@ func (m *runModel) View() string {
 }
 
 // statusBar is the one-line summary at the bottom of the live region:
-// done/total, running count, accrued cost, and elapsed wall time. A loop
-// ribbon (iteration n/max) and a budget gauge (spend over MaxCostUSD) are
-// appended when the run carries that metadata.
+// done/total, running count, accrued cost, and elapsed wall time. A budget
+// gauge (spend over MaxCostUSD) is appended when the run carries that metadata.
 func (m *runModel) statusBar() string {
 	elapsed := time.Since(m.started).Round(time.Second)
 	bar := fmt.Sprintf("%d/%d done · %d running · $%.6f · %s",
 		m.done, m.total, m.running, m.usage.TotalCostUSD, elapsed)
-	if r := loopRibbon(RunMeta{Loop: m.loop}); r != "" {
-		bar += " · " + r
-	}
 	if g := budgetGauge(m.usage.TotalCostUSD, m.maxCost, m.sym); g != "" {
 		bar += " · " + g
 	}

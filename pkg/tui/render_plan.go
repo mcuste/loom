@@ -64,8 +64,8 @@ func renderRichPlan(wf *workflow.Workflow, resolved workflow.ParamValues, cli ma
 	return b.String()
 }
 
-// richHeaderCard boxes the workflow identity: id, description, the effective
-// runtime/model/effort triple, and the optional loop marker.
+// richHeaderCard boxes the workflow identity: id, description, and the
+// effective runtime/model/effort triple.
 func richHeaderCard(wf *workflow.Workflow) string {
 	var rows []string
 	rows = append(rows, titleStyle.Render(string(wf.ID)))
@@ -79,10 +79,6 @@ func richHeaderCard(wf *workflow.Workflow) string {
 	))
 	if wf.SystemPrompt != "" {
 		rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("system"), wf.SystemPrompt))
-	}
-	if wf.Loop != nil {
-		rows = append(rows, fmt.Sprintf("%s until_empty=%s max=%d",
-			labelStyle.Render("loop"), wf.Loop.UntilEmpty, wf.Loop.Max))
 	}
 	return cardStyle.Render(strings.Join(rows, "\n"))
 }

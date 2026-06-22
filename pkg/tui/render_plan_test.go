@@ -14,18 +14,15 @@ import (
 )
 
 // planFixture is a diamond DAG with a description, workflow-level
-// runtime/model/effort, a loop, and three params: one supplied via CLI, one
-// falling back to its default, and one required-but-missing. It exercises every
-// branch of the rich renderer (header card, param provenance, wave grouping).
+// runtime/model/effort, and three params: one supplied via CLI, one falling
+// back to its default, and one required-but-missing. It exercises every branch
+// of the rich renderer (header card, param provenance, wave grouping).
 const planFixture = `
 name: demo
 description: Demo workflow
 runtime: claude-code
 model: opus
 effort: high
-loop:
-  until_empty: d
-  max: 5
 params:
   - name: target
     required: true
@@ -88,8 +85,8 @@ func TestRenderPlan_PlainMatchesPlainRenderer(t *testing.T) {
 }
 
 // TestRenderPlan_RichDrawsHeaderCard pins that the rich branch boxes the
-// workflow identity card: id, description, runtime/model/effort, and the loop
-// marker all appear in the rendering.
+// workflow identity card: id, description, and runtime/model/effort all appear
+// in the rendering.
 func TestRenderPlan_RichDrawsHeaderCard(t *testing.T) {
 	forceASCIIProfile(t)
 	wf, err := workflow.Parse([]byte(planFixture))
@@ -146,7 +143,7 @@ func TestRenderPlan_RichGroupsByWave(t *testing.T) {
 	}
 	// The join task d must land in Wave 3, after both branches. Match on its
 	// unique deps row (deps=b,c) under the Wave 3 header rather than the bare
-	// id "d", which also appears in the loop's until_empty=d marker.
+	// id "d".
 	wave3 := got[strings.Index(got, "Wave 3"):]
 	if !strings.Contains(wave3, "deps=b,c") {
 		t.Errorf("task d (deps=b,c) not grouped under Wave 3 in:\n%s", got)

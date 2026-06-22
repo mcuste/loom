@@ -127,7 +127,7 @@ Resolution order (right-to-left wins): declared defaults → `-p` values. Unknow
 
 ## Scoped loops
 
-A top-level `loops:` block declares one or more **scoped loops** — named subgraphs that the run pipeline re-executes until a convergence target is reached. Unlike a whole-workflow loop, a scoped loop re-runs only its own body tasks; the rest of the DAG runs once.
+A top-level `loops:` block declares one or more **scoped loops** — named subgraphs that the run pipeline re-executes until a convergence target is reached. A scoped loop re-runs only its own body tasks; the rest of the DAG runs once.
 
 Declare each loop as a list entry with a nested `tasks:` body:
 

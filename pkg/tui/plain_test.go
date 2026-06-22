@@ -43,28 +43,6 @@ func TestPlainRenderer_HeaderPlainRun(t *testing.T) {
 	}
 }
 
-// TestPlainRenderer_HeaderLoopIteration pins that a loop marker prepends the
-// "iteration n/max" banner before the run-file/cwd block.
-func TestPlainRenderer_HeaderLoopIteration(t *testing.T) {
-	var buf bytes.Buffer
-	r := tui.New(&buf)
-	if err := r.Header(tui.RunMeta{
-		RunFile: "/runs/wf/abc.json",
-		Cwd:     "/work",
-		Total:   2,
-		Loop:    &tui.LoopMeta{N: 1, Max: 10},
-	}); err != nil {
-		t.Fatalf("Header: %v", err)
-	}
-
-	want := "── iteration 1/10 ──\n\n" +
-		"Run file : /runs/wf/abc.json\n" +
-		"Cwd      : /work\n\n"
-	if got := buf.String(); got != want {
-		t.Errorf("Header() = %q, want %q", got, want)
-	}
-}
-
 // TestPlainRenderer_HeaderSeeded pins that a non-zero seeded count appends the
 // "Seeded : N task(s)" line after the cwd block.
 func TestPlainRenderer_HeaderSeeded(t *testing.T) {

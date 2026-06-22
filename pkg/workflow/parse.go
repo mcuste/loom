@@ -266,12 +266,6 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, err
 	}
 
-	loop, err := parseLoop(raw.Loop, ids)
-	if err != nil {
-		return nil, err
-	}
-	wf.Loop = loop
-
 	budget, err := parseBudget(raw.Budget)
 	if err != nil {
 		return nil, err
@@ -331,10 +325,6 @@ type rawWorkflow struct {
 	SystemPrompt string    `yaml:"system_prompt"`
 	Params       yaml.Node `yaml:"params"`
 	Tasks        []rawTask `yaml:"tasks"`
-	// Loop is captured as a raw yaml.Node so the parser can distinguish an
-	// absent `loop:` key (the workflow runs once) from a present block whose
-	// fields must be validated against the task set.
-	Loop yaml.Node `yaml:"loop"`
 	// Loops is captured as a raw yaml.Node so the parser can walk each scoped-loop
 	// entry, flatten its nested tasks into Workflow.Tasks, and validate ids,
 	// connectivity, and convergence against the full task set. Absent key means
@@ -423,9 +413,6 @@ var (
 	// meaningless for shell tasks and rejected at the task level; workflow-level
 	// defaults are tolerated.
 	ErrShellTaskWithRuntime = errors.New("shell task must not set runtime, model, or effort")
-	// ErrLoopMissingUntilEmpty reports a `loop:` block that omits the required
-	// `until_empty` key naming the task whose empty output drains the loop.
-	ErrLoopMissingUntilEmpty = errors.New("loop: until_empty is required")
 )
 
 // DuplicateTaskIDError reports two tasks declaring the same id.
@@ -444,30 +431,6 @@ type InvalidWritesStateError struct {
 
 func (e *InvalidWritesStateError) Error() string {
 	return fmt.Sprintf("task %q: invalid writes_state %q: must match [A-Za-z0-9_]+", e.Task, e.Key)
-}
-
-// UnknownLoopTaskError reports a `loop.until_empty` that names no task in the
-// workflow; the loop could never observe its output and so could never drain.
-type UnknownLoopTaskError struct{ Task TaskID }
-
-func (e *UnknownLoopTaskError) Error() string {
-	return fmt.Sprintf("loop: until_empty names unknown task %q", e.Task)
-}
-
-// InvalidLoopMaxError reports a `loop.max` below 1. Max caps the iteration
-// count and must permit at least one pass.
-type InvalidLoopMaxError struct{ Max int }
-
-func (e *InvalidLoopMaxError) Error() string {
-	return fmt.Sprintf("loop: invalid max %d: must be >= 1", e.Max)
-}
-
-// UnknownLoopFieldError reports a key inside the `loop:` mapping that is not
-// one of until_empty|max.
-type UnknownLoopFieldError struct{ Field string }
-
-func (e *UnknownLoopFieldError) Error() string {
-	return fmt.Sprintf("loop: unknown field %q", e.Field)
 }
 
 // MissingForEachAsError reports a `for_each:` task that omits the required
@@ -837,56 +800,6 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 		}
 	}
 	return r, nil
-}
-
-// parseLoop decodes the workflow-level `loop:` mapping into a *Loop. An absent
-// block (zero-value node) yields nil — the workflow runs exactly once. A
-// present block requires `until_empty` to name a known task and `max` to be a
-// positive integer; both fields are mandatory.
-func parseLoop(node yaml.Node, known map[TaskID]struct{}) (*Loop, error) {
-	if node.Kind == 0 {
-		return nil, nil
-	}
-	if node.Kind != yaml.MappingNode {
-		return nil, errors.New("loop: must be a mapping")
-	}
-	l := &Loop{}
-	hasUntil := false
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		k, v := node.Content[i], node.Content[i+1]
-		if k.Kind != yaml.ScalarNode {
-			return nil, errors.New("loop: key must be a scalar")
-		}
-		switch k.Value {
-		case "until_empty":
-			var s string
-			if err := v.Decode(&s); err != nil {
-				return nil, fmt.Errorf("loop.until_empty: %w", err)
-			}
-			tid, err := NewTaskID(s)
-			if err != nil {
-				return nil, err
-			}
-			if _, ok := known[tid]; !ok {
-				return nil, &UnknownLoopTaskError{Task: tid}
-			}
-			l.UntilEmpty = tid
-			hasUntil = true
-		case "max":
-			if err := v.Decode(&l.Max); err != nil {
-				return nil, fmt.Errorf("loop.max: %w", err)
-			}
-		default:
-			return nil, &UnknownLoopFieldError{Field: k.Value}
-		}
-	}
-	if !hasUntil {
-		return nil, ErrLoopMissingUntilEmpty
-	}
-	if l.Max < 1 {
-		return nil, &InvalidLoopMaxError{Max: l.Max}
-	}
-	return l, nil
 }
 
 // parseForEach decodes a task's `for_each:` node into a fanout spec. An absent

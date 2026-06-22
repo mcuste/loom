@@ -138,15 +138,9 @@ type Workflow struct {
 	Params []Param
 	// Tasks are the workflow's tasks in declaration order.
 	Tasks []Task
-	// Loop, when non-nil, makes the run pipeline re-run the whole DAG
-	// loop-until-dry: it repeats up to Loop.Max iterations, carrying cross-run
-	// state between them, and stops as soon as the Loop.UntilEmpty task yields
-	// empty trimmed output. nil means the workflow runs exactly once.
-	Loop *Loop
 	// Loops are the workflow's scoped loops in declaration order. Each LoopGroup
 	// re-runs a named subgraph of Tasks until its convergence target drains.
-	// Empty when the workflow declares no `loops:` block. Distinct from the
-	// whole-workflow Loop above.
+	// Empty when the workflow declares no `loops:` block.
 	Loops []LoopGroup
 	// Budget, when non-nil, caps the workflow's cumulative cost in USD across
 	// all completed tasks. nil means no workflow-level cost limit.
@@ -242,18 +236,6 @@ type Task struct {
 	// top-level task. A task is defined in exactly one place, so it belongs to at
 	// most one loop. Set by Parse from the enclosing `loops:` entry.
 	Loop LoopID
-}
-
-// Loop configures loop-until-dry execution. The run pipeline re-runs the
-// entire DAG, carrying cross-run state between iterations, until the
-// UntilEmpty task's trimmed output is empty or Max iterations have elapsed.
-// Each iteration produces its own run record. A nil Workflow.Loop means the
-// workflow runs exactly once.
-type Loop struct {
-	// UntilEmpty names the task whose empty trimmed output ends the loop.
-	UntilEmpty TaskID
-	// Max caps the number of iterations. Always >= 1 in a parsed Workflow.
-	Max int
 }
 
 // Backoff names the delay schedule applied between retry attempts.

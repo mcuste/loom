@@ -115,12 +115,3 @@ func budgetGauge(spent, max float64, sym symbolSet) string {
 	}
 	return out
 }
-
-// loopRibbon renders the loop-iteration ribbon ("iteration n/max") from the
-// run's loop metadata, or "" when the run has no loop.
-func loopRibbon(meta RunMeta) string {
-	if meta.Loop == nil {
-		return ""
-	}
-	return fmt.Sprintf("iteration %d/%d", meta.Loop.N, meta.Loop.Max)
-}

@@ -24,8 +24,7 @@ func NewLoopID(s string) (LoopID, error) {
 }
 
 // LoopGroup is a scoped loop: a named subgraph of Workflow.Tasks that the run
-// pipeline re-runs until a convergence target drains. Distinct from the
-// whole-workflow Loop type, which re-runs the entire DAG.
+// pipeline re-runs until a convergence target drains.
 type LoopGroup struct {
 	// ID names the loop; unique across loops and distinct from every task id and
 	// param name.
@@ -326,8 +325,7 @@ func (e *LoopConvergenceError) Error() string {
 var ErrLoopGroupMissingID = errors.New("loops: entry is missing required id")
 
 // UnknownLoopGroupFieldError reports a key inside a `loops:` entry that is not
-// one of id|until_empty|until|max|tasks. Distinct from UnknownLoopFieldError,
-// which names the whole-workflow `loop:` block.
+// one of id|until_empty|until|max|tasks.
 type UnknownLoopGroupFieldError struct{ Field string }
 
 func (e *UnknownLoopGroupFieldError) Error() string {

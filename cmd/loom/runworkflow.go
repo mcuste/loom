@@ -85,44 +85,24 @@ func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
 
-	// Load cross-run state once. It is the continuity between loop iterations:
-	// each iteration substitutes `{{state.key}}` from it and folds its
-	// `writes_state` outputs back in. A missing file yields an empty map.
+	// Load cross-run state once. Each run substitutes `{{state.key}}` from it
+	// and folds its `writes_state` outputs back in. A missing file yields an
+	// empty map.
 	state, err := store.LoadState(home, wf.ID)
 	if err != nil {
 		return err
 	}
 
-	// A loop runs only on a plain `loom run`. A resume (any seeded task) is
-	// single-shot and bypasses the loop wrapper, matching --resume-latest's
-	// "resume the last iteration's run" contract.
-	if wf.Loop == nil || len(seededSet) > 0 {
-		_, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries, nil)
-		return runErr
-	}
-
-	// loop-until-dry: re-run the whole DAG, carrying and flushing state each
-	// iteration, until the until_empty task's trimmed output is empty or Max
-	// iterations elapse. Each iteration writes its own run record.
-	for i := 0; i < wf.Loop.Max; i++ {
-		loop := &tui.LoopMeta{N: i + 1, Max: wf.Loop.Max}
-		rep, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, nil, nil, nil, loop)
-		if runErr != nil {
-			return runErr
-		}
-		if rep == nil || strings.TrimSpace(rep.Outputs[wf.Loop.UntilEmpty]) == "" {
-			break
-		}
-	}
-	return nil
+	_, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries)
+	return runErr
 }
 
 // runOnce executes the DAG exactly once: it opens a fresh run record, stamps
 // any seeded tasks, runs the executor, prints the summary, and folds
 // `writes_state` outputs into state. state is read for substitution and
-// written back in place, so the loop wrapper can carry it across iterations.
+// written back in place.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry, loop *tui.LoopMeta) (rep *executor.Report, runErr error) {
+func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry) (rep *executor.Report, runErr error) {
 	run, err := store.Open(wf.ID, manifest, store.Config{
 		Root:    home,
 		Cwd:     cwd,
@@ -144,16 +124,15 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 		}
 	}()
 
-	// The renderer is owned by the caller (doRun / runFromRecord) and shared
-	// across loop iterations, so runOnce neither creates nor closes it. Header
-	// resets the per-iteration progress counter and records the denominator.
+	// The renderer is owned by the caller (doRun / runFromRecord), so runOnce
+	// neither creates nor closes it. Header resets the progress counter and
+	// records the denominator.
 	expected := len(wf.Tasks) - len(seededSet)
 	if err := r.Header(tui.RunMeta{
 		RunFile: run.Path(),
 		Cwd:     cwd,
 		Seeded:  len(seededSet),
 		Total:   expected,
-		Loop:    loop,
 	}); err != nil {
 		return nil, err
 	}
