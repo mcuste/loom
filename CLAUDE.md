@@ -64,7 +64,7 @@ Don't memorize a list. Discover it. For a given commit:
      `[runtime/claude-code]`.
    * Top-level dirs map to their name (`workflows/` → `[workflows]`,
      `.claude/skills/loom/` → `[skill]`).
-   * Build/config files (`go.mod`, `justfile`, `.gitignore`) → `[build]`.
+   * Build/config files (`go.mod`, `Makefile`, `.gitignore`) → `[build]`.
 3. **When unsure**, pick the lowest-level identifier that uniquely
    names the changed surface. Coining a new area is fine; once it
    lands in history, step 1 will surface it for the next commit.
