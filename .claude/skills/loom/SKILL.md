@@ -127,29 +127,37 @@ Resolution order (right-to-left wins): declared defaults → `-p` values. Unknow
 
 ## Scoped loops
 
-A top-level `loops:` block declares one or more **scoped loops** — named subgraphs that the run pipeline re-executes until a convergence target is reached. A scoped loop re-runs only its own body tasks; the rest of the DAG runs once.
+A **scoped loop** is a named subgraph that the run pipeline re-executes until a convergence target is reached; only the loop's own body tasks re-run, the rest of the DAG runs once. A loop is declared **inline as a task** carrying a `loop:` block instead of a `prompt:`/`command:`. The wrapper task's `id` is the loop id, and the loop renders in the execution flow at its position (not a separate section).
 
-Declare each loop as a list entry with a nested `tasks:` body:
+There is **no top-level `loops:` block** — a stray top-level `loops:` is rejected as an unknown field. Loops live in `tasks:`:
 
 ```yaml
-loops:
-  - id: <loop_id>            # required, [A-Za-z0-9_]+; unique, and distinct
-                             # from every task id and param name
-    until_empty: <member>    # converge when this member's trimmed output is empty
-    # — OR —
-    until: '{{member}} == "done"'  # converge when this when-style expression is true
-    max: 4                   # required, >= 1; hard cap on iterations
-    tasks:                   # required, non-empty; same task schema as top-level
-      - id: drain
-        depends_on: [seed]
-        prompt: drain {{seed}} {{prev.refine}}
-      - id: refine
-        depends_on: [drain]
-        prompt: refine {{drain}}
+tasks:
+  - id: seed
+    prompt: seed it
+  - id: work                   # the loop id (a task carrying loop:, not prompt/command)
+    description: ...            # optional; becomes the loop's description in plan output
+    loop:
+      until_empty: <member>    # converge when this member's trimmed output is empty
+      # — OR —
+      until: '{{member}} == "done"'  # converge when this when-style expression is true
+      max: 4                   # required, >= 1; hard cap on iterations
+      tasks:                   # required, non-empty; same task schema as top-level
+        - id: drain
+          depends_on: [seed]
+          prompt: drain {{seed}} {{prev.refine}}
+        - id: refine
+          depends_on: [drain]
+          prompt: refine {{drain}}
+  - id: report                 # exit consumer: depends on a body MEMBER
+    depends_on: [drain]
+    prompt: summarize {{drain}}
 ```
 
 Rules (all surfaced by `loom check`):
 
+- **Discriminator** — a task sets exactly one of `prompt`, `command`, or `loop`. A `loop:` task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `for_each`, `as`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
+- **Loop id** — the wrapper task id; `[A-Za-z0-9_]+`, unique, and distinct from every other task id and param name.
 - **Convergence** — exactly one of `until_empty` or `until` per loop. `until_empty` names a body member whose empty trimmed output ends the loop; `until` is a `when`-style expression that may reference **only** members of the same loop.
 - **`max`** — required and `>= 1`; bounds iterations even if the target never converges.
 - **Body** — `tasks:` is non-empty and uses the identical task schema (prompt/command, model/effort, etc.). Each body task carries its loop id; a task belongs to at most one loop.
