@@ -37,7 +37,7 @@ run workflow:
 check-all:
     #!/usr/bin/env bash
     set -euo pipefail
-    for f in examples/*.yaml; do
+    for f in workflows/*.yaml; do
         echo "=== $f ==="
         go run {{pkg}} check "$f"
     done

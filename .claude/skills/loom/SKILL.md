@@ -119,8 +119,8 @@ tasks:
 Provide values on the CLI with repeatable `-p key=val`:
 
 ```bash
-loom run examples/deploy.yaml -p env=prod -p replicas=3
-loom check examples/deploy.yaml -p env=prod
+loom run workflows/deploy.yaml -p env=prod -p replicas=3
+loom check workflows/deploy.yaml -p env=prod
 ```
 
 Resolution order (right-to-left wins): declared defaults → `-p` values. Unknown keys or missing required params are hard errors.

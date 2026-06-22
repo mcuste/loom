@@ -62,8 +62,8 @@ Don't memorize a list. Discover it. For a given commit:
    * Nested packages collapse to the parent unless the sub-package is
      itself the unit of change, e.g. `pkg/runtime/claudecode/` →
      `[runtime/claude-code]`.
-   * Top-level dirs map to their name (`examples/` → `[examples]`,
-     `reports/` → `[docs]`, `.claude/skills/loom/` → `[skill]`).
+   * Top-level dirs map to their name (`workflows/` → `[workflows]`,
+     `.claude/skills/loom/` → `[skill]`).
    * Build/config files (`go.mod`, `justfile`, `.gitignore`) → `[build]`.
 3. **When unsure**, pick the lowest-level identifier that uniquely
    names the changed surface. Coining a new area is fine; once it
