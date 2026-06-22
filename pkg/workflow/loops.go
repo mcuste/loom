@@ -60,74 +60,45 @@ type rawLoop struct {
 	tasks         []rawTask
 }
 
-// parseRawLoops walks the top-level `loops:` node and returns one rawLoop per
-// entry in declaration order. An absent key (zero-value node) yields nil. The
-// loop id is validated for the identifier alphabet here; all cross-entry and
-// cross-task validation (collisions, uniqueness, connectivity, convergence)
-// happens in Parse once the full task set is known.
-func parseRawLoops(node yaml.Node) ([]rawLoop, error) {
-	if node.Kind == 0 {
-		return nil, nil
+// decodeLoopBody decodes a `loop:` block's fields from a mapping node into rl.
+// The loop's id and description come from the wrapping task, not the block, so
+// only the convergence/iteration fields (until_empty, until, max, tasks) are
+// recognized here; any other key (including id or description) is an unknown
+// field. Cross-task validation (collisions, uniqueness, connectivity,
+// convergence) happens in Parse once the full task set is known.
+func decodeLoopBody(entry *yaml.Node, rl *rawLoop) error {
+	if entry.Kind != yaml.MappingNode {
+		return errors.New("loop: must be a mapping")
 	}
-	if node.Kind != yaml.SequenceNode {
-		return nil, errors.New("loops: must be a sequence of loop entries")
-	}
-	loops := make([]rawLoop, 0, len(node.Content))
-	for _, entry := range node.Content {
-		if entry.Kind != yaml.MappingNode {
-			return nil, errors.New("loops: entry must be a mapping")
+	for i := 0; i+1 < len(entry.Content); i += 2 {
+		k, v := entry.Content[i], entry.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			return errors.New("loop: key must be a scalar")
 		}
-		var rl rawLoop
-		hasID := false
-		for i := 0; i+1 < len(entry.Content); i += 2 {
-			k, v := entry.Content[i], entry.Content[i+1]
-			if k.Kind != yaml.ScalarNode {
-				return nil, errors.New("loops: entry key must be a scalar")
+		switch k.Value {
+		case "until_empty":
+			if err := v.Decode(&rl.untilEmpty); err != nil {
+				return fmt.Errorf("loop: until_empty: %w", err)
 			}
-			switch k.Value {
-			case "id":
-				var s string
-				if err := v.Decode(&s); err != nil {
-					return nil, fmt.Errorf("loops.id: %w", err)
-				}
-				lid, err := NewLoopID(s)
-				if err != nil {
-					return nil, err
-				}
-				rl.id = lid
-				hasID = true
-			case "description":
-				if err := v.Decode(&rl.description); err != nil {
-					return nil, fmt.Errorf("loop: description: %w", err)
-				}
-			case "until_empty":
-				if err := v.Decode(&rl.untilEmpty); err != nil {
-					return nil, fmt.Errorf("loop: until_empty: %w", err)
-				}
-				rl.hasUntilEmpty = true
-			case "until":
-				if err := v.Decode(&rl.until); err != nil {
-					return nil, fmt.Errorf("loop: until: %w", err)
-				}
-				rl.hasUntil = true
-			case "max":
-				if err := v.Decode(&rl.max); err != nil {
-					return nil, fmt.Errorf("loop: max: %w", err)
-				}
-			case "tasks":
-				if err := v.Decode(&rl.tasks); err != nil {
-					return nil, fmt.Errorf("loop: tasks: %w", err)
-				}
-			default:
-				return nil, &UnknownLoopGroupFieldError{Field: k.Value}
+			rl.hasUntilEmpty = true
+		case "until":
+			if err := v.Decode(&rl.until); err != nil {
+				return fmt.Errorf("loop: until: %w", err)
 			}
+			rl.hasUntil = true
+		case "max":
+			if err := v.Decode(&rl.max); err != nil {
+				return fmt.Errorf("loop: max: %w", err)
+			}
+		case "tasks":
+			if err := v.Decode(&rl.tasks); err != nil {
+				return fmt.Errorf("loop: tasks: %w", err)
+			}
+		default:
+			return &UnknownLoopGroupFieldError{Field: k.Value}
 		}
-		if !hasID {
-			return nil, ErrLoopGroupMissingID
-		}
-		loops = append(loops, rl)
 	}
-	return loops, nil
+	return nil
 }
 
 // loopConnected reports whether the induced subgraph over members is weakly
@@ -326,17 +297,13 @@ func (e *LoopConvergenceError) Error() string {
 	return fmt.Sprintf("loop %q: must set exactly one of until_empty or until", e.Loop)
 }
 
-// ErrLoopGroupMissingID reports a `loops:` entry that omits the required `id:`
-// key. Without an id the entry's tasks would be indistinguishable from
-// top-level tasks and its membership guards could not be enforced.
-var ErrLoopGroupMissingID = errors.New("loops: entry is missing required id")
-
-// UnknownLoopGroupFieldError reports a key inside a `loops:` entry that is not
-// one of id|until_empty|until|max|tasks.
+// UnknownLoopGroupFieldError reports a key inside a `loop:` block that is not
+// one of until_empty|until|max|tasks (id and description come from the wrapping
+// task, not the block).
 type UnknownLoopGroupFieldError struct{ Field string }
 
 func (e *UnknownLoopGroupFieldError) Error() string {
-	return fmt.Sprintf("loops: unknown field %q", e.Field)
+	return fmt.Sprintf("loop: unknown field %q", e.Field)
 }
 
 // PrevOutsideLoopError reports a `{{prev.id}}` placeholder in a task that is not

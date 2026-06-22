@@ -3,15 +3,17 @@ package workflow_test
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// validNestedLoop is a workflow with one scoped loop. A top-level `seed` task
-// feeds a two-member loop {drain, refine}: drain depends on seed and the prior
-// iteration's refine (via {{prev.refine}}); refine depends on drain. The loop
-// converges when drain drains.
+// validNestedLoop is a workflow with one scoped loop, declared inline as a task
+// carrying a `loop:` block. A top-level `seed` task feeds a two-member loop
+// {drain, refine}: drain depends on seed and the prior iteration's refine (via
+// {{prev.refine}}); refine depends on drain. The loop converges when drain
+// drains.
 const validNestedLoop = `
 name: wf_nested
 runtime: test-rt
@@ -19,23 +21,24 @@ model: m1
 tasks:
   - id: seed
     prompt: seed
-loops:
   - id: work
-    until_empty: drain
-    max: 5
-    tasks:
-      - id: drain
-        depends_on: [seed]
-        prompt: |
-          drain {{seed}} {{prev.refine}}
-      - id: refine
-        depends_on: [drain]
-        prompt: refine {{drain}}
+    loop:
+      until_empty: drain
+      max: 5
+      tasks:
+        - id: drain
+          depends_on: [seed]
+          prompt: |
+            drain {{seed}} {{prev.refine}}
+        - id: refine
+          depends_on: [drain]
+          prompt: refine {{drain}}
 `
 
 // TestParse_NestedLoop_FlattensTasksInDeclarationOrder pins that wf.Tasks is the
-// flat union of top-level and every loop's nested tasks, in declaration order,
-// so existing code over wf.Tasks is unchanged.
+// flat union of top-level tasks and every loop's nested tasks, in declaration
+// order, so existing code over wf.Tasks is unchanged. The loop wrapper (work)
+// is not itself a task.
 func TestParse_NestedLoop_FlattensTasksInDeclarationOrder(t *testing.T) {
 	wf, err := workflow.Parse([]byte(validNestedLoop))
 	if err != nil {
@@ -60,17 +63,17 @@ model: m1
 tasks:
   - id: seed
     prompt: seed
-loops:
   - id: work
-    until: '{{drain}} == "done"'
-    max: 3
-    tasks:
-      - id: drain
-        depends_on: [seed]
-        prompt: drain {{seed}}
-      - id: refine
-        depends_on: [drain]
-        prompt: refine {{drain}}
+    loop:
+      until: '{{drain}} == "done"'
+      max: 3
+      tasks:
+        - id: drain
+          depends_on: [seed]
+          prompt: drain {{seed}}
+        - id: refine
+          depends_on: [drain]
+          prompt: refine {{drain}}
 `
 
 // TestParse_NestedLoop_UntilExpression pins the until convergence path: the
@@ -97,7 +100,7 @@ func TestParse_NestedLoop_UntilExpression(t *testing.T) {
 }
 
 // TestParse_NestedLoop_PopulatesLoopGroup pins that wf.Loops carries the loop
-// id, convergence target, max, and the member task ids.
+// id (the wrapper task id), convergence target, max, and the member task ids.
 func TestParse_NestedLoop_PopulatesLoopGroup(t *testing.T) {
 	wf, err := workflow.Parse([]byte(validNestedLoop))
 	if err != nil {
@@ -144,8 +147,9 @@ func TestParse_NestedLoop_TagsTasksWithOwningLoop(t *testing.T) {
 	}
 }
 
-// TestParse_RejectsLoopIDCollidingWithTask pins that a loop id equal to a task
-// id is rejected with LoopIDCollisionError (Kind "task").
+// TestParse_RejectsLoopIDCollidingWithTask pins that a loop id (wrapper task id)
+// equal to a sibling top-level task id is rejected with LoopIDCollisionError
+// (Kind "task").
 func TestParse_RejectsLoopIDCollidingWithTask(t *testing.T) {
 	src := `
 name: wf_c
@@ -154,13 +158,13 @@ model: m1
 tasks:
   - id: work
     prompt: W
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.LoopIDCollisionError
@@ -185,13 +189,13 @@ params:
 tasks:
   - id: t
     prompt: use {{params.work}}
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.LoopIDCollisionError
@@ -203,8 +207,8 @@ loops:
 	}
 }
 
-// TestParse_RejectsDuplicateLoopID pins that two loops with the same id are
-// rejected with DuplicateLoopIDError.
+// TestParse_RejectsDuplicateLoopID pins that two loop tasks sharing the same
+// wrapper id are rejected with DuplicateLoopIDError.
 func TestParse_RejectsDuplicateLoopID(t *testing.T) {
 	src := `
 name: wf_dl
@@ -213,19 +217,20 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
   - id: work
-    until_empty: b
-    max: 2
-    tasks:
-      - id: b
-        prompt: B
+    loop:
+      until_empty: b
+      max: 2
+      tasks:
+        - id: b
+          prompt: B
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.DuplicateLoopIDError
@@ -248,16 +253,16 @@ model: m1
 tasks:
   - id: a
     prompt: A
-loops:
   - id: work
-    until_empty: b
-    max: 2
-    tasks:
-      - id: a
-        prompt: dup
-      - id: b
-        depends_on: [a]
-        prompt: B {{a}}
+    loop:
+      until_empty: b
+      max: 2
+      tasks:
+        - id: a
+          prompt: dup
+        - id: b
+          depends_on: [a]
+          prompt: B {{a}}
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.DuplicateTaskIDError
@@ -279,11 +284,11 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks: []
+    loop:
+      until_empty: a
+      max: 2
+      tasks: []
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.EmptyLoopError
@@ -306,15 +311,15 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
-      - id: b
-        prompt: B
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
+        - id: b
+          prompt: B
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.DisconnectedLoopError
@@ -326,27 +331,31 @@ loops:
 	}
 }
 
-// TestParse_RejectsLoopMissingID pins that a `loops:` entry without an `id:`
-// key is rejected with ErrLoopGroupMissingID rather than silently tagging its
-// tasks with an empty loop id.
-func TestParse_RejectsLoopMissingID(t *testing.T) {
+// TestParse_RejectsTopLevelLoopsBlock pins that the removed top-level `loops:`
+// key is now rejected: loops are declared inline as tasks carrying a `loop:`
+// block, and KnownFields(true) rejects a stray top-level `loops:` as unknown.
+func TestParse_RejectsTopLevelLoopsBlock(t *testing.T) {
 	src := `
-name: wf_noid
+name: wf_old
 runtime: test-rt
 model: m1
 tasks:
   - id: seed
     prompt: S
 loops:
-  - until_empty: a
+  - id: work
+    until_empty: a
     max: 2
     tasks:
       - id: a
         prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
-	if !errors.Is(err, workflow.ErrLoopGroupMissingID) {
-		t.Fatalf("errors.Is ErrLoopGroupMissingID failed; err = %v", err)
+	if err == nil {
+		t.Fatalf("Parse accepted a top-level loops: block, want rejection")
+	}
+	if !strings.Contains(err.Error(), "loops") {
+		t.Errorf("error = %v, want it to mention the unknown loops field", err)
 	}
 }
 
@@ -361,18 +370,18 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
-      - id: b
-        depends_on: [a]
-        prompt: B {{a}}
-      - id: c
-        prompt: C
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
+        - id: b
+          depends_on: [a]
+          prompt: B {{a}}
+        - id: c
+          prompt: C
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.DisconnectedLoopError
@@ -395,13 +404,13 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: seed
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: seed
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.LoopTargetNotMemberError
@@ -423,13 +432,13 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: a
-    max: 0
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: a
+      max: 0
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.InvalidLoopGroupMaxError
@@ -451,14 +460,14 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: a
-    until: a == "done"
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: a
+      until: a == "done"
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.LoopConvergenceError
@@ -477,12 +486,12 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.LoopConvergenceError
@@ -501,13 +510,13 @@ model: m1
 tasks:
   - id: t
     prompt: bad {{prev.a}}
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.PrevOutsideLoopError
@@ -530,13 +539,13 @@ model: m1
 tasks:
   - id: outside
     prompt: O
-loops:
   - id: work
-    until_empty: a
-    max: 2
-    tasks:
-      - id: a
-        prompt: A {{prev.outside}}
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          prompt: A {{prev.outside}}
 `
 	_, err := workflow.Parse([]byte(src))
 	var got *workflow.PrevNotMemberError

@@ -57,10 +57,6 @@ func renderRichPlan(wf *workflow.Workflow, resolved workflow.ParamValues, cli ma
 	}
 	b.WriteString("\n")
 	b.WriteString(richWaves(wf))
-	if len(wf.Loops) > 0 {
-		b.WriteString("\n")
-		b.WriteString(richLoops(wf))
-	}
 	return b.String()
 }
 
@@ -121,13 +117,16 @@ func paramTag(source string) string {
 
 // richWaves prints the execution plan grouped by wave: each wave is a labeled
 // group, and every task lists its effective runtime/model/effort and incoming
-// deps so the real parallelism is visible at a glance.
+// deps so the real parallelism is visible at a glance. Scoped loops render as
+// their own group inline at the wave where their body first becomes runnable,
+// so the loop's position in the flow is visible rather than detached.
 func richWaves(wf *workflow.Workflow) string {
 	waves := wf.Waves()
+	waveOf := waveIndex(wf)
 
 	// idWidth is just the widest top-level task id; loop members are drawn under
-	// their own groups (see richLoops) and never appear in the wave section, so
-	// excluding them keeps this column from being padded for ids it never shows.
+	// their own groups and never appear in the wave rows, so excluding them keeps
+	// this column from being padded for ids it never shows.
 	idWidth := 0
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
@@ -139,61 +138,96 @@ func richWaves(wf *workflow.Workflow) string {
 		}
 	}
 
-	// Loop members are drawn under their own loop groups (see richLoops), so the
-	// wave listing carries only the top-level DAG. Empty waves (every member
-	// pulled into a loop) are dropped and the remainder renumbered.
-	var topWaves [][]workflow.TaskID
-	for _, wave := range waves {
-		var top []workflow.TaskID
+	// Filter loop members out of each wave; an original wave with no top-level
+	// task (every member pulled into a loop) is dropped and the displayed waves
+	// renumbered, but its position is still used to anchor inline loop groups.
+	topByWave := make([][]workflow.TaskID, len(waves))
+	displayed := 0
+	for wi, wave := range waves {
 		for _, id := range wave {
 			if t := wf.ByID(id); t != nil && t.Loop == "" {
-				top = append(top, id)
+				topByWave[wi] = append(topByWave[wi], id)
 			}
 		}
-		if len(top) > 0 {
-			topWaves = append(topWaves, top)
+		if len(topByWave[wi]) > 0 {
+			displayed++
 		}
 	}
 
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render(fmt.Sprintf("Execution plan (%d wave%s)", len(topWaves), plural(len(topWaves)))))
+	b.WriteString(sectionStyle.Render(fmt.Sprintf("Execution plan (%d wave%s)", displayed, plural(displayed))))
 	b.WriteString("\n")
-	for i, wave := range topWaves {
-		b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", i+1, len(wave), plural(len(wave)))))
-		b.WriteString("\n")
-		for _, id := range wave {
-			b.WriteString(richTaskRow(wf, id, idWidth))
+	waveNo := 0
+	for wi := range waves {
+		if len(topByWave[wi]) > 0 {
+			waveNo++
+			b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", waveNo, len(topByWave[wi]), plural(len(topByWave[wi])))))
+			b.WriteString("\n")
+			for _, id := range topByWave[wi] {
+				b.WriteString(richTaskRow(wf, id, idWidth))
+			}
+		}
+		for li := range wf.Loops {
+			if loopWaveIndex(&wf.Loops[li], waveOf) == wi {
+				b.WriteString(richLoopGroup(wf, &wf.Loops[li]))
+			}
 		}
 	}
 	return b.String()
 }
 
-// richLoops draws one labeled group per scoped loop: its id, convergence target
-// (until_empty / until), iteration cap, and every body task with its effective
-// runtime/model/effort and deps, so the in-loop execution shape is visible
-// without running.
-func richLoops(wf *workflow.Workflow) string {
+// waveIndex maps each task id to the index of the wave it executes in, derived
+// from wf.Waves(). Loop members are included so a loop's flow position can be
+// computed from its body.
+func waveIndex(wf *workflow.Workflow) map[workflow.TaskID]int {
+	m := make(map[workflow.TaskID]int)
+	for i, wave := range wf.Waves() {
+		for _, id := range wave {
+			m[id] = i
+		}
+	}
+	return m
+}
+
+// loopWaveIndex returns the index of the earliest wave in which any member of
+// lg becomes runnable, i.e. where the loop sits in the execution flow. A loop
+// with no resolvable member wave (none in waveOf) anchors at wave 0.
+func loopWaveIndex(lg *workflow.LoopGroup, waveOf map[workflow.TaskID]int) int {
+	idx := -1
+	for _, m := range lg.Members {
+		if w, ok := waveOf[m]; ok && (idx == -1 || w < idx) {
+			idx = w
+		}
+	}
+	if idx == -1 {
+		return 0
+	}
+	return idx
+}
+
+// richLoopGroup draws one labeled group for a scoped loop: its id, convergence
+// target (until_empty / until), iteration cap, optional description, and every
+// body task with its effective runtime/model/effort and deps, so the in-loop
+// execution shape is visible without running. Rendered inline among the waves
+// by richWaves at the loop's flow position.
+func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render(fmt.Sprintf("Loops (%d)", len(wf.Loops))))
+	// idWidth is derived per loop from its own members, so a wide id in one loop
+	// never pads the body columns of another.
+	idWidth := 0
+	for _, id := range lg.Members {
+		if n := len(id); n > idWidth {
+			idWidth = n
+		}
+	}
+	b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s  max=%d, %d task%s)",
+		lg.ID, loopConvergence(*lg), lg.Max, len(lg.Members), plural(len(lg.Members)))))
 	b.WriteString("\n")
-	for _, lg := range wf.Loops {
-		// idWidth is derived per loop from its own members, so a wide id in one
-		// loop never pads the body columns of another.
-		idWidth := 0
-		for _, id := range lg.Members {
-			if n := len(id); n > idWidth {
-				idWidth = n
-			}
-		}
-		b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s  max=%d, %d task%s)",
-			lg.ID, loopConvergence(lg), lg.Max, len(lg.Members), plural(len(lg.Members)))))
-		b.WriteString("\n")
-		if lg.Description != "" {
-			b.WriteString(fmt.Sprintf("    %s %s\n", labelStyle.Render("desc"), lg.Description))
-		}
-		for _, id := range lg.Members {
-			b.WriteString(richTaskRow(wf, id, idWidth))
-		}
+	if lg.Description != "" {
+		b.WriteString(fmt.Sprintf("    %s %s\n", labelStyle.Render("desc"), lg.Description))
+	}
+	for _, id := range lg.Members {
+		b.WriteString(richTaskRow(wf, id, idWidth))
 	}
 	return b.String()
 }

@@ -93,20 +93,20 @@ tasks:
   - id: exit
     depends_on: [a]
     prompt: "exit {{a}}"
-loops:
   - id: work
-    until_empty: c
-    max: 5
-    tasks:
-      - id: a
-        depends_on: [seed]
-        prompt: "a {{seed}} {{prev.c}}"
-      - id: b
-        depends_on: [a]
-        prompt: "b {{a}}"
-      - id: c
-        depends_on: [b]
-        prompt: "c {{b}}"
+    loop:
+      until_empty: c
+      max: 5
+      tasks:
+        - id: a
+          depends_on: [seed]
+          prompt: "a {{seed}} {{prev.c}}"
+        - id: b
+          depends_on: [a]
+          prompt: "b {{a}}"
+        - id: c
+          depends_on: [b]
+          prompt: "c {{b}}"
 `, rt)
 }
 
@@ -177,20 +177,20 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until: '{{c}} == "done"'
-    max: 5
-    tasks:
-      - id: a
-        depends_on: [seed]
-        prompt: "a {{seed}}"
-      - id: b
-        depends_on: [a]
-        prompt: "b {{a}}"
-      - id: c
-        depends_on: [b]
-        prompt: "c {{b}}"
+    loop:
+      until: '{{c}} == "done"'
+      max: 5
+      tasks:
+        - id: a
+          depends_on: [seed]
+          prompt: "a {{seed}}"
+        - id: b
+          depends_on: [a]
+          prompt: "b {{a}}"
+        - id: c
+          depends_on: [b]
+          prompt: "c {{b}}"
 `, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
@@ -226,20 +226,20 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: c
-    max: 3
-    tasks:
-      - id: a
-        depends_on: [seed]
-        prompt: "a {{seed}}"
-      - id: b
-        depends_on: [a]
-        prompt: "b {{a}}"
-      - id: c
-        depends_on: [b]
-        prompt: "c {{b}}"
+    loop:
+      until_empty: c
+      max: 3
+      tasks:
+        - id: a
+          depends_on: [seed]
+          prompt: "a {{seed}}"
+        - id: b
+          depends_on: [a]
+          prompt: "b {{a}}"
+        - id: c
+          depends_on: [b]
+          prompt: "c {{b}}"
 `, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
@@ -381,20 +381,20 @@ model: m1
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: c
-    max: 5
-    tasks:
-      - id: a
-        depends_on: [seed]
-        prompt: "a {{seed}}"
-      - id: b
-        depends_on: [a]
-        prompt: "b {{a}}"
-      - id: c
-        depends_on: [b]
-        prompt: "c {{b}}"
+    loop:
+      until_empty: c
+      max: 5
+      tasks:
+        - id: a
+          depends_on: [seed]
+          prompt: "a {{seed}}"
+        - id: b
+          depends_on: [a]
+          prompt: "b {{a}}"
+        - id: c
+          depends_on: [b]
+          prompt: "c {{b}}"
 `, name)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
@@ -436,20 +436,20 @@ budget:
 tasks:
   - id: seed
     prompt: S
-loops:
   - id: work
-    until_empty: c
-    max: 5
-    tasks:
-      - id: a
-        depends_on: [seed]
-        prompt: "a {{seed}}"
-      - id: b
-        depends_on: [a]
-        prompt: "b {{a}}"
-      - id: c
-        depends_on: [b]
-        prompt: "c {{b}}"
+    loop:
+      until_empty: c
+      max: 5
+      tasks:
+        - id: a
+          depends_on: [seed]
+          prompt: "a {{seed}}"
+        - id: b
+          depends_on: [a]
+          prompt: "b {{a}}"
+        - id: c
+          depends_on: [b]
+          prompt: "c {{b}}"
 `, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {

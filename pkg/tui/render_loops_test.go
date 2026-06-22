@@ -25,18 +25,18 @@ effort: high
 tasks:
   - id: seed
     prompt: seed it
-loops:
   - id: work
     description: drains the queue each pass
-    until_empty: drain
-    max: 4
-    tasks:
-      - id: drain
-        depends_on: [seed]
-        prompt: drain {{seed}} {{prev.refine}}
-      - id: refine
-        depends_on: [drain]
-        prompt: refine {{drain}}
+    loop:
+      until_empty: drain
+      max: 4
+      tasks:
+        - id: drain
+          depends_on: [seed]
+          prompt: drain {{seed}} {{prev.refine}}
+        - id: refine
+          depends_on: [drain]
+          prompt: refine {{drain}}
 `
 
 // untilLoopPlanFixture is the same shape as loopPlanFixture but converges via an
@@ -51,18 +51,57 @@ effort: high
 tasks:
   - id: seed
     prompt: seed it
-loops:
   - id: polish
-    until: '{{drain}} == "done"'
-    max: 3
-    tasks:
-      - id: drain
-        depends_on: [seed]
-        prompt: drain {{seed}}
-      - id: refine
-        depends_on: [drain]
-        prompt: refine {{drain}}
+    loop:
+      until: '{{drain}} == "done"'
+      max: 3
+      tasks:
+        - id: drain
+          depends_on: [seed]
+          prompt: drain {{seed}}
+        - id: refine
+          depends_on: [drain]
+          prompt: refine {{drain}}
 `
+
+// inlineLoopFixture places a scoped loop between two top-level tasks: seed
+// (wave 1) feeds the loop body drain (wave 2), and tail (wave 3) depends on
+// drain as an exit edge. The loop therefore sits in the flow after seed and
+// before tail, which the inline rendering must reflect.
+const inlineLoopFixture = `
+name: demo_inline
+runtime: claude-code
+model: opus
+effort: high
+tasks:
+  - id: seed
+    command: echo seed
+  - id: tail
+    depends_on: [drain]
+    command: echo done
+  - id: work
+    loop:
+      until_empty: drain
+      max: 3
+      tasks:
+        - id: drain
+          depends_on: [seed]
+          command: echo {{seed}}
+`
+
+// lineIndex returns the index of the first line in got that contains sub,
+// failing the test if none does. Used to assert relative ordering of the
+// rendered execution flow.
+func lineIndex(t *testing.T, got, sub string) int {
+	t.Helper()
+	for i, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, sub) {
+			return i
+		}
+	}
+	t.Fatalf("substring %q not found in:\n%s", sub, got)
+	return -1
+}
 
 // parsePlan parses src or fails the test; it centralizes the Parse boilerplate
 // shared by the loop-rendering scenarios.
@@ -236,6 +275,41 @@ func TestRenderPlan_PlainNamesLoopAndConvergenceTarget(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("plain loop group label missing %q in %q\nfull:\n%s", want, line, got)
 		}
+	}
+}
+
+// TestRenderPlan_RichPlacesLoopInline pins that the rich plan renders the loop
+// group at its flow position: after the top-level task that seeds it and before
+// the task that consumes its output, rather than in a trailing section.
+func TestRenderPlan_RichPlacesLoopInline(t *testing.T) {
+	forceASCIIProfile(t)
+	wf := parsePlan(t, inlineLoopFixture)
+
+	got := tui.RenderPlan(wf, nil, nil, true)
+	seed := lineIndex(t, got, "seed")
+	loop := lineIndex(t, got, "Loop work")
+	tail := lineIndex(t, got, "tail")
+	if !(seed < loop && loop < tail) {
+		t.Errorf("loop not inline: want seed(%d) < loop(%d) < tail(%d)\n%s", seed, loop, tail, got)
+	}
+}
+
+// TestRenderPlan_PlainPlacesLoopInline pins the same inline placement for the
+// plain renderer's execution-order listing.
+func TestRenderPlan_PlainPlacesLoopInline(t *testing.T) {
+	t.Parallel()
+	wf := parsePlan(t, inlineLoopFixture)
+
+	var buf bytes.Buffer
+	if err := tui.New(&buf).Plan(wf, nil, nil, nil); err != nil {
+		t.Fatalf("plain Plan: %v", err)
+	}
+	got := buf.String()
+	seed := lineIndex(t, got, "1. seed")
+	loop := lineIndex(t, got, "Loop work")
+	tail := lineIndex(t, got, "2. tail")
+	if !(seed < loop && loop < tail) {
+		t.Errorf("loop not inline: want seed(%d) < loop(%d) < tail(%d)\n%s", seed, loop, tail, got)
 	}
 }
 

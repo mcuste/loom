@@ -154,8 +154,8 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		}
 	}
 
-	// Loop members are listed under their own Loops section below, not in the
-	// flat execution order, so each scoped loop's body is attributed to it.
+	// Top-level tasks in plan order; loop members are attributed to their loop
+	// and drawn as an inline group at the loop's flow position (see emitLoops).
 	order := make([]workflow.TaskID, 0, len(wf.Tasks))
 	for _, id := range wf.Plan() {
 		if t := wf.ByID(id); t != nil && t.Loop == "" {
@@ -168,10 +168,14 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 			seedCount++
 		}
 	}
+	counts := fmt.Sprintf("%d task%s", len(order), plural(len(order)))
+	if len(wf.Loops) > 0 {
+		counts += fmt.Sprintf(", %d loop%s", len(wf.Loops), plural(len(wf.Loops)))
+	}
 	if seedCount > 0 {
-		ew.printf("\nExecution order (%d task%s; %d seeded):\n", len(order), plural(len(order)), seedCount)
+		ew.printf("\nExecution order (%s; %d seeded):\n", counts, seedCount)
 	} else {
-		ew.printf("\nExecution order (%d task%s):\n", len(order), plural(len(order)))
+		ew.printf("\nExecution order (%s):\n", counts)
 	}
 
 	idWidth := 0
@@ -181,6 +185,55 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		}
 	}
 
+	// Place each loop after the last top-level task that runs no later than the
+	// loop's first body wave; loopAfter[oi] lists loops to emit right after order
+	// index oi (-1 emits before the first task). waveOf is non-decreasing along a
+	// topological order, so the boundary is a contiguous prefix.
+	waveOf := waveIndex(wf)
+	loopAfter := make(map[int][]int)
+	for li := range wf.Loops {
+		lw := loopWaveIndex(&wf.Loops[li], waveOf)
+		pos := -1
+		for oi, id := range order {
+			if waveOf[id] <= lw {
+				pos = oi
+			}
+		}
+		loopAfter[pos] = append(loopAfter[pos], li)
+	}
+
+	emitLoops := func(after int) {
+		for _, li := range loopAfter[after] {
+			lg := &wf.Loops[li]
+			ew.printf("  Loop %s: %s max=%d\n", lg.ID, loopConvergence(*lg), lg.Max)
+			if lg.Description != "" {
+				ew.printf("        desc: %s\n", lg.Description)
+			}
+			bodyWidth := 0
+			for _, id := range lg.Members {
+				if n := len(id); n > bodyWidth {
+					bodyWidth = n
+				}
+			}
+			for _, id := range lg.Members {
+				t := wf.ByID(id)
+				if t.IsShell() {
+					cmd := t.Command
+					if len(cmd) > 60 {
+						cmd = cmd[:60] + "…"
+					}
+					ew.printf("        - %-*s  kind=shell  cmd=%q  deps=%s\n",
+						bodyWidth, id, cmd, depsList(t.DependsOn))
+					continue
+				}
+				rt, m, e := wf.Effective(t)
+				ew.printf("        - %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
+					bodyWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+			}
+		}
+	}
+
+	emitLoops(-1)
 	for i, id := range order {
 		t := wf.ByID(id)
 		suffix := ""
@@ -209,34 +262,7 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 			ew.printf("  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s%s\n",
 				i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn), suffix)
 		}
-	}
-
-	for _, lg := range wf.Loops {
-		ew.printf("\nLoop %s: %s max=%d\n", lg.ID, loopConvergence(lg), lg.Max)
-		if lg.Description != "" {
-			ew.printf("    desc: %s\n", lg.Description)
-		}
-		bodyWidth := 0
-		for _, id := range lg.Members {
-			if n := len(id); n > bodyWidth {
-				bodyWidth = n
-			}
-		}
-		for i, id := range lg.Members {
-			t := wf.ByID(id)
-			if t.IsShell() {
-				cmd := t.Command
-				if len(cmd) > 60 {
-					cmd = cmd[:60] + "…"
-				}
-				ew.printf("  %2d. %-*s  kind=shell  cmd=%q  deps=%s\n",
-					i+1, bodyWidth, id, cmd, depsList(t.DependsOn))
-				continue
-			}
-			rt, m, e := wf.Effective(t)
-			ew.printf("  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
-				i+1, bodyWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
-		}
+		emitLoops(i)
 	}
 	return ew.err
 }
@@ -293,9 +319,12 @@ func (p *plainRenderer) Hooks() executor.Hooks {
 	}
 }
 
-// Summary compares len(rep.Tasks) against expected to choose the success or
-// partial-failure line. expected is the full task count for `loom run` and the
-// non-seeded count for `loom resume`.
+// Summary compares the number of distinct tasks that ran against expected to
+// choose the success or partial-failure line. expected is the full task count
+// for `loom run` and the non-seeded count for `loom resume`. Distinct (not raw)
+// entries are counted because a scoped loop or a for_each fan-out records
+// multiple rep.Tasks entries per task id; raw length would exceed expected on
+// every looping run and mislabel a success as a partial stop.
 func (p *plainRenderer) Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error {
 	const bar = "────────────────────────────────────────"
 	ew := &errWriter{w: p.w}
@@ -304,12 +333,25 @@ func (p *plainRenderer) Summary(wf *workflow.Workflow, rep *executor.Report, exp
 		rep.Usage.InputTokens, rep.Usage.OutputTokens, rep.Usage.CacheReadTokens)
 	ew.printf("  total cost   : $%.6f\n", rep.Usage.TotalCostUSD)
 	ew.printf("%s\n", bar)
-	if len(rep.Tasks) == expected {
+	done := distinctTasks(rep)
+	if done == expected {
 		ew.printf("✓ workflow %q complete\n", wf.ID)
 	} else {
-		ew.printf("✗ workflow %q stopped after %d/%d tasks\n", wf.ID, len(rep.Tasks), expected)
+		ew.printf("✗ workflow %q stopped after %d/%d tasks\n", wf.ID, done, expected)
 	}
 	return ew.err
+}
+
+// distinctTasks counts unique task ids across rep.Tasks. A failed run omits the
+// failing task (and everything downstream) from the report, so a distinct count
+// below expected marks a partial stop; a loop or for_each that completes
+// collapses its repeated entries to one per id and reaches expected.
+func distinctTasks(rep *executor.Report) int {
+	seen := make(map[workflow.TaskID]struct{}, len(rep.Tasks))
+	for _, r := range rep.Tasks {
+		seen[r.TaskID] = struct{}{}
+	}
+	return len(seen)
 }
 
 // Close is a no-op for the plain renderer; the rich renderer will flush/tear

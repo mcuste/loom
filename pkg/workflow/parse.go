@@ -56,15 +56,35 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, err
 	}
 
-	rawLoops, err := parseRawLoops(raw.Loops)
-	if err != nil {
-		return nil, err
+	// Loops are declared as tasks carrying a `loop:` block: the wrapper is not an
+	// executable task; its id becomes the loop id and its nested `tasks:` the
+	// members. Split wrappers out of the top-level task set and collect them as
+	// rawLoops for the shared loop-group machinery.
+	var rawLoops []rawLoop
+	topTasks := make([]rawTask, 0, len(raw.Tasks))
+	for _, rt := range raw.Tasks {
+		if rt.Loop.Kind == 0 {
+			topTasks = append(topTasks, rt)
+			continue
+		}
+		tid, err := NewTaskID(rt.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := rejectLoopWrapperFields(tid, rt); err != nil {
+			return nil, err
+		}
+		rl := rawLoop{id: LoopID(tid), description: rt.Description}
+		if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
+			return nil, fmt.Errorf("task %q: %w", tid, err)
+		}
+		rawLoops = append(rawLoops, rl)
 	}
 
 	// A zero top-level task set is rejected, but the sentinel depends on whether
 	// any loops are declared: an empty workflow gets ErrNoTasks, while a
 	// loops-only workflow gets the clearer ErrLoopsWithoutTopLevelTask.
-	if len(raw.Tasks) == 0 {
+	if len(topTasks) == 0 {
 		if len(rawLoops) > 0 {
 			return nil, fmt.Errorf("workflow %q: %w", id, ErrLoopsWithoutTopLevelTask)
 		}
@@ -107,7 +127,7 @@ func Parse(data []byte) (*Workflow, error) {
 		loop LoopID
 	}
 	allTasks := make([]loopTask, 0, len(raw.Tasks))
-	for _, rt := range raw.Tasks {
+	for _, rt := range topTasks {
 		allTasks = append(allTasks, loopTask{rt: rt, loop: ""})
 	}
 	for _, rl := range rawLoops {
@@ -325,11 +345,10 @@ type rawWorkflow struct {
 	SystemPrompt string    `yaml:"system_prompt"`
 	Params       yaml.Node `yaml:"params"`
 	Tasks        []rawTask `yaml:"tasks"`
-	// Loops is captured as a raw yaml.Node so the parser can walk each scoped-loop
-	// entry, flatten its nested tasks into Workflow.Tasks, and validate ids,
-	// connectivity, and convergence against the full task set. Absent key means
-	// no scoped loops.
-	Loops yaml.Node `yaml:"loops"`
+	// There is no top-level `loops:` key: loops are declared inline as tasks
+	// carrying a `loop:` block (see rawTask.Loop). With KnownFields(true), a
+	// stray top-level `loops:` is rejected as an unknown field.
+	//
 	// Budget is captured as a raw yaml.Node so the parser can distinguish an
 	// absent `budget:` key (no limit) from a present block whose max_cost_usd
 	// must be validated as a positive float.
@@ -376,6 +395,11 @@ type rawTask struct {
 	// default) is distinct from an explicit `cache: false` (opt out). Shell tasks
 	// are never memoized regardless, so no shell-vs-LLM rejection applies here.
 	Cache *bool `yaml:"cache"`
+	// Loop is captured as a raw yaml.Node so the parser can tell an absent
+	// `loop:` key (a normal prompt/command task) from a present block, which
+	// makes this task a loop wrapper: its id becomes the loop id and its nested
+	// `tasks:` the loop body, decoded by decodeLoopBody.
+	Loop yaml.Node `yaml:"loop"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`
@@ -413,7 +437,38 @@ var (
 	// meaningless for shell tasks and rejected at the task level; workflow-level
 	// defaults are tolerated.
 	ErrShellTaskWithRuntime = errors.New("shell task must not set runtime, model, or effort")
+	// ErrLoopTaskWithBody reports a loop-wrapper task (one with a `loop:` block)
+	// that also sets `prompt:` or `command:`. A loop task has no body of its own;
+	// its work lives in the nested loop tasks.
+	ErrLoopTaskWithBody = errors.New("loop task must not set prompt or command")
+	// ErrLoopTaskWithRuntime reports a loop-wrapper task that sets task-level
+	// `runtime:`, `model:`, or `effort:`. These belong to the loop's body tasks,
+	// not the wrapper.
+	ErrLoopTaskWithRuntime = errors.New("loop task must not set runtime, model, or effort")
+	// ErrLoopTaskWithFields reports a loop-wrapper task that sets a task-only
+	// field (`depends_on`, `when`, `writes_state`, `for_each`, `as`, `schema`,
+	// `retry`, `budget`, or `cache`). The wrapper stands only for its loop;
+	// entry dependencies and per-task behavior belong to the body tasks.
+	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, for_each, as, schema, retry, budget, or cache")
 )
+
+// rejectLoopWrapperFields enforces that a `loop:` task carries nothing but its
+// id, description, and the loop block: a loop wrapper is not an executable task,
+// so prompt/command, runtime knobs, and every task-only field are rejected at
+// load time rather than silently ignored.
+func rejectLoopWrapperFields(tid TaskID, rt rawTask) error {
+	switch {
+	case rt.Prompt != "" || rt.Command != "":
+		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithBody)
+	case rt.Runtime != "" || rt.Model != "" || rt.Effort != "":
+		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithRuntime)
+	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" || rt.As != "" ||
+		rt.ForEach.Kind != 0 || rt.Schema.Kind != 0 || rt.Retry.Kind != 0 ||
+		rt.Budget.Kind != 0 || rt.Cache != nil:
+		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithFields)
+	}
+	return nil
+}
 
 // DuplicateTaskIDError reports two tasks declaring the same id.
 type DuplicateTaskIDError struct{ ID TaskID }

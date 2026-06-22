@@ -17,12 +17,18 @@ func TestRawMirrorsPublic(t *testing.T) {
 		public      any
 		aliases     map[string]string   // raw field name -> public field name
 		extraPublic map[string]struct{} // public fields with no raw counterpart (derived)
+		extraRaw    map[string]struct{} // raw fields with no public counterpart (parse-only)
 	}{
 		{
 			name:    "workflow",
 			raw:     rawWorkflow{},
 			public:  Workflow{},
 			aliases: map[string]string{"Name": "ID"},
+			// Loops is derived: there is no top-level `loops:` YAML key. Loops are
+			// declared inline as tasks carrying a `loop:` block (rawTask.Loop) and
+			// folded into Workflow.Loops during parse, so the public field has no
+			// rawWorkflow counterpart.
+			extraPublic: map[string]struct{}{"Loops": {}},
 		},
 		{
 			name:   "task",
@@ -31,10 +37,15 @@ func TestRawMirrorsPublic(t *testing.T) {
 			// ForEachSource is derived by parseForEach from the raw `for_each`
 			// scalar (the dynamic-fanout case); a static `for_each` sequence
 			// decodes into ForEach instead. Cond is compiled by ParseCondition
-			// from the raw `when:` text. Loop is derived from the enclosing
-			// `loops:` entry a task is nested under, not a task-level YAML key.
-			// None has a separate raw field.
+			// from the raw `when:` text. Task.Loop is derived from the enclosing
+			// `loops:` entry (or `loop:` wrapper) a task is nested under, not a
+			// task-level YAML key. None has a separate raw field.
 			extraPublic: map[string]struct{}{"ForEachSource": {}, "Cond": {}, "Loop": {}},
+			// rawTask.Loop is the per-task `loop:` block: a parse-only wrapper that
+			// is folded into a LoopGroup and never becomes a Task, so it has no
+			// public counterpart (it shares the name with the derived Task.Loop
+			// above only by coincidence).
+			extraRaw: map[string]struct{}{"Loop": {}},
 		},
 		{
 			name:   "param",
@@ -50,12 +61,12 @@ func TestRawMirrorsPublic(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assertFieldParity(t, reflect.TypeOf(tc.raw), reflect.TypeOf(tc.public), tc.aliases, tc.extraPublic)
+			assertFieldParity(t, reflect.TypeOf(tc.raw), reflect.TypeOf(tc.public), tc.aliases, tc.extraPublic, tc.extraRaw)
 		})
 	}
 }
 
-func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[string]string, extraPublic map[string]struct{}) {
+func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[string]string, extraPublic, extraRaw map[string]struct{}) {
 	t.Helper()
 
 	pubFields := map[string]struct{}{}
@@ -72,6 +83,9 @@ func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[strin
 	}
 
 	for rf := range raw.Fields() {
+		if _, ok := extraRaw[rf.Name]; ok {
+			continue
+		}
 		want := rf.Name
 		if alias, ok := aliases[rf.Name]; ok {
 			want = alias

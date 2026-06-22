@@ -136,6 +136,26 @@ func TestPlainRenderer_SummaryPartial(t *testing.T) {
 	}
 }
 
+// TestPlainRenderer_SummaryLoopCountsDistinct pins that a looping run reports
+// success: a scoped loop records one rep.Tasks entry per iteration, so the raw
+// count (4) exceeds the expected task count (2); the summary must collapse the
+// repeated member to a distinct count and print the ✓ line, not a false stop.
+func TestPlainRenderer_SummaryLoopCountsDistinct(t *testing.T) {
+	wf := parseWF(t, "name: demo\ntasks:\n  - id: a\n    command: echo a\n  - id: b\n    command: echo b\n")
+	rep := &executor.Report{
+		Usage: runtime.Usage{},
+		Tasks: []executor.TaskResult{{TaskID: "a"}, {TaskID: "b"}, {TaskID: "b"}, {TaskID: "b"}},
+	}
+
+	var buf bytes.Buffer
+	if err := tui.New(&buf).Summary(wf, rep, 2); err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "✓ workflow \"demo\" complete") {
+		t.Errorf("Summary() = %q, want it to contain the complete line", got)
+	}
+}
+
 // TestPlainRenderer_HooksRenderProgressLines pins the per-task progress lines
 // emitted through the renderer's Hooks. The denominator comes from
 // RunMeta.Total set by a prior Header call; the buffer is reset after the
