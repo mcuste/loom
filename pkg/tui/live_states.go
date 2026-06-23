@@ -23,6 +23,10 @@ type symbolSet struct {
 	barFull  string
 	barEmpty string
 	over     string
+	tee      string // tree branch to a non-last sibling
+	elbow    string // tree branch to the last sibling
+	pending  string // a step that never ran
+	par      string // marks a wave whose steps run in parallel
 }
 
 // symbolsFor returns the badge/gauge glyph set for color profile p, degrading
@@ -39,6 +43,10 @@ func symbolsFor(p termenv.Profile) symbolSet {
 			barFull:  "#",
 			barEmpty: ".",
 			over:     "!",
+			tee:      "+-",
+			elbow:    "`-",
+			pending:  ".",
+			par:      "||",
 		}
 	}
 	return symbolSet{
@@ -51,6 +59,10 @@ func symbolsFor(p termenv.Profile) symbolSet {
 		barFull:  "█",
 		barEmpty: "░",
 		over:     "⚠",
+		tee:      "├─",
+		elbow:    "└─",
+		pending:  "·",
+		par:      "∥",
 	}
 }
 
