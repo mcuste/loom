@@ -1,6 +1,6 @@
 ---
 name: loom
-description: Author and run loom workflows — YAML DAGs of LLM tasks executed by the `loom` CLI installed from this repo. Use when the user wants to "write a loom workflow", "build a loom DAG", "run this with loom", "check a loom yaml", "chain prompts with loom", or asks for help with `loom run` / `loom check`.
+description: Author and run loom workflows — YAML DAGs of LLM tasks executed by the `loom` CLI installed from this repo. Use when the user wants to "write a loom workflow", "build a loom DAG", "run this with loom", "check a loom yaml", "chain prompts with loom", or asks for help with `loom run` / `loom run check`.
 allowed-tools: Bash(loom *), Read, Write, Edit, Glob, Grep
 ---
 
@@ -9,13 +9,14 @@ Author and execute loom workflows. Loom parses a YAML workflow, builds a DAG ove
 ## CLI
 
 ```bash
-loom check  <workflow.yaml>                 # parse + validate + print execution order, no execution
-loom run    <workflow.yaml>                 # check + execute every task (independent tasks run concurrently)
-loom run    <workflow.yaml> --resume-latest # resume the last run of this workflow: skip ok tasks, re-run the rest
-loom resume <run-id>                        # resume a specific .loom/runs/<wf>/<id>.json; "latest" follows latest.json
+loom run check <workflow.yaml>                 # parse + validate + print execution order, no execution
+loom run       <workflow.yaml>                 # check + execute every task (independent tasks run concurrently)
+loom run       <workflow.yaml> --resume-latest # resume the last run of this workflow: skip ok tasks, re-run the rest
+loom resume    <run-id>                         # resume a specific .loom/runs/<wf>/<id>.json; "latest" follows latest.json
+loom runs                                       # browse past runs (TUI); `ls` lists, `show <id>` prints one inline
 ```
 
-Always run `loom check <file>` first when authoring — it surfaces every validation error (cycles, unknown deps, unknown placeholders, bad model/effort) without burning tokens on `claude`.
+Always run `loom run check <file>` first when authoring — it surfaces every validation error (cycles, unknown deps, unknown placeholders, bad model/effort) without burning tokens on `claude`.
 
 `loom run` prints the plan, per-task progress (id, runtime/model/effort, tokens, cost), the run-file path, and a final summary. Independent tasks (no edge between them in the DAG) are dispatched concurrently — fan-out is free, you don't need to wait for siblings.
 
@@ -57,13 +58,13 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 - `{{task_id}}` in a prompt is substituted with that upstream task's full string output at runtime.
 - Every `{{id}}` placeholder **must also appear in `depends_on`**. Placeholders never implicitly extend the DAG. Repeating a placeholder is fine; it's templating, not declaration. The one exception is the `{{prev.<id>}}` loop placeholder, which is explicitly exempt (see [Scoped loops](#scoped-loops)).
 - `depends_on` may list a task with no placeholder (pure ordering constraint).
-- Cycles, unknown deps, duplicate deps, and unknown placeholders fail `loom check`.
+- Cycles, unknown deps, duplicate deps, and unknown placeholders fail `loom run check`.
 
 ## Command tasks
 
 A task with `command:` runs `sh -c <substituted-command>` instead of dispatching to a runtime.
 
-**Discriminator rule** — exactly one of `prompt` or `command` must be set per task. Setting both or neither is rejected by the parser (`loom check` surfaces the error before execution).
+**Discriminator rule** — exactly one of `prompt` or `command` must be set per task. Setting both or neither is rejected by the parser (`loom run check` surfaces the error before execution).
 
 **Rejected fields on command tasks** — `runtime`, `model`, and `effort` at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected.
 
@@ -120,7 +121,7 @@ Provide values on the CLI with repeatable `-p key=val`:
 
 ```bash
 loom run workflows/deploy.yaml -p env=prod -p replicas=3
-loom check workflows/deploy.yaml -p env=prod
+loom run check workflows/deploy.yaml -p env=prod
 ```
 
 Resolution order (right-to-left wins): declared defaults → `-p` values. Unknown keys or missing required params are hard errors.
@@ -154,7 +155,7 @@ tasks:
     prompt: summarize {{drain}}
 ```
 
-Rules (all surfaced by `loom check`):
+Rules (all surfaced by `loom run check`):
 
 - **Discriminator** — a task sets exactly one of `prompt`, `command`, `loop`, or `for_each` (`loop:` and `for_each:` are sibling scoped-block forms; a task setting both is rejected). A `loop:`/`for_each:` task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
 - **Loop id** — the wrapper task id; `[A-Za-z0-9_]+`, unique, and distinct from every other task id and param name.
@@ -198,11 +199,11 @@ A loop body has three edge kinds, distinguished by where each `depends_on` endpo
 
 ### `prev.<id>` placeholder
 
-Inside a loop body, `{{prev.<member>}}` injects the **prior iteration's** output of a sibling member (empty on the first iteration). It lets an iteration build on the last one without forming a cycle — `drain` above reads `{{prev.refine}}` to carry state forward. A `prev` reference is valid only inside a loop body and may only name a member of that same loop; using it elsewhere or across loops fails `loom check`.
+Inside a loop body, `{{prev.<member>}}` injects the **prior iteration's** output of a sibling member (empty on the first iteration). It lets an iteration build on the last one without forming a cycle — `drain` above reads `{{prev.refine}}` to carry state forward. A `prev` reference is valid only inside a loop body and may only name a member of that same loop; using it elsewhere or across loops fails `loom run check`.
 
 Unlike a plain `{{id}}` placeholder, a `{{prev.<member>}}` reference is **exempt from the `depends_on` rule** and must *not* be listed in `depends_on`: it reads across iterations, not within one, so adding the edge would form a cycle. In the example above `drain` reads `{{prev.refine}}` yet only declares `depends_on: [seed]`.
 
-`loom check` renders each loop as a labeled group showing its id, a kind-specific summary (a `loop:` shows its convergence target `until_empty=`/`until=` and `max`; a `for_each:` shows `as=` and its list source, `static[n]` or `dynamic<-{{src}}`), and every body task with its deps, so the loop's execution shape is visible without running it.
+`loom run check` renders each loop as a labeled group showing its id, a kind-specific summary (a `loop:` shows its convergence target `until_empty=`/`until=` and `max`; a `for_each:` shows `as=` and its list source, `static[n]` or `dynamic<-{{src}}`), and every body task with its deps, so the loop's execution shape is visible without running it.
 
 ## Runtime / model / effort
 
@@ -247,7 +248,7 @@ Efforts: `minimal | low | medium | high | xhigh`. Empty effort means "leave runt
 1. Decide the DAG shape first (fan-out, chain, diamond). Sketch task ids and edges.
 2. Pick workflow-level defaults to cover the majority of tasks; override only where escalation matters.
 3. Keep prompts tight — each `{{id}}` placeholder injects the *entire* upstream output verbatim.
-4. Run `loom check` until it's clean, then `loom run`. When params are declared, `loom check -p key=val` resolves `{{params.X}}` placeholders before printing the plan, so you can preview the actual prompts the model will see.
+4. Run `loom run check` until it's clean, then `loom run`. When params are declared, `loom run check -p key=val` resolves `{{params.X}}` placeholders before printing the plan, so you can preview the actual prompts the model will see.
 
 ## Output
 

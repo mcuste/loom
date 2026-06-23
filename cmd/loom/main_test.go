@@ -122,7 +122,7 @@ tasks:
 		root := newRootCmd()
 		root.SetOut(&buf)
 		root.SetErr(&buf)
-		root.SetArgs([]string{"check", path})
+		root.SetArgs([]string{"run", "check", path})
 		if err := root.Execute(); err != nil {
 			t.Fatalf("check (no -p) returned err = %v; want nil", err)
 		}
@@ -141,7 +141,7 @@ tasks:
 		root := newRootCmd()
 		root.SetOut(&buf)
 		root.SetErr(&buf)
-		root.SetArgs([]string{"check", path, "-p", "env=prod"})
+		root.SetArgs([]string{"run", "check", path, "-p", "env=prod"})
 		if err := root.Execute(); err != nil {
 			t.Fatalf("check (-p env=prod) returned err = %v; want nil", err)
 		}
@@ -160,7 +160,7 @@ tasks:
 		root := newRootCmd()
 		root.SetOut(&buf)
 		root.SetErr(&buf)
-		root.SetArgs([]string{"check", path, "-p", "env=a", "-p", "env=b"})
+		root.SetArgs([]string{"run", "check", path, "-p", "env=a", "-p", "env=b"})
 		if err := root.Execute(); err == nil {
 			t.Fatalf("check with duplicate -p returned nil; want DuplicateCLIParamError")
 		}
@@ -182,7 +182,7 @@ tasks:
 	root := newRootCmd()
 	root.SetOut(&buf)
 	root.SetErr(&buf)
-	root.SetArgs([]string{"check", path})
+	root.SetArgs([]string{"run", "check", path})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("check returned err = %v; want nil\noutput:\n%s", err, buf.String())

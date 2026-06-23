@@ -40,10 +40,15 @@ func newRootCmd() *cobra.Command {
 		Short:        "Validate and run workflow YAML files",
 		SilenceUsage: true,
 	}
-	root.AddCommand(newRunCmd(), newCheckCmd(), newResumeCmd(), newRunsCmd())
+	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd())
 	return root
 }
 
+// newRunCmd is the parent for executing a workflow. Invoked with a workflow
+// path it validates and runs (or resumes the latest run with --resume-latest);
+// its `check` subcommand stops after validation and the printed plan. A path
+// that is not a subcommand routes to the parent (cobra runs it when args[0]
+// does not name a child), so `loom run wf.yaml` executes as before.
 func newRunCmd() *cobra.Command {
 	var (
 		paramArgs    []string
@@ -63,6 +68,7 @@ func newRunCmd() *cobra.Command {
 	addParamFlags(cmd, &paramArgs)
 	cmd.Flags().BoolVar(&resumeLatest, "resume-latest", false,
 		"seed ok tasks from $LOOM_HOME/runs/<wf>/latest.json (default $HOME/.loom) and re-run the remainder")
+	cmd.AddCommand(newCheckCmd())
 	return cmd
 }
 
@@ -70,7 +76,7 @@ func newCheckCmd() *cobra.Command {
 	var paramArgs []string
 	cmd := &cobra.Command{
 		Use:   "check <workflow.yaml>",
-		Short: "Validate a workflow and print execution order",
+		Short: "Validate a workflow and print its execution plan, without running",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return doCheck(cmd.OutOrStdout(), args[0], paramArgs)
