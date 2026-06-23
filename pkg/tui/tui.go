@@ -178,9 +178,16 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		ew.printf("\nExecution order (%s):\n", counts)
 	}
 
+	// idWidth pads the id column shared by top-level tasks and loop entries (a
+	// loop is a numbered flow step too), so both align.
 	idWidth := 0
 	for _, id := range order {
 		if n := len(id); n > idWidth {
+			idWidth = n
+		}
+	}
+	for li := range wf.Loops {
+		if n := len(wf.Loops[li].ID); n > idWidth {
 			idWidth = n
 		}
 	}
@@ -202,12 +209,17 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		loopAfter[pos] = append(loopAfter[pos], li)
 	}
 
+	// step numbers tasks and loops together in flow order: a loop is one
+	// numbered entry whose body members are listed, indented, beneath it.
+	step := 0
 	emitLoops := func(after int) {
 		for _, li := range loopAfter[after] {
 			lg := &wf.Loops[li]
-			ew.printf("  Loop %s: %s max=%d\n", lg.ID, loopConvergence(*lg), lg.Max)
+			step++
+			ew.printf("  %2d. %-*s  loop  %s  max=%d\n",
+				step, idWidth, lg.ID, loopConvergence(*lg), lg.Max)
 			if lg.Description != "" {
-				ew.printf("        desc: %s\n", lg.Description)
+				ew.printf("      desc: %s\n", lg.Description)
 			}
 			bodyWidth := 0
 			for _, id := range lg.Members {
@@ -222,19 +234,19 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 					if len(cmd) > 60 {
 						cmd = cmd[:60] + "…"
 					}
-					ew.printf("        - %-*s  kind=shell  cmd=%q  deps=%s\n",
+					ew.printf("      - %-*s  kind=shell  cmd=%q  deps=%s\n",
 						bodyWidth, id, cmd, depsList(t.DependsOn))
 					continue
 				}
 				rt, m, e := wf.Effective(t)
-				ew.printf("        - %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
+				ew.printf("      - %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
 					bodyWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
 			}
 		}
 	}
 
 	emitLoops(-1)
-	for i, id := range order {
+	for oi, id := range order {
 		t := wf.ByID(id)
 		suffix := ""
 		if t.WritesState != "" {
@@ -250,19 +262,20 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		if seeded[id] {
 			suffix += "  (seeded; using stored output)"
 		}
+		step++
 		if t.IsShell() {
 			cmd := t.Command
 			if len(cmd) > 60 {
 				cmd = cmd[:60] + "…"
 			}
 			ew.printf("  %2d. %-*s  kind=shell  cmd=%q  deps=%s%s\n",
-				i+1, idWidth, id, cmd, depsList(t.DependsOn), suffix)
+				step, idWidth, id, cmd, depsList(t.DependsOn), suffix)
 		} else {
 			rt, m, e := wf.Effective(t)
 			ew.printf("  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s%s\n",
-				i+1, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn), suffix)
+				step, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn), suffix)
 		}
-		emitLoops(i)
+		emitLoops(oi)
 	}
 	return ew.err
 }

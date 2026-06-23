@@ -103,6 +103,23 @@ func lineIndex(t *testing.T, got, sub string) int {
 	return -1
 }
 
+// plainLoopHeaderOffset returns the byte offset of the plain renderer's loop
+// header row for the loop with the given id: the numbered flow row carrying the
+// `loop` kind marker. Distinct from loopGroupLine, which matches the rich
+// renderer's "Loop <id>" group label.
+func plainLoopHeaderOffset(t *testing.T, got, id string) int {
+	t.Helper()
+	off := 0
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "  loop  ") && strings.Contains(line, id) {
+			return off
+		}
+		off += len(line) + 1
+	}
+	t.Fatalf("plain loop header for %q not found in:\n%s", id, got)
+	return -1
+}
+
 // parsePlan parses src or fails the test; it centralizes the Parse boilerplate
 // shared by the loop-rendering scenarios.
 func parsePlan(t *testing.T, src string) *workflow.Workflow {
@@ -180,12 +197,9 @@ func TestRenderPlan_PlainShowsLoopDescription(t *testing.T) {
 		t.Fatalf("plain Plan: %v", err)
 	}
 	got := buf.String()
-	idx := strings.Index(got, "Loop work")
-	if idx < 0 {
-		t.Fatalf("loop group label \"Loop work\" not found in:\n%s", got)
-	}
+	idx := plainLoopHeaderOffset(t, got, "work")
 	if !strings.Contains(got[idx:], "drains the queue each pass") {
-		t.Errorf("loop description not shown under loop group in:\n%s", got)
+		t.Errorf("loop description not shown under loop entry in:\n%s", got)
 	}
 }
 
@@ -270,10 +284,14 @@ func TestRenderPlan_PlainNamesLoopAndConvergenceTarget(t *testing.T) {
 		t.Fatalf("plain Plan: %v", err)
 	}
 	got := buf.String()
-	line := loopGroupLine(t, got, "work")
-	for _, want := range []string{"work", "until_empty=drain"} {
+	idx := plainLoopHeaderOffset(t, got, "work")
+	line := got[idx:]
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	for _, want := range []string{"work", "loop", "until_empty=drain"} {
 		if !strings.Contains(line, want) {
-			t.Errorf("plain loop group label missing %q in %q\nfull:\n%s", want, line, got)
+			t.Errorf("plain loop entry missing %q in %q\nfull:\n%s", want, line, got)
 		}
 	}
 }
@@ -306,8 +324,8 @@ func TestRenderPlan_PlainPlacesLoopInline(t *testing.T) {
 	}
 	got := buf.String()
 	seed := lineIndex(t, got, "1. seed")
-	loop := lineIndex(t, got, "Loop work")
-	tail := lineIndex(t, got, "2. tail")
+	loop := lineIndex(t, got, "  loop  ")
+	tail := lineIndex(t, got, "tail")
 	if !(seed < loop && loop < tail) {
 		t.Errorf("loop not inline: want seed(%d) < loop(%d) < tail(%d)\n%s", seed, loop, tail, got)
 	}
@@ -324,10 +342,7 @@ func TestRenderPlan_PlainShowsLoopBodyTasks(t *testing.T) {
 		t.Fatalf("plain Plan: %v", err)
 	}
 	got := buf.String()
-	idx := strings.Index(got, "Loop work")
-	if idx < 0 {
-		t.Fatalf("loop group label \"Loop work\" not found in:\n%s", got)
-	}
+	idx := plainLoopHeaderOffset(t, got, "work")
 	body := got[idx:]
 	for _, member := range []string{"drain", "refine"} {
 		if !strings.Contains(body, member) {
