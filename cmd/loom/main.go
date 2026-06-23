@@ -40,7 +40,7 @@ func newRootCmd() *cobra.Command {
 		Short:        "Validate and run workflow YAML files",
 		SilenceUsage: true,
 	}
-	root.AddCommand(newRunCmd(), newCheckCmd(), newResumeCmd())
+	root.AddCommand(newRunCmd(), newCheckCmd(), newResumeCmd(), newRunsCmd())
 	return root
 }
 

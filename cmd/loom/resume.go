@@ -171,11 +171,14 @@ func runFromRecord(w io.Writer, home string, manifest []byte, rec *store.RunReco
 }
 
 // findRunRecord resolves a user-supplied run id to a path under
-// $LOOM_HOME/runs. The literal "latest" follows the most-recently-updated
-// latest.json symlink across all workflows; any other id is matched verbatim
-// against <home>/runs/<wf>/<runID>.json across every workflow directory. The
-// runID must be a single path component (no separators) so an attacker cannot
-// point the loader at an arbitrary file via `..` traversal.
+// $LOOM_HOME/runs, across every workflow directory. The literal "latest"
+// follows the most-recently-updated latest.json symlink. Any other value
+// matches a run when it equals the full id, the short suffix shown in the runs
+// table (the hex after the last "-", e.g. "0afad3"), or a leading timestamp
+// prefix. An exact full-id match always wins; otherwise a single fuzzy match is
+// returned and multiple are reported as ambiguous. The runID must be a single
+// path component (no separators) so a crafted value cannot escape the runs
+// root via `..` traversal.
 func findRunRecord(home, runID string) (string, error) {
 	root := filepath.Join(home, "runs")
 	if runID == "latest" {
@@ -184,20 +187,42 @@ func findRunRecord(home, runID string) (string, error) {
 	if err := validateRunID(runID); err != nil {
 		return "", err
 	}
-	entries, err := os.ReadDir(root)
+	headers, err := store.ListAllRuns(home)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", root, err)
+		return "", err
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	var fuzzy []store.RunHeader
+	for _, h := range headers {
+		if h.RunID == runID {
+			return h.Path, nil // exact full-id match wins outright
 		}
-		p := filepath.Join(root, e.Name(), runID+".json")
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+		if runIDMatches(h.RunID, runID) {
+			fuzzy = append(fuzzy, h)
 		}
 	}
-	return "", fmt.Errorf("run id %q: not found under %s", runID, root)
+	switch len(fuzzy) {
+	case 0:
+		return "", fmt.Errorf("run id %q: not found under %s", runID, root)
+	case 1:
+		return fuzzy[0].Path, nil
+	default:
+		ids := make([]string, len(fuzzy))
+		for i, h := range fuzzy {
+			ids[i] = h.RunID
+		}
+		return "", fmt.Errorf("run id %q is ambiguous; matches %d runs: %s",
+			runID, len(fuzzy), strings.Join(ids, ", "))
+	}
+}
+
+// runIDMatches reports whether the stored full run id matches a user-supplied
+// fragment: its short suffix (the hex after the last "-") or a leading prefix
+// (e.g. the timestamp). Exact equality is handled by the caller.
+func runIDMatches(full, q string) bool {
+	if i := strings.LastIndexByte(full, '-'); i >= 0 && full[i+1:] == q {
+		return true
+	}
+	return strings.HasPrefix(full, q)
 }
 
 // validateRunID rejects ids that contain a path separator; without this,
