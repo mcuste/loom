@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -56,14 +55,16 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, err
 	}
 
-	// Loops are declared as tasks carrying a `loop:` block: the wrapper is not an
-	// executable task; its id becomes the loop id and its nested `tasks:` the
-	// members. Split wrappers out of the top-level task set and collect them as
-	// rawLoops for the shared loop-group machinery.
+	// Loops are declared as tasks carrying a `loop:` (while) or `for_each:` block:
+	// the wrapper is not an executable task; its id becomes the loop id and its
+	// nested `tasks:` the members. Split wrappers out of the top-level task set
+	// and collect them as rawLoops for the shared loop-group machinery.
 	var rawLoops []rawLoop
 	topTasks := make([]rawTask, 0, len(raw.Tasks))
 	for _, rt := range raw.Tasks {
-		if rt.Loop.Kind == 0 {
+		isLoop := rt.Loop.Kind != 0
+		isForEach := rt.ForEach.Kind != 0
+		if !isLoop && !isForEach {
 			topTasks = append(topTasks, rt)
 			continue
 		}
@@ -71,11 +72,21 @@ func Parse(data []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
+		// `loop:` and `for_each:` are sibling scoped-block wrappers; a task
+		// declaring both is ambiguous.
+		if isLoop && isForEach {
+			return nil, fmt.Errorf("task %q: %w", tid, ErrLoopAndForEachSet)
+		}
 		if err := rejectLoopWrapperFields(tid, rt); err != nil {
 			return nil, err
 		}
 		rl := rawLoop{id: LoopID(tid), description: rt.Description}
-		if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
+		if isForEach {
+			rl.kind = LoopForEach
+			if err := decodeForEachBody(&rt.ForEach, &rl); err != nil {
+				return nil, fmt.Errorf("task %q: %w", tid, err)
+			}
+		} else if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
 			return nil, fmt.Errorf("task %q: %w", tid, err)
 		}
 		rawLoops = append(rawLoops, rl)
@@ -177,11 +188,20 @@ func Parse(data []byte) (*Workflow, error) {
 		depsByID[TaskID(lt.rt.ID)] = ds
 	}
 
-	loops, memberByLoop, err := buildLoopGroups(rawLoops, depsByID)
+	loops, memberByLoop, err := buildLoopGroups(rawLoops, depsByID, ids, paramSet)
 	if err != nil {
 		return nil, err
 	}
 	wf.Loops = loops
+
+	// asByLoop maps each loop id to its for_each loop variable ("" for a while
+	// loop), so the per-task build below can exempt a member's `{{as}}`
+	// placeholder from the depends_on check (it is bound per iteration, not via
+	// the DAG).
+	asByLoop := make(map[LoopID]string, len(loops))
+	for i := range loops {
+		asByLoop[loops[i].ID] = loops[i].As
+	}
 
 	for _, lt := range allTasks {
 		rt := lt.rt
@@ -208,7 +228,7 @@ func Parse(data []byte) (*Workflow, error) {
 		if schema != nil && rt.Command != "" {
 			return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
 		}
-		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet, rt.As)
+		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet, asByLoop[lt.loop])
 		if err != nil {
 			return nil, err
 		}
@@ -221,10 +241,6 @@ func Parse(data []byte) (*Workflow, error) {
 		}
 		if rt.WritesState != "" && !identifierRe.MatchString(rt.WritesState) {
 			return nil, &InvalidWritesStateError{Task: tid, Key: rt.WritesState}
-		}
-		forEach, forEachSource, err := parseForEach(tid, rt.ForEach, rt.As, deps, ids, paramSet)
-		if err != nil {
-			return nil, err
 		}
 		taskBudget, err := parseBudget(rt.Budget)
 		if err != nil {
@@ -248,25 +264,22 @@ func Parse(data []byte) (*Workflow, error) {
 		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
-			ID:            tid,
-			Prompt:        rt.Prompt,
-			Command:       rt.Command,
-			Description:   rt.Description,
-			Runtime:       runtime.Name(rt.Runtime),
-			Model:         runtime.Model(rt.Model),
-			Effort:        runtime.Effort(rt.Effort),
-			DependsOn:     deps,
-			When:          rt.When,
-			Cond:          cond,
-			Retry:         retry,
-			WritesState:   rt.WritesState,
-			ForEach:       forEach,
-			ForEachSource: forEachSource,
-			As:            rt.As,
-			Budget:        taskBudget,
-			Schema:        schema,
-			Cache:         rt.Cache,
-			Loop:          lt.loop,
+			ID:          tid,
+			Prompt:      rt.Prompt,
+			Command:     rt.Command,
+			Description: rt.Description,
+			Runtime:     runtime.Name(rt.Runtime),
+			Model:       runtime.Model(rt.Model),
+			Effort:      runtime.Effort(rt.Effort),
+			DependsOn:   deps,
+			When:        rt.When,
+			Cond:        cond,
+			Retry:       retry,
+			WritesState: rt.WritesState,
+			Budget:      taskBudget,
+			Schema:      schema,
+			Cache:       rt.Cache,
+			Loop:        lt.loop,
 		})
 	}
 
@@ -374,14 +387,15 @@ type rawTask struct {
 	DependsOn   []string `yaml:"depends_on"`
 	WritesState string   `yaml:"writes_state"`
 	When        string   `yaml:"when"`
-	As          string   `yaml:"as"`
 	// Retry is captured as a raw yaml.Node so the parser can distinguish an
 	// absent `retry:` key (zero value, no retry) from a present-but-partial
 	// block whose `backoff`/`on` defaults must be filled in.
 	Retry yaml.Node `yaml:"retry"`
-	// ForEach is captured as a raw yaml.Node so parseForEach can tell a literal
-	// sequence (static fanout) from a single-placeholder scalar (dynamic fanout)
-	// and reject other shapes.
+	// ForEach is captured as a raw yaml.Node so the parser can tell an absent
+	// `for_each:` key (a normal prompt/command task) from a present block, which
+	// makes this task a for_each wrapper: its id becomes the loop id and its
+	// nested `tasks:` the loop body, decoded by decodeForEachBody. A sibling of
+	// Loop; a task may set at most one of the two.
 	ForEach yaml.Node `yaml:"for_each"`
 	// Budget is captured as a raw yaml.Node so the parser can distinguish an
 	// absent per-task `budget:` key (no limit) from a present block validated
@@ -446,10 +460,14 @@ var (
 	// not the wrapper.
 	ErrLoopTaskWithRuntime = errors.New("loop task must not set runtime, model, or effort")
 	// ErrLoopTaskWithFields reports a loop-wrapper task that sets a task-only
-	// field (`depends_on`, `when`, `writes_state`, `for_each`, `as`, `schema`,
-	// `retry`, `budget`, or `cache`). The wrapper stands only for its loop;
-	// entry dependencies and per-task behavior belong to the body tasks.
-	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, for_each, as, schema, retry, budget, or cache")
+	// field (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`,
+	// or `cache`). The wrapper stands only for its loop; entry dependencies and
+	// per-task behavior belong to the body tasks.
+	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, schema, retry, budget, or cache")
+	// ErrLoopAndForEachSet reports a task declaring both a `loop:` and a
+	// `for_each:` block. The two are sibling scoped-block forms; a task is at
+	// most one of them.
+	ErrLoopAndForEachSet = errors.New("task sets both loop and for_each")
 )
 
 // rejectLoopWrapperFields enforces that a `loop:` task carries nothing but its
@@ -462,8 +480,8 @@ func rejectLoopWrapperFields(tid TaskID, rt rawTask) error {
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithBody)
 	case rt.Runtime != "" || rt.Model != "" || rt.Effort != "":
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithRuntime)
-	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" || rt.As != "" ||
-		rt.ForEach.Kind != 0 || rt.Schema.Kind != 0 || rt.Retry.Kind != 0 ||
+	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" ||
+		rt.Schema.Kind != 0 || rt.Retry.Kind != 0 ||
 		rt.Budget.Kind != 0 || rt.Cache != nil:
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithFields)
 	}
@@ -486,56 +504,6 @@ type InvalidWritesStateError struct {
 
 func (e *InvalidWritesStateError) Error() string {
 	return fmt.Sprintf("task %q: invalid writes_state %q: must match [A-Za-z0-9_]+", e.Task, e.Key)
-}
-
-// MissingForEachAsError reports a `for_each:` task that omits the required
-// `as:` key naming the per-instance loop variable.
-type MissingForEachAsError struct{ Task TaskID }
-
-func (e *MissingForEachAsError) Error() string {
-	return fmt.Sprintf("task %q: for_each requires as", e.Task)
-}
-
-// ForEachAsWithoutForEachError reports an `as:` declared on a task that has no
-// `for_each:`; the loop variable would bind nothing.
-type ForEachAsWithoutForEachError struct{ Task TaskID }
-
-func (e *ForEachAsWithoutForEachError) Error() string {
-	return fmt.Sprintf("task %q: as set without for_each", e.Task)
-}
-
-// InvalidForEachAsError reports an `as:` value that fails the `[A-Za-z0-9_]+`
-// rule, the same alphabet as a placeholder name.
-type InvalidForEachAsError struct {
-	Task TaskID
-	As   string
-}
-
-func (e *InvalidForEachAsError) Error() string {
-	return fmt.Sprintf("task %q: invalid as %q: must match [A-Za-z0-9_]+", e.Task, e.As)
-}
-
-// ForEachAsCollisionError reports an `as:` loop variable whose name collides
-// with a task id or param name; Kind is "task" or "param".
-type ForEachAsCollisionError struct {
-	Task TaskID
-	As   string
-	Kind string
-}
-
-func (e *ForEachAsCollisionError) Error() string {
-	return fmt.Sprintf("task %q: as %q collides with a %s name", e.Task, e.As, e.Kind)
-}
-
-// InvalidForEachSourceError reports a scalar `for_each:` value that is not
-// exactly one `{{...}}` placeholder (the dynamic-fanout shape).
-type InvalidForEachSourceError struct {
-	Task   TaskID
-	Source string
-}
-
-func (e *InvalidForEachSourceError) Error() string {
-	return fmt.Sprintf("task %q: for_each source %q must be a single {{...}} placeholder", e.Task, e.Source)
 }
 
 // UnknownDependencyError reports a depends_on entry that does not match any
@@ -855,72 +823,6 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 		}
 	}
 	return r, nil
-}
-
-// parseForEach decodes a task's `for_each:` node into a fanout spec. An absent
-// node (zero value) means no fanout — in which case a stray `as:` is rejected,
-// since the loop variable would bind nothing.
-//
-// A YAML sequence is a static fanout: its scalar entries become the literal
-// values (returned as forEach, possibly empty but non-nil). A YAML scalar is a
-// dynamic fanout: it must hold exactly one `{{...}}` placeholder, returned as
-// source; a `{{id}}` source must name a depends_on entry and a `{{params.x}}`
-// source a declared param (state sources need neither). Any other shape is an
-// error.
-//
-// When a fanout is present, `as` is required, must satisfy the identifier
-// alphabet, and must not collide with a task id or param name.
-func parseForEach(tid TaskID, node yaml.Node, as string, deps []TaskID, known map[TaskID]struct{}, params map[ParamName]struct{}) (forEach []string, source string, err error) {
-	if node.Kind == 0 {
-		if as != "" {
-			return nil, "", &ForEachAsWithoutForEachError{Task: tid}
-		}
-		return nil, "", nil
-	}
-	if as == "" {
-		return nil, "", &MissingForEachAsError{Task: tid}
-	}
-	if !identifierRe.MatchString(as) {
-		return nil, "", &InvalidForEachAsError{Task: tid, As: as}
-	}
-	if _, ok := known[TaskID(as)]; ok {
-		return nil, "", &ForEachAsCollisionError{Task: tid, As: as, Kind: "task"}
-	}
-	if _, ok := params[ParamName(as)]; ok {
-		return nil, "", &ForEachAsCollisionError{Task: tid, As: as, Kind: "param"}
-	}
-
-	switch node.Kind {
-	case yaml.SequenceNode:
-		vals := make([]string, 0, len(node.Content))
-		for _, item := range node.Content {
-			if item.Kind != yaml.ScalarNode {
-				return nil, "", fmt.Errorf("task %q: for_each: list entries must be scalars", tid)
-			}
-			vals = append(vals, item.Value)
-		}
-		return vals, "", nil
-	case yaml.ScalarNode:
-		src := node.Value
-		taskRefs, paramRefs, stateRefs := scanPlaceholders(src)
-		if len(taskRefs)+len(paramRefs)+len(stateRefs) != 1 {
-			return nil, "", &InvalidForEachSourceError{Task: tid, Source: src}
-		}
-		if len(taskRefs) == 1 {
-			name := taskRefs[0]
-			if !slices.Contains(deps, TaskID(name)) {
-				return nil, "", &UnknownPlaceholderError{Task: tid, Name: name}
-			}
-		}
-		if len(paramRefs) == 1 {
-			if _, ok := params[ParamName(paramRefs[0])]; !ok {
-				return nil, "", &UnknownParamError{Task: tid, Name: paramRefs[0]}
-			}
-		}
-		return nil, src, nil
-	default:
-		return nil, "", fmt.Errorf("task %q: for_each must be a list or a single {{...}} placeholder", tid)
-	}
 }
 
 // buildDeps validates a task's depends_on list and checks that every

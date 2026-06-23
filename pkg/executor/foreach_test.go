@@ -2,31 +2,41 @@ package executor_test
 
 import (
 	"context"
-	"sort"
-	"strings"
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// TestRunForEachStatic exercises a static fanout: one instance per literal
-// value, each binding {{as}}, with the node's joined output visible to a
-// downstream task via {{base_id}}.
+// TestRunForEachStatic drives a static `for_each:` block: the body member runs
+// once per literal value, sequentially and in list order, with the loop
+// variable bound into each pass's prompt. The member's report Output is the last
+// iteration's value (loop semantics), not a join.
 func TestRunForEachStatic(t *testing.T) {
-	src := `
+	t.Parallel()
+	rt, rec := newLoopRT(t, map[string][]string{
+		"handle": {"r1", "r2", "r3"},
+	}, runtime.Usage{InputTokens: 10, OutputTokens: 20})
+
+	src := fmt.Sprintf(`
 name: wf
-runtime: exec-echo
+runtime: %s
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: [redis, postgres, nats]
-    as: backend
-    prompt: "probe {{backend}}"
-  - id: report
-    depends_on: [probe]
-    prompt: "results:\n{{probe}}"
-`
+    for_each:
+      in: [redis, postgres, nats]
+      as: backend
+      tasks:
+        - id: handle
+          depends_on: [seed]
+          prompt: "probe {{backend}}"
+`, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -36,100 +46,118 @@ tasks:
 		t.Fatalf("Run: %v", err)
 	}
 
-	// echoRuntime echoes the prompt; instances run concurrently so order within
-	// the joined output is by list position, not completion.
-	want := "probe redis\nprobe postgres\nprobe nats"
-	if rep.Outputs["probe"] != want {
-		t.Errorf("Outputs[probe] = %q, want %q", rep.Outputs["probe"], want)
+	// Prompts are recorded in call order; a sequential for_each over the list
+	// produces exactly these, in order.
+	got := rec.promptsFor("handle")
+	want := []string{"probe redis", "probe postgres", "probe nats"}
+	if !slices.Equal(got, want) {
+		t.Errorf("handle prompts = %v, want %v", got, want)
 	}
-	if rep.Outputs["report"] != "results:\n"+want {
-		t.Errorf("Outputs[report] = %q, want %q", rep.Outputs["report"], "results:\n"+want)
+	// The member's published output is the final iteration's value.
+	if rep.Outputs["handle"] != "r3" {
+		t.Errorf("Outputs[handle] = %q, want r3", rep.Outputs["handle"])
 	}
-
-	// Three echo instances, each 10 in / 20 out, plus the report task: 40 in /
-	// 80 out total. Usage is summed across instances.
-	if rep.Usage.InputTokens != 40 || rep.Usage.OutputTokens != 80 {
-		t.Errorf("Usage = %+v, want 40 in / 80 out", rep.Usage)
+	// One pass per list element, stamped 1..3.
+	if its := iterationsOf(rep, "handle"); !slices.Equal(its, []int{1, 2, 3}) {
+		t.Errorf("handle iterations = %v, want [1 2 3]", its)
 	}
 }
 
-// TestRunForEachDynamicNewlines exercises a dynamic fanout whose list comes
-// from an upstream shell task as a newline-separated string (with blanks the
-// parser must drop).
+// TestRunForEachDynamicNewlines drives a dynamic list sourced from an upstream
+// shell task as a newline-separated string (with blanks the parser drops).
 func TestRunForEachDynamicNewlines(t *testing.T) {
-	src := `
+	t.Parallel()
+	rt, rec := newLoopRT(t, nil, runtime.Usage{})
+
+	src := fmt.Sprintf(`
 name: wf
-runtime: exec-echo
+runtime: %s
 model: m1
 tasks:
   - id: discover
     command: "printf 'one\ntwo\n\nthree\n'"
-  - id: handle
-    for_each: "{{discover}}"
-    as: item
-    depends_on: [discover]
-    prompt: "do {{item}}"
-`
+  - id: fan
+    for_each:
+      in: "{{discover}}"
+      as: item
+      tasks:
+        - id: handle
+          prompt: "do {{item}}"
+`, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
-	if err != nil {
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := "do one\ndo two\ndo three"
-	if rep.Outputs["handle"] != want {
-		t.Errorf("Outputs[handle] = %q, want %q", rep.Outputs["handle"], want)
+	got := rec.promptsFor("handle")
+	want := []string{"do one", "do two", "do three"}
+	if !slices.Equal(got, want) {
+		t.Errorf("handle prompts = %v, want %v", got, want)
 	}
 }
 
-// TestRunForEachDynamicJSON exercises a dynamic fanout whose list comes from an
-// upstream task as a JSON array of strings.
+// TestRunForEachDynamicJSON drives a dynamic list sourced from an upstream shell
+// task as a JSON array of strings.
 func TestRunForEachDynamicJSON(t *testing.T) {
-	src := `
+	t.Parallel()
+	rt, rec := newLoopRT(t, nil, runtime.Usage{})
+
+	src := fmt.Sprintf(`
 name: wf
-runtime: exec-echo
+runtime: %s
 model: m1
 tasks:
   - id: discover
     command: "printf '[\"a\", \"b\", \"c\"]'"
-  - id: handle
-    for_each: "{{discover}}"
-    as: item
-    depends_on: [discover]
-    prompt: "x{{item}}"
-`
+  - id: fan
+    for_each:
+      in: "{{discover}}"
+      as: item
+      tasks:
+        - id: handle
+          prompt: "x{{item}}"
+`, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
-	if err != nil {
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := "xa\nxb\nxc"
-	if rep.Outputs["handle"] != want {
-		t.Errorf("Outputs[handle] = %q, want %q", rep.Outputs["handle"], want)
+	got := rec.promptsFor("handle")
+	want := []string{"xa", "xb", "xc"}
+	if !slices.Equal(got, want) {
+		t.Errorf("handle prompts = %v, want %v", got, want)
 	}
 }
 
-// TestRunForEachEmptyList pins that an empty resolved list produces an empty
-// node output and runs no instances (the loop-until-dry "drained" signal).
+// TestRunForEachEmptyList pins that an empty resolved list runs zero iterations:
+// the member never runs, yet the loop closes its member gate so a downstream
+// consumer proceeds against the empty output.
 func TestRunForEachEmptyList(t *testing.T) {
-	src := `
+	t.Parallel()
+	rt, rec := newLoopRT(t, map[string][]string{"report": {"REPORT"}}, runtime.Usage{})
+
+	src := fmt.Sprintf(`
 name: wf
-runtime: exec-echo
+runtime: %s
 model: m1
 tasks:
   - id: discover
     command: "true"
-  - id: handle
-    for_each: "{{discover}}"
-    as: item
-    depends_on: [discover]
-    prompt: "do {{item}}"
-`
+  - id: fan
+    for_each:
+      in: "{{discover}}"
+      as: item
+      tasks:
+        - id: handle
+          prompt: "do {{item}}"
+  - id: report
+    depends_on: [handle]
+    prompt: "got:{{handle}}"
+`, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -138,54 +166,66 @@ tasks:
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rep.Outputs["handle"] != "" {
-		t.Errorf("Outputs[handle] = %q, want empty", rep.Outputs["handle"])
+	if got := rec.promptsFor("handle"); len(got) != 0 {
+		t.Errorf("handle prompts = %v, want none (zero iterations)", got)
 	}
-	// The fanout node still completes (fires its hooks / appears in Tasks) even
-	// with no instances; only the instances are skipped.
-	if got := rep.Outputs["discover"]; got != "" {
-		t.Errorf("Outputs[discover] = %q, want empty", got)
+	if rep.Outputs["report"] != "REPORT" {
+		t.Errorf("Outputs[report] = %q, want REPORT (consumer ran past empty loop)", rep.Outputs["report"])
 	}
 }
 
 // TestRunForEachStaticEmpty pins that an explicit empty static list behaves the
-// same as an empty dynamic list: empty output, no instances.
+// same as an empty dynamic list: zero iterations, member never runs.
 func TestRunForEachStaticEmpty(t *testing.T) {
-	src := `
+	t.Parallel()
+	rt, rec := newLoopRT(t, nil, runtime.Usage{})
+
+	src := fmt.Sprintf(`
 name: wf
-runtime: exec-echo
+runtime: %s
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: []
-    as: backend
-    prompt: "probe {{backend}}"
-`
+    for_each:
+      in: []
+      as: backend
+      tasks:
+        - id: handle
+          prompt: "probe {{backend}}"
+`, rt)
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
-	if err != nil {
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rep.Outputs["probe"] != "" {
-		t.Errorf("Outputs[probe] = %q, want empty", rep.Outputs["probe"])
+	if got := rec.promptsFor("handle"); len(got) != 0 {
+		t.Errorf("handle prompts = %v, want none (zero iterations)", got)
 	}
 }
 
-// TestRunForEachShell exercises a shell fanout, confirming {{as}} substitutes
-// into the command body per instance.
+// TestRunForEachShell drives a shell body member: the loop variable substitutes
+// into the command per pass, and `{{prev.acc}}` accumulates across the
+// sequential passes, proving in-order execution.
 func TestRunForEachShell(t *testing.T) {
+	t.Parallel()
 	src := `
 name: wf
 runtime: exec-echo
 model: m1
 tasks:
-  - id: each
-    for_each: [1, 2, 3]
-    as: n
-    command: "echo n={{n}}"
+  - id: seed
+    command: "true"
+  - id: loop
+    for_each:
+      in: [1, 2, 3]
+      as: n
+      tasks:
+        - id: acc
+          command: "printf '%s%s' '{{prev.acc}}' '{{n}}'"
 `
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
@@ -195,34 +235,36 @@ tasks:
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// Instances run concurrently; assert the set of lines regardless of order.
-	got := strings.Split(rep.Outputs["each"], "\n")
-	sort.Strings(got)
-	want := []string{"n=1", "n=2", "n=3"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("Outputs[each] lines = %v, want %v", got, want)
+	if rep.Outputs["acc"] != "123" {
+		t.Errorf("Outputs[acc] = %q, want 123 (sequential accumulation)", rep.Outputs["acc"])
 	}
 }
 
-// TestRunForEachInstanceError pins that one failing instance fails the whole
-// fanout node and propagates the error from Run.
-func TestRunForEachInstanceError(t *testing.T) {
+// TestRunForEachMemberError pins that a failing pass fails the whole loop and
+// propagates the error from Run.
+func TestRunForEachMemberError(t *testing.T) {
+	t.Parallel()
 	src := `
 name: wf
 runtime: exec-echo
 model: m1
 tasks:
-  - id: each
-    for_each: [ok1, ok2]
-    as: n
-    command: "test {{n}} = ok1"
+  - id: seed
+    command: "true"
+  - id: loop
+    for_each:
+      in: [ok1, ok2]
+      as: n
+      tasks:
+        - id: check
+          command: "test {{n}} = ok1"
 `
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	// "test ok2 = ok1" exits non-zero, so one instance fails the node.
+	// The second pass ("test ok2 = ok1") exits non-zero, failing the loop.
 	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{}); err == nil {
-		t.Fatal("Run returned nil error, want failure from a failing instance")
+		t.Fatal("Run returned nil error, want failure from a failing pass")
 	}
 }

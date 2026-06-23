@@ -156,12 +156,37 @@ tasks:
 
 Rules (all surfaced by `loom check`):
 
-- **Discriminator** — a task sets exactly one of `prompt`, `command`, or `loop`. A `loop:` task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `for_each`, `as`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
+- **Discriminator** — a task sets exactly one of `prompt`, `command`, `loop`, or `for_each` (`loop:` and `for_each:` are sibling scoped-block forms; a task setting both is rejected). A `loop:`/`for_each:` task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
 - **Loop id** — the wrapper task id; `[A-Za-z0-9_]+`, unique, and distinct from every other task id and param name.
 - **Convergence** — exactly one of `until_empty` or `until` per loop. `until_empty` names a body member whose empty trimmed output ends the loop; `until` is a `when`-style expression that may reference **only** members of the same loop.
 - **`max`** — required and `>= 1`; bounds iterations even if the target never converges.
 - **Body** — `tasks:` is non-empty and uses the identical task schema (prompt/command, model/effort, etc.). Each body task carries its loop id; a task belongs to at most one loop.
 - **Connected** — the body must form a single connected subgraph via its internal edges.
+
+### `for_each:` block — iterate a finite list
+
+A `for_each:` block is the loop's sibling: instead of converging, it runs its body **once per element** of a finite list, sequentially (iteration count = `len(list)`). It is declared inline as a task carrying `for_each:` (not `prompt`/`command`/`loop`), with the same wrapper rules as `loop:`.
+
+```yaml
+tasks:
+  - id: discover
+    command: "ls cmd"          # produces a newline list (or a JSON array of strings)
+  - id: process                # the loop id (a task carrying for_each:)
+    for_each:
+      in: [redis, postgres]    # static list — OR — a single placeholder: in: '{{discover}}'
+      as: backend              # the loop variable, bound to each element in turn
+      tasks:                   # required, non-empty; same task schema as top-level
+        - id: probe
+          prompt: probe {{backend}} building on {{prev.probe}}
+  - id: report                 # exit consumer: depends on a body MEMBER
+    depends_on: [probe]
+    prompt: summarize {{probe}}
+```
+
+- **`in`** — either a static YAML sequence (`[a, b, c]`) or a single `{{...}}` placeholder scalar resolved at run time. A `{{taskid}}` source makes that task an entry dependency (the list is resolved once it closes); a `{{params.x}}` or `{{state.x}}` source needs no edge. A dynamic source is parsed as a JSON array of strings, else split on newlines, with blank entries dropped.
+- **`as`** — the loop variable; `[A-Za-z0-9_]+`, and distinct from every task id and param name. Reference it as `{{as}}` in any body member's prompt or command; it is bound per iteration and **exempt from `depends_on`** (it is not a task output).
+- **No `until_*` / `max`** — the list length fixes the iteration count. An **empty list runs zero iterations**: the members never run and the loop closes their gates immediately, so an exit consumer sees empty output (this composes with loop-until-dry: nothing to process reads as drained).
+- **Sequential** — passes run in list order; `{{prev.<member>}}` carries the prior pass's output forward exactly as in a `loop:`. A body member's published output is the **final** iteration's value (loop semantics), not a join across iterations.
 
 ### Edge semantics
 
@@ -177,7 +202,7 @@ Inside a loop body, `{{prev.<member>}}` injects the **prior iteration's** output
 
 Unlike a plain `{{id}}` placeholder, a `{{prev.<member>}}` reference is **exempt from the `depends_on` rule** and must *not* be listed in `depends_on`: it reads across iterations, not within one, so adding the edge would form a cycle. In the example above `drain` reads `{{prev.refine}}` yet only declares `depends_on: [seed]`.
 
-`loom check` renders each loop as a labeled group showing its id, convergence target (`until_empty=` / `until=`), `max`, and every body task with its deps, so the loop's execution shape is visible without running it.
+`loom check` renders each loop as a labeled group showing its id, a kind-specific summary (a `loop:` shows its convergence target `until_empty=`/`until=` and `max`; a `for_each:` shows `as=` and its list source, `static[n]` or `dynamic<-{{src}}`), and every body task with its deps, so the loop's execution shape is visible without running it.
 
 ## Runtime / model / effort
 

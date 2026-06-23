@@ -205,8 +205,9 @@ func loopWaveIndex(lg *workflow.LoopGroup, waveOf map[workflow.TaskID]int) int {
 	return idx
 }
 
-// richLoopGroup draws one labeled group for a scoped loop: its id, convergence
-// target (until_empty / until), iteration cap, optional description, and every
+// richLoopGroup draws one labeled group for a scoped loop: its id, a
+// kind-specific summary (a while loop's convergence target and cap, or a
+// for_each loop's variable and list source), optional description, and every
 // body task with its effective runtime/model/effort and deps, so the in-loop
 // execution shape is visible without running. Rendered inline among the waves
 // by richWaves at the loop's flow position.
@@ -220,8 +221,8 @@ func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
 			idWidth = n
 		}
 	}
-	b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s  max=%d, %d task%s)",
-		lg.ID, loopConvergence(*lg), lg.Max, len(lg.Members), plural(len(lg.Members)))))
+	b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s, %d task%s)",
+		lg.ID, loopDescriptor(*lg), len(lg.Members), plural(len(lg.Members)))))
 	b.WriteString("\n")
 	if lg.Description != "" {
 		b.WriteString(fmt.Sprintf("    %s %s\n", labelStyle.Render("desc"), lg.Description))

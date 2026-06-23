@@ -216,8 +216,8 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		for _, li := range loopAfter[after] {
 			lg := &wf.Loops[li]
 			step++
-			ew.printf("  %2d. %-*s  loop  %s  max=%d\n",
-				step, idWidth, lg.ID, loopConvergence(*lg), lg.Max)
+			ew.printf("  %2d. %-*s  loop  %s\n",
+				step, idWidth, lg.ID, loopDescriptor(*lg))
 			if lg.Description != "" {
 				ew.printf("      desc: %s\n", lg.Description)
 			}
@@ -252,13 +252,6 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		if t.WritesState != "" {
 			suffix += "  writes_state=" + t.WritesState
 		}
-		if t.IsForEach() {
-			if t.ForEachSource != "" {
-				suffix += fmt.Sprintf("  for_each=dynamic<-%s as=%s", t.ForEachSource, t.As)
-			} else {
-				suffix += fmt.Sprintf("  for_each=static[%d] as=%s", len(t.ForEach), t.As)
-			}
-		}
 		if seeded[id] {
 			suffix += "  (seeded; using stored output)"
 		}
@@ -280,13 +273,27 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 	return ew.err
 }
 
-// loopConvergence renders a scoped loop's convergence target as
+// loopConvergence renders a while loop's convergence target as
 // until_empty=<task> or until=<expr>, matching whichever field the loop uses.
 func loopConvergence(lg workflow.LoopGroup) string {
 	if lg.UntilEmpty != "" {
 		return "until_empty=" + string(lg.UntilEmpty)
 	}
 	return "until=" + lg.Until
+}
+
+// loopDescriptor renders a scoped loop's kind-specific summary: a while loop
+// shows its convergence target and iteration cap; a for_each loop shows its
+// loop variable and list source (static `[n]` or dynamic `<-{{src}}`).
+func loopDescriptor(lg workflow.LoopGroup) string {
+	if lg.Kind == workflow.LoopForEach {
+		src := fmt.Sprintf("static[%d]", len(lg.List))
+		if lg.ListSource != "" {
+			src = "dynamic<-" + lg.ListSource
+		}
+		return fmt.Sprintf("for_each  as=%s  in=%s", lg.As, src)
+	}
+	return fmt.Sprintf("%s  max=%d", loopConvergence(lg), lg.Max)
 }
 
 // Hooks serializes concurrent OnStart/OnFinish writes behind a mutex so output

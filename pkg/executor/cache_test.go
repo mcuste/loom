@@ -181,28 +181,3 @@ func TestRun_CachesLLMTaskButNotShellTask(t *testing.T) {
 		t.Errorf("saved entry prompt = %q, want the LLM task's prompt %q", cache.saved[0].prompt, "hello")
 	}
 }
-
-// TestRun_ForEachWithCacheIsRejected pins the diagnostic for the unsupported
-// combination: a for_each LLM task with caching opted in must fail loudly
-// rather than silently bypass memoization.
-func TestRun_ForEachWithCacheIsRejected(t *testing.T) {
-	t.Parallel()
-	rt, name := registerCounter(t)
-	cache := newFakeCache()
-	wf := &workflow.Workflow{
-		ID:      "wf",
-		Runtime: name,
-		Model:   "m1",
-		Tasks: []workflow.Task{
-			{ID: "a", Prompt: "{{x}}", ForEach: []string{"one", "two"}, As: "x", Cache: boolPtr(true)},
-		},
-	}
-
-	_, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{Cache: cache})
-	if err == nil {
-		t.Fatal("Run: error = nil, want a diagnostic for for_each + cache")
-	}
-	if rt.count() != 0 {
-		t.Errorf("runtime calls = %d, want 0 (must reject before dispatching)", rt.count())
-	}
-}

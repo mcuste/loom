@@ -8,41 +8,59 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// TestParseForEachStatic pins that a literal `for_each:` sequence parses into
-// the task's ForEach values with an empty ForEachSource (static fanout).
+// TestParseForEachStatic pins that a `for_each:` block with a literal `in:`
+// sequence folds into a LoopForEach group: a static List, empty ListSource, the
+// declared loop variable, and the nested tasks as members.
 func TestParseForEachStatic(t *testing.T) {
 	src := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: [redis, postgres, nats]
-    as: backend
-    prompt: probe {{backend}}
+    for_each:
+      in: [redis, postgres, nats]
+      as: backend
+      tasks:
+        - id: handle
+          prompt: probe {{backend}}
 `
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	probe := wf.ByID("probe")
-	if !probe.IsForEach() {
-		t.Fatal("probe.IsForEach() = false, want true")
+	if len(wf.Loops) != 1 {
+		t.Fatalf("len(Loops) = %d, want 1", len(wf.Loops))
 	}
-	if probe.ForEachSource != "" {
-		t.Errorf("ForEachSource = %q, want empty", probe.ForEachSource)
+	lg := wf.Loops[0]
+	if lg.ID != "probe" {
+		t.Errorf("Loop ID = %q, want probe", lg.ID)
 	}
-	if probe.As != "backend" {
-		t.Errorf("As = %q, want backend", probe.As)
+	if lg.Kind != workflow.LoopForEach {
+		t.Errorf("Loop Kind = %v, want LoopForEach", lg.Kind)
 	}
-	if want := []string{"redis", "postgres", "nats"}; !slices.Equal(probe.ForEach, want) {
-		t.Errorf("ForEach = %v, want %v", probe.ForEach, want)
+	if lg.As != "backend" {
+		t.Errorf("As = %q, want backend", lg.As)
+	}
+	if lg.ListSource != "" {
+		t.Errorf("ListSource = %q, want empty", lg.ListSource)
+	}
+	if want := []string{"redis", "postgres", "nats"}; !slices.Equal(lg.List, want) {
+		t.Errorf("List = %v, want %v", lg.List, want)
+	}
+	if want := []workflow.TaskID{"handle"}; !slices.Equal(lg.Members, want) {
+		t.Errorf("Members = %v, want %v", lg.Members, want)
+	}
+	if got := wf.ByID("handle"); got == nil || got.Loop != "probe" {
+		t.Errorf("handle.Loop = %v, want probe", got)
 	}
 }
 
-// TestParseForEachDynamic pins that a single-placeholder scalar parses into
-// ForEachSource (dynamic fanout) with a nil ForEach, and that the source task
-// must be declared in depends_on.
+// TestParseForEachDynamic pins that a single-placeholder `in:` scalar folds into
+// ListSource (dynamic list) with a nil List; the source task need not be a
+// member dependency (the loop takes it as an entry dependency).
 func TestParseForEachDynamic(t *testing.T) {
 	src := `
 name: wf
@@ -52,98 +70,147 @@ tasks:
   - id: discover
     prompt: list bugs
   - id: fix
-    for_each: "{{discover}}"
-    as: bug
-    depends_on: [discover]
-    prompt: fix {{bug}}
+    for_each:
+      in: "{{discover}}"
+      as: bug
+      tasks:
+        - id: apply
+          prompt: fix {{bug}}
 `
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	fix := wf.ByID("fix")
-	if !fix.IsForEach() {
-		t.Fatal("fix.IsForEach() = false, want true")
+	lg := wf.Loops[0]
+	if lg.List != nil {
+		t.Errorf("List = %v, want nil", lg.List)
 	}
-	if fix.ForEach != nil {
-		t.Errorf("ForEach = %v, want nil", fix.ForEach)
+	if lg.ListSource != "{{discover}}" {
+		t.Errorf("ListSource = %q, want {{discover}}", lg.ListSource)
 	}
-	if fix.ForEachSource != "{{discover}}" {
-		t.Errorf("ForEachSource = %q, want {{discover}}", fix.ForEachSource)
-	}
-	if fix.As != "bug" {
-		t.Errorf("As = %q, want bug", fix.As)
+	if lg.As != "bug" {
+		t.Errorf("As = %q, want bug", lg.As)
 	}
 }
 
-// TestParseForEachAsPlaceholderNotADep pins that the `as` loop variable in the
-// prompt is whitelisted: {{bug}} must not be rejected as an undeclared
-// dependency the way a stray task placeholder would be.
-func TestParseForEachAsPlaceholderNotADep(t *testing.T) {
+// TestParseForEachLoopVarNotADep pins that the `as` loop variable in a member
+// body is whitelisted: {{bug}} must not be rejected as an undeclared dependency
+// the way a stray task placeholder would be.
+func TestParseForEachLoopVarNotADep(t *testing.T) {
 	src := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: [a, b]
-    as: item
-    prompt: handle {{item}}
+    for_each:
+      in: [a, b]
+      as: item
+      tasks:
+        - id: handle
+          prompt: handle {{item}}
 `
 	if _, err := workflow.Parse([]byte(src)); err != nil {
-		t.Fatalf("Parse rejected whitelisted as-variable: %v", err)
+		t.Fatalf("Parse rejected whitelisted loop variable: %v", err)
 	}
 }
 
-// TestParseForEachMissingAs pins that a `for_each:` without `as:` is rejected.
+// TestParseForEachMissingAs pins that a `for_each:` block without `as:` is
+// rejected.
 func TestParseForEachMissingAs(t *testing.T) {
 	src := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: [a, b]
-    prompt: handle it
+    for_each:
+      in: [a, b]
+      tasks:
+        - id: handle
+          prompt: handle it
 `
 	_, err := workflow.Parse([]byte(src))
-	var got *workflow.MissingForEachAsError
+	var got *workflow.MissingForEachVarError
 	if !errors.As(err, &got) {
-		t.Fatalf("errors.As MissingForEachAsError failed; err = %v", err)
+		t.Fatalf("errors.As MissingForEachVarError failed; err = %v", err)
 	}
 }
 
-// TestParseAsWithoutForEach pins that an `as:` declared without a `for_each:` is
-// rejected — the loop variable would bind nothing.
-func TestParseAsWithoutForEach(t *testing.T) {
+// TestParseForEachMissingIn pins that a `for_each:` block without `in:` is
+// rejected.
+func TestParseForEachMissingIn(t *testing.T) {
 	src := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    as: item
-    prompt: handle it
+    for_each:
+      as: item
+      tasks:
+        - id: handle
+          prompt: handle {{item}}
 `
 	_, err := workflow.Parse([]byte(src))
-	var got *workflow.ForEachAsWithoutForEachError
+	var got *workflow.MissingForEachListError
 	if !errors.As(err, &got) {
-		t.Fatalf("errors.As ForEachAsWithoutForEachError failed; err = %v", err)
+		t.Fatalf("errors.As MissingForEachListError failed; err = %v", err)
+	}
+}
+
+// TestParseLoopAndForEachSet pins that a task declaring both a `loop:` and a
+// `for_each:` block is rejected: the two are sibling scoped-block forms.
+func TestParseLoopAndForEachSet(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: both
+    loop:
+      until_empty: w
+      max: 2
+      tasks:
+        - id: w
+          prompt: while
+    for_each:
+      in: [a]
+      as: item
+      tasks:
+        - id: f
+          prompt: each {{item}}
+`
+	if _, err := workflow.Parse([]byte(src)); !errors.Is(err, workflow.ErrLoopAndForEachSet) {
+		t.Fatalf("Parse error = %v, want ErrLoopAndForEachSet", err)
 	}
 }
 
 // TestParseForEachAsCollision pins that an `as:` colliding with a task id or a
-// param name is rejected with ForEachAsCollisionError.
+// param name is rejected with ForEachVarCollisionError.
 func TestParseForEachAsCollision(t *testing.T) {
 	taskCollision := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: [a, b]
-    as: probe
-    prompt: handle {{probe}}
+    for_each:
+      in: [a, b]
+      as: seed
+      tasks:
+        - id: handle
+          prompt: handle {{seed}}
 `
 	paramCollision := `
 name: wf
@@ -153,19 +220,24 @@ params:
   - name: env
     default: prod
 tasks:
+  - id: seed
+    prompt: seed {{params.env}}
   - id: probe
-    for_each: [a, b]
-    as: env
-    prompt: handle {{env}} {{params.env}}
+    for_each:
+      in: [a, b]
+      as: env
+      tasks:
+        - id: handle
+          prompt: handle {{env}}
 `
 	for name, src := range map[string]string{"task": taskCollision, "param": paramCollision} {
 		_, err := workflow.Parse([]byte(src))
-		var got *workflow.ForEachAsCollisionError
+		var got *workflow.ForEachVarCollisionError
 		if !errors.As(err, &got) {
-			t.Fatalf("%s: errors.As ForEachAsCollisionError failed; err = %v", name, err)
+			t.Fatalf("%s: errors.As ForEachVarCollisionError failed; err = %v", name, err)
 		}
 		if got.Kind != name {
-			t.Errorf("%s: ForEachAsCollisionError.Kind = %q, want %q", name, got.Kind, name)
+			t.Errorf("%s: ForEachVarCollisionError.Kind = %q, want %q", name, got.Kind, name)
 		}
 	}
 }
@@ -178,43 +250,50 @@ name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: probe
-    for_each: [a, b]
-    as: bad-name
-    prompt: handle it
+    for_each:
+      in: [a, b]
+      as: bad-name
+      tasks:
+        - id: handle
+          prompt: handle it
 `
 	_, err := workflow.Parse([]byte(src))
-	var got *workflow.InvalidForEachAsError
+	var got *workflow.InvalidForEachVarError
 	if !errors.As(err, &got) {
-		t.Fatalf("errors.As InvalidForEachAsError failed; err = %v", err)
+		t.Fatalf("errors.As InvalidForEachVarError failed; err = %v", err)
 	}
 }
 
-// TestParseForEachDynamicSourceNotADep pins that a `{{id}}` dynamic source
-// naming a task absent from depends_on is rejected (reusing the depends_on
-// placeholder rule).
-func TestParseForEachDynamicSourceNotADep(t *testing.T) {
+// TestParseForEachDynamicSourceUnknown pins that a dynamic `in:` source naming a
+// task the workflow does not declare is rejected.
+func TestParseForEachDynamicSourceUnknown(t *testing.T) {
 	src := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
-  - id: discover
-    prompt: list bugs
+  - id: seed
+    prompt: seed
   - id: fix
-    for_each: "{{discover}}"
-    as: bug
-    prompt: fix {{bug}}
+    for_each:
+      in: "{{nope}}"
+      as: bug
+      tasks:
+        - id: apply
+          prompt: fix {{bug}}
 `
 	_, err := workflow.Parse([]byte(src))
-	var got *workflow.UnknownPlaceholderError
+	var got *workflow.UnknownForEachListRefError
 	if !errors.As(err, &got) {
-		t.Fatalf("errors.As UnknownPlaceholderError failed; err = %v", err)
+		t.Fatalf("errors.As UnknownForEachListRefError failed; err = %v", err)
 	}
 }
 
-// TestParseForEachInvalidSource pins that a scalar `for_each:` that is not a
-// single `{{...}}` placeholder is rejected with InvalidForEachSourceError.
+// TestParseForEachInvalidSource pins that a scalar `in:` that is not a single
+// `{{...}}` placeholder is rejected with InvalidForEachListError.
 func TestParseForEachInvalidSource(t *testing.T) {
 	for _, bad := range []string{"just text", "{{a}} and {{b}}"} {
 		src := `
@@ -222,42 +301,70 @@ name: wf
 runtime: test-rt
 model: m1
 tasks:
-  - id: a
-    prompt: A
-  - id: b
-    prompt: B
+  - id: seed
+    prompt: seed
   - id: fix
-    for_each: "` + bad + `"
-    as: item
-    depends_on: [a, b]
-    prompt: fix {{item}}
+    for_each:
+      in: "` + bad + `"
+      as: item
+      tasks:
+        - id: apply
+          prompt: fix {{item}}
 `
 		_, err := workflow.Parse([]byte(src))
-		var got *workflow.InvalidForEachSourceError
+		var got *workflow.InvalidForEachListError
 		if !errors.As(err, &got) {
-			t.Fatalf("for_each=%q: errors.As InvalidForEachSourceError failed; err = %v", bad, err)
+			t.Fatalf("in=%q: errors.As InvalidForEachListError failed; err = %v", bad, err)
 		}
 	}
 }
 
 // TestParseForEachDynamicStateSource pins that a `{{state.x}}` dynamic source is
-// accepted without a depends_on entry (state refs create no DAG edge).
+// accepted without any task reference (state refs create no DAG edge).
 func TestParseForEachDynamicStateSource(t *testing.T) {
 	src := `
 name: wf
 runtime: test-rt
 model: m1
 tasks:
+  - id: seed
+    prompt: seed
   - id: fix
-    for_each: "{{state.backlog}}"
-    as: item
-    prompt: fix {{item}}
+    for_each:
+      in: "{{state.backlog}}"
+      as: item
+      tasks:
+        - id: apply
+          prompt: fix {{item}}
 `
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	if got := wf.ByID("fix").ForEachSource; got != "{{state.backlog}}" {
-		t.Errorf("ForEachSource = %q, want {{state.backlog}}", got)
+	if got := wf.Loops[0].ListSource; got != "{{state.backlog}}" {
+		t.Errorf("ListSource = %q, want {{state.backlog}}", got)
+	}
+}
+
+// TestParseForEachEmptyTasks pins that a `for_each:` block with no nested tasks
+// is rejected with EmptyLoopError, the shared empty-body sentinel.
+func TestParseForEachEmptyTasks(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: probe
+    for_each:
+      in: [a, b]
+      as: item
+      tasks: []
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.EmptyLoopError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As EmptyLoopError failed; err = %v", err)
 	}
 }

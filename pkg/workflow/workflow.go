@@ -203,22 +203,6 @@ type Task struct {
 	// Report.Outputs. Must satisfy the identifier alphabet. Allowed on both LLM
 	// and shell tasks.
 	WritesState string
-	// ForEach holds the literal values of a static fanout (`for_each: [a, b]`).
-	// Non-nil (possibly empty) for a static for_each task; nil otherwise. The
-	// executor runs one instance per value, binding {{As}} to it, and joins the
-	// instance outputs with newlines so a downstream {{ID}} reference sees them
-	// all. Mutually exclusive with ForEachSource.
-	ForEach []string
-	// ForEachSource is the single `{{...}}` placeholder of a dynamic fanout
-	// (`for_each: "{{discover}}"`); "" for a static or non-fanout task. The
-	// executor substitutes it, then parses the result as a list (JSON array or
-	// newline-split). Mutually exclusive with ForEach.
-	ForEachSource string
-	// As names the per-instance loop variable bound to each fanout value and
-	// referenced as {{As}} in the prompt or command. Required when ForEach or
-	// ForEachSource is set; empty otherwise. Never collides with a task id or
-	// param name.
-	As string
 	// Budget, when non-nil, caps the cumulative cost in USD spent on this task's
 	// retries. Once the task's accumulated cost would exceed it, no further
 	// retry is attempted. nil means no per-task cost limit.
@@ -270,12 +254,6 @@ func (r Retry) Enabled() bool {
 // LLM task. The parser enforces XOR between Prompt and Command, so this is a
 // reliable discriminator at the executor, CLI, and store layers.
 func (t Task) IsShell() bool { return t.Command != "" }
-
-// IsForEach reports whether t is a fanout task — one that runs its prompt or
-// command once per resolved list value. True for both static (ForEach set) and
-// dynamic (ForEachSource set) fanouts. The two sources are mutually exclusive,
-// enforced by the parser.
-func (t Task) IsForEach() bool { return t.ForEach != nil || t.ForEachSource != "" }
 
 // Param is a declared workflow parameter — a named value supplied at run time
 // via `-p key=val` (or a defaults block) and substituted into prompts via

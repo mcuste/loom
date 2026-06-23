@@ -34,18 +34,16 @@ func TestRawMirrorsPublic(t *testing.T) {
 			name:   "task",
 			raw:    rawTask{},
 			public: Task{},
-			// ForEachSource is derived by parseForEach from the raw `for_each`
-			// scalar (the dynamic-fanout case); a static `for_each` sequence
-			// decodes into ForEach instead. Cond is compiled by ParseCondition
-			// from the raw `when:` text. Task.Loop is derived from the enclosing
-			// `loops:` entry (or `loop:` wrapper) a task is nested under, not a
-			// task-level YAML key. None has a separate raw field.
-			extraPublic: map[string]struct{}{"ForEachSource": {}, "Cond": {}, "Loop": {}},
-			// rawTask.Loop is the per-task `loop:` block: a parse-only wrapper that
-			// is folded into a LoopGroup and never becomes a Task, so it has no
-			// public counterpart (it shares the name with the derived Task.Loop
-			// above only by coincidence).
-			extraRaw: map[string]struct{}{"Loop": {}},
+			// Cond is compiled by ParseCondition from the raw `when:` text.
+			// Task.Loop is derived from the enclosing `loop:`/`for_each:` wrapper
+			// a task is nested under, not a task-level YAML key. Neither has a
+			// separate raw field.
+			extraPublic: map[string]struct{}{"Cond": {}, "Loop": {}},
+			// rawTask.Loop and rawTask.ForEach are the per-task scoped-block
+			// wrappers: parse-only nodes folded into a LoopGroup that never become
+			// a Task, so they have no public counterpart (rawTask.Loop shares the
+			// name with the derived Task.Loop above only by coincidence).
+			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}},
 		},
 		{
 			name:   "param",

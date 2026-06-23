@@ -4,11 +4,23 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
+
+// bindLoopVar replaces a for_each member's `{{loopVar}}` placeholder with the
+// current iteration's element before the normal placeholder substitution runs.
+// It is a no-op outside a for_each loop (st.loopVar == ""), where the binding
+// is empty and the body passes through unchanged.
+func bindLoopVar(body string, st *runState) string {
+	if st.loopVar == "" {
+		return body
+	}
+	return strings.ReplaceAll(body, "{{"+st.loopVar+"}}", st.loopVal)
+}
 
 // runState bundles the shared, mutex-guarded run state that every task
 // goroutine touches: the aggregate report, the succeeded/skipped maps, the
@@ -40,18 +52,28 @@ type runState struct {
 	// iteration is the 1-based loop pass stamped onto every result produced in
 	// this scope, and 0 outside a scoped loop.
 	iteration int
+	// loopVar is the for_each loop-variable name (the loop's `as`) bound for this
+	// iteration, and "" outside a for_each loop. When set, runTask replaces the
+	// `{{loopVar}}` placeholder in a member body with loopVal before the normal
+	// substitution.
+	loopVar string
+	// loopVal is the current element bound to loopVar for this iteration.
+	loopVal string
 }
 
 // forLoopIteration derives a runState for one scoped-loop pass: it shares the
 // report, succeeded/skipped maps, mutex, and budget slot with st (so usage and
 // budget accounting stay global) but swaps in a fresh per-iteration gate set,
-// the prior iteration's outputs for prev substitution, and the 1-based pass
-// number stamped onto results.
-func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int) *runState {
+// the prior iteration's outputs for prev substitution, the 1-based pass number
+// stamped onto results, and the for_each loop-variable binding (loopVar/loopVal,
+// both "" for a while loop).
+func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
 	inner := *st
 	inner.gates = gates
 	inner.prev = prev
 	inner.iteration = iteration
+	inner.loopVar = loopVar
+	inner.loopVal = loopVal
 	return &inner
 }
 
@@ -156,24 +178,21 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		runErr error
 	)
 
-	// A for_each task resolves its list and substitutes per instance
-	// inside runForEach, so no single body is computed up front; a plain
-	// task substitutes its body once here (mu guards rep.Outputs;
-	// opts.Params is read-only after Run starts).
+	// Each task substitutes its body once here (mu guards rep.Outputs; opts.Params
+	// is read-only after Run starts). A for_each member additionally binds its
+	// loop variable to the current element first, so a {{loopVar}} value
+	// containing placeholder-looking text is spliced before (not re-expanded
+	// across) the normal substitution.
 	if t.IsShell() {
 		if hooks.OnStart != nil {
 			hooks.OnStart(*t, st.iteration, "", "", "")
 		}
-		if t.IsForEach() {
-			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, nil, "", "", "", st.prev)
-		} else {
-			st.mu.Lock()
-			body := workflow.Substitute(t.Command, st.rep.Outputs, opts.Params, opts.State, st.prev)
-			st.mu.Unlock()
-			res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-				return runShell(ctx, t, body)
-			})
-		}
+		st.mu.Lock()
+		body := workflow.Substitute(bindLoopVar(t.Command, st), st.rep.Outputs, opts.Params, opts.State, st.prev)
+		st.mu.Unlock()
+		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+			return runShell(ctx, t, body)
+		})
 	} else {
 		rt, model, effort := wf.Effective(t)
 		runner, ok := runtime.Lookup(rt)
@@ -184,33 +203,22 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		if hooks.OnStart != nil {
 			hooks.OnStart(*t, st.iteration, rt, model, effort)
 		}
-		if t.IsForEach() {
-			// Memoization keys on a single substituted prompt; a for_each task
-			// has one body per instance, so caching it is unsupported. Surface
-			// the unsupported combination rather than silently ignoring the
-			// annotation.
-			if opts.Cache != nil && wf.CacheEnabled(t) {
-				return fmt.Errorf("task %q: cache is not supported on for_each tasks", t.ID)
-			}
-			res, runErr = runForEach(ctx, t, st.mu, st.rep.Outputs, opts, baseDelay, runner, model, effort, sysPrompt, st.prev)
+		st.mu.Lock()
+		body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.rep.Outputs, opts.Params, opts.State, st.prev)
+		st.mu.Unlock()
+		dispatch := func() (TaskResult, error) {
+			return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+				r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt)
+				if err != nil {
+					return r, err
+				}
+				return r, validateSchema(t, r.Output)
+			})
+		}
+		if opts.Cache != nil && wf.CacheEnabled(t) {
+			res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, dispatch)
 		} else {
-			st.mu.Lock()
-			body := workflow.Substitute(t.Prompt, st.rep.Outputs, opts.Params, opts.State, st.prev)
-			st.mu.Unlock()
-			dispatch := func() (TaskResult, error) {
-				return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-					r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt)
-					if err != nil {
-						return r, err
-					}
-					return r, validateSchema(t, r.Output)
-				})
-			}
-			if opts.Cache != nil && wf.CacheEnabled(t) {
-				res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, dispatch)
-			} else {
-				res, runErr = dispatch()
-			}
+			res, runErr = dispatch()
 		}
 	}
 
