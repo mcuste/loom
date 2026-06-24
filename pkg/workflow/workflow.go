@@ -149,6 +149,14 @@ type Workflow struct {
 	// not set their own `cache:` value. false means tasks are not memoized
 	// unless they opt in individually.
 	Cache bool
+	// Output names the task whose output is this workflow's result string when
+	// run as a sub-workflow. The zero value selects the lone sink (a task with
+	// no dependents) by default; see OutputTask.
+	Output TaskID
+	// Subs maps each sub-workflow task id to its resolved child workflow. nil
+	// when the workflow links no children. Populated by the CLI link step
+	// (linkSubWorkflows), never by Parse, which stays filesystem-free.
+	Subs map[TaskID]*Workflow
 
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
 	// nil for hand-constructed Workflow values, in which case ByID falls back
@@ -220,6 +228,77 @@ type Task struct {
 	// top-level task. A task is defined in exactly one place, so it belongs to at
 	// most one loop. Set by Parse from the enclosing `loops:` entry.
 	Loop LoopID
+	// Workflow is the raw registry-name-or-path reference of a sub-workflow task:
+	// at dispatch the executor recursively runs the linked child and captures its
+	// result. Empty for every other task body form. Mutually exclusive with
+	// Prompt, Command, and the loop wrappers.
+	Workflow string
+	// With carries the values passed to the linked child's params, in declaration
+	// order (a slice keeps the order deterministic). Each value is substituted
+	// with the parent context before it is handed to the child as a CLI-tier
+	// param value. Empty unless Workflow is set.
+	With []WithArg
+}
+
+// WithArg is one `with:` entry on a sub-workflow task: a child param name and
+// the (pre-substitution) value passed for it.
+type WithArg struct {
+	// Name is the child param this value is bound to.
+	Name ParamName
+	// Value is the raw value text, substituted with the parent context before
+	// being passed to the child.
+	Value string
+}
+
+// IsSubWorkflow reports whether t links and runs another workflow (has Workflow
+// set) rather than carrying a prompt, command, or loop body. The parser
+// enforces that Workflow is mutually exclusive with every other body form, so
+// this is a reliable discriminator at the executor and CLI layers.
+func (t Task) IsSubWorkflow() bool { return t.Workflow != "" }
+
+// OutputTask returns the id of the task whose output is the workflow's result
+// string when it is run as a sub-workflow. It returns Output when set (after
+// validating it names a known task); otherwise it returns the lone sink (a task
+// that no other task depends on). Zero or multiple sinks with no explicit
+// Output is an error.
+func (w *Workflow) OutputTask() (TaskID, error) {
+	if w.Output != "" {
+		if w.ByID(w.Output) == nil {
+			return "", &UnknownOutputTaskError{Task: w.Output}
+		}
+		return w.Output, nil
+	}
+	// A sink is a task that appears in no other task's DependsOn. Build the
+	// dependents set from the same adjacency Plan derives, then keep the tasks
+	// no one depends on, in declaration order.
+	hasDependent := make(map[TaskID]bool, len(w.Tasks))
+	for _, t := range w.Tasks {
+		for _, d := range t.DependsOn {
+			hasDependent[d] = true
+		}
+	}
+	var sinks []TaskID
+	for _, t := range w.Tasks {
+		if !hasDependent[t.ID] {
+			sinks = append(sinks, t.ID)
+		}
+	}
+	switch len(sinks) {
+	case 1:
+		return sinks[0], nil
+	case 0:
+		return "", fmt.Errorf("workflow %q: no terminal task to use as output, set output to pick one", w.ID)
+	default:
+		return "", fmt.Errorf("workflow %q: %d terminal tasks; set output: to pick one", w.ID, len(sinks))
+	}
+}
+
+// UnknownOutputTaskError reports a top-level `output:` that names a task absent
+// from the workflow.
+type UnknownOutputTaskError struct{ Task TaskID }
+
+func (e *UnknownOutputTaskError) Error() string {
+	return fmt.Sprintf("output: names unknown task %q", e.Task)
 }
 
 // Backoff names the delay schedule applied between retry attempts.

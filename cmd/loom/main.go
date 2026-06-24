@@ -156,6 +156,14 @@ func doRun(w io.Writer, path string, paramArgs []string) (err error) {
 	if err != nil {
 		return err
 	}
+	// Resolve and link any `workflow:` children from disk, then statically
+	// validate them, so a bad sub-workflow ref fails before any model call.
+	if err := linkSubWorkflows(wf, path, nil); err != nil {
+		return err
+	}
+	if err := checkSubWorkflows(wf); err != nil {
+		return err
+	}
 	// One renderer drives both phases (check's plan and runWorkflow's header,
 	// progress, and summary) so a stateful renderer can hold a unified display
 	// across them. Its teardown error surfaces unless a prior error already won.
@@ -188,6 +196,12 @@ func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
 	}
 	wf, err := workflow.ParseFile(path)
 	if err != nil {
+		return err
+	}
+	if err := linkSubWorkflows(wf, path, nil); err != nil {
+		return err
+	}
+	if err := checkSubWorkflows(wf); err != nil {
 		return err
 	}
 	r := tui.New(w)

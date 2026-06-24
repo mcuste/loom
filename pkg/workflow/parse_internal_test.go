@@ -27,8 +27,9 @@ func TestRawMirrorsPublic(t *testing.T) {
 			// Loops is derived: there is no top-level `loops:` YAML key. Loops are
 			// declared inline as tasks carrying a `loop:` block (rawTask.Loop) and
 			// folded into Workflow.Loops during parse, so the public field has no
-			// rawWorkflow counterpart.
-			extraPublic: map[string]struct{}{"Loops": {}},
+			// rawWorkflow counterpart. Subs is populated by the CLI link step
+			// (linkSubWorkflows), never by Parse, so it too has no raw counterpart.
+			extraPublic: map[string]struct{}{"Loops": {}, "Subs": {}},
 		},
 		{
 			name:   "task",
@@ -43,7 +44,9 @@ func TestRawMirrorsPublic(t *testing.T) {
 			// wrappers: parse-only nodes folded into a LoopGroup that never become
 			// a Task, so they have no public counterpart (rawTask.Loop shares the
 			// name with the derived Task.Loop above only by coincidence).
-			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}},
+			// rawTask.PromptFile is parse-only too: InlinePromptFiles rewrites it
+			// to `prompt:` before Parse, so it never reaches a public Task field.
+			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "PromptFile": {}},
 		},
 		{
 			name:   "param",

@@ -18,9 +18,10 @@ import (
 // Parse decodes a workflow YAML document and returns the validated Workflow.
 //
 // The decoder runs in known-fields mode: any top-level or task-level key not
-// recognized by the current schema is rejected. This is what produces a clear
-// error for sub-workflow constructs (inputs:, output:, workflow:, with:) that
-// are present in some example files but not yet supported by the type.
+// recognized by the current schema is rejected. The sub-workflow constructs
+// (top-level output:, task-level workflow: and with:) are recognized here;
+// linking the child workflows referenced by `workflow:` is a separate CLI step
+// so this package stays filesystem-free.
 //
 // Validation pipeline, in order:
 //
@@ -212,20 +213,67 @@ func Parse(data []byte) (*Workflow, error) {
 	for _, lt := range allTasks {
 		rt := lt.rt
 		tid := TaskID(rt.ID)
-		switch {
-		case rt.Prompt == "" && rt.Command == "":
-			return nil, fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
-		case rt.Prompt != "" && rt.Command != "":
-			return nil, &TaskBodyConflictError{Task: tid, Fields: []string{"prompt", "command"}}
+
+		// Exactly one body form. loop/for_each wrappers were split out above, so
+		// the only forms that can appear here are prompt, prompt_file, command,
+		// and workflow; `workflow:` conflicts with each of the others.
+		var bodyForms []string
+		if rt.Prompt != "" {
+			bodyForms = append(bodyForms, "prompt")
 		}
-		// body is the text that placeholder validation runs against;
-		// substitution targets the same string at execution time.
-		body := rt.Prompt
+		if rt.PromptFile != "" {
+			bodyForms = append(bodyForms, "prompt_file")
+		}
 		if rt.Command != "" {
+			bodyForms = append(bodyForms, "command")
+		}
+		if rt.Workflow != "" {
+			bodyForms = append(bodyForms, "workflow")
+		}
+		switch {
+		case len(bodyForms) > 1:
+			return nil, &TaskBodyConflictError{Task: tid, Fields: bodyForms}
+		case len(bodyForms) == 0:
+			return nil, fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
+		}
+		// `with:` is only meaningful alongside `workflow:`.
+		if rt.With.Kind != 0 && rt.Workflow == "" {
+			return nil, fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
+		}
+
+		// body is the text that placeholder validation runs against;
+		// substitution targets the same string at execution time. A sub-workflow
+		// task has no prompt body: its placeholder-derived deps come from scanning
+		// its with-values instead.
+		body := rt.Prompt
+		var withArgs []WithArg
+		switch {
+		case rt.Command != "":
 			body = rt.Command
 			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
 			}
+		case rt.Workflow != "":
+			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithRuntime)
+			}
+			wa, werr := decodeWith(tid, rt.With)
+			if werr != nil {
+				return nil, werr
+			}
+			withArgs = wa
+			// Join the with-values so the malformed-placeholder check below scans
+			// every value the way it scans a prompt body.
+			var sb strings.Builder
+			for _, a := range withArgs {
+				sb.WriteString(a.Value)
+				sb.WriteByte('\n')
+			}
+			body = sb.String()
+		case rt.PromptFile != "":
+			// A prompt_file must be inlined by InlinePromptFiles before Parse; one
+			// reaching here was not, so there is no body to build a task from.
+			return nil, fmt.Errorf("task %q: prompt_file must be inlined before parsing", tid)
 		}
 		schema, err := parseSchema(rt.Schema)
 		if err != nil {
@@ -234,7 +282,12 @@ func Parse(data []byte) (*Workflow, error) {
 		if schema != nil && rt.Command != "" {
 			return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
 		}
-		deps, err := buildDeps(tid, rt.DependsOn, body, ids, paramSet, asByLoop[lt.loop])
+		var deps []TaskID
+		if rt.Workflow != "" {
+			deps, err = buildSubWorkflowDeps(tid, rt.DependsOn, withArgs, ids, paramSet)
+		} else {
+			deps, err = buildDeps(tid, rt.DependsOn, body, ids, paramSet, asByLoop[lt.loop])
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -286,7 +339,17 @@ func Parse(data []byte) (*Workflow, error) {
 			Schema:      schema,
 			Cache:       rt.Cache,
 			Loop:        lt.loop,
+			Workflow:    rt.Workflow,
+			With:        withArgs,
 		})
+	}
+
+	if raw.Output != "" {
+		ot := TaskID(raw.Output)
+		if _, ok := wf.byID[ot]; !ok {
+			return nil, &UnknownOutputTaskError{Task: ot}
+		}
+		wf.Output = ot
 	}
 
 	if err := checkPrevPlaceholders(wf, memberByLoop); err != nil {
@@ -313,10 +376,10 @@ func Parse(data []byte) (*Workflow, error) {
 
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
-		if t.IsShell() {
-			// Shell tasks bypass the runtime registry entirely; runtime/model/
-			// effort have no meaning, and the task-level reject above guarantees
-			// they are unset on t.
+		if t.IsShell() || t.IsSubWorkflow() {
+			// Shell and sub-workflow tasks bypass the runtime registry entirely;
+			// runtime/model/effort have no meaning (the child brings its own), and
+			// the task-level reject above guarantees they are unset on t.
 			continue
 		}
 		rt, m, e := wf.Effective(t)
@@ -435,7 +498,7 @@ func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
 		case "prompt_file":
 			keyNode, value = k, v
 			bodyFields = append(bodyFields, k.Value)
-		case "prompt", "command", "loop", "for_each":
+		case "prompt", "command", "loop", "for_each", "workflow":
 			bodyFields = append(bodyFields, k.Value)
 		}
 	}
@@ -557,6 +620,10 @@ type rawWorkflow struct {
 	// absent `cache:` key decodes to false, which is exactly the "off unless a
 	// task opts in" default.
 	Cache bool `yaml:"cache"`
+	// Output names the task whose output is this workflow's result string when it
+	// is run as a sub-workflow. Empty selects the lone sink by default; see
+	// Workflow.OutputTask. Validated to name a known task.
+	Output string `yaml:"output"`
 }
 
 // rawTask mirrors the per-task YAML schema. It exists so the parser can apply
@@ -564,13 +631,22 @@ type rawWorkflow struct {
 // are yaml.Node to let the parser distinguish an absent key (zero value, inherit
 // default) from a present-but-partial block that must be validated.
 type rawTask struct {
-	ID          string   `yaml:"id"`
-	Description string   `yaml:"description"`
-	Runtime     string   `yaml:"runtime"`
-	Model       string   `yaml:"model"`
-	Effort      string   `yaml:"effort"`
-	Prompt      string   `yaml:"prompt"`
-	Command     string   `yaml:"command"`
+	ID          string `yaml:"id"`
+	Description string `yaml:"description"`
+	Runtime     string `yaml:"runtime"`
+	Model       string `yaml:"model"`
+	Effort      string `yaml:"effort"`
+	Prompt      string `yaml:"prompt"`
+	Command     string `yaml:"command"`
+	// Workflow is the raw registry-name-or-path reference of a sub-workflow task.
+	// A non-empty value makes this a sub-workflow leaf: the linked child is run
+	// recursively at dispatch. Mutually exclusive with every other body form.
+	Workflow string `yaml:"workflow"`
+	// PromptFile is only present when Parse is handed YAML whose `prompt_file:`
+	// was not inlined by InlinePromptFiles (e.g. a direct Parse call). It exists
+	// so the body-form conflict check can see a `prompt_file` sibling; the normal
+	// ParseFile path rewrites it to `prompt:` before Parse ever runs.
+	PromptFile  string   `yaml:"prompt_file"`
 	DependsOn   []string `yaml:"depends_on"`
 	WritesState string   `yaml:"writes_state"`
 	When        string   `yaml:"when"`
@@ -601,6 +677,10 @@ type rawTask struct {
 	// makes this task a loop wrapper: its id becomes the loop id and its nested
 	// `tasks:` the loop body, decoded by decodeLoopBody.
 	Loop yaml.Node `yaml:"loop"`
+	// With is captured as a raw yaml.Node so the parser can preserve declaration
+	// order and validate each key as an identifier when decoding it into the
+	// ordered []WithArg. Only meaningful on a sub-workflow task.
+	With yaml.Node `yaml:"with"`
 }
 
 // rawParam mirrors the typed (non-default) fields of a single `params:`
@@ -625,9 +705,10 @@ var (
 	// ErrMissingParamName is returned when a params entry omits the name field.
 	ErrMissingParamName = errors.New("param has no name")
 
-	// ErrMissingPromptOrCommand reports a task that sets neither `prompt:` nor
-	// `command:`. Exactly one must be present.
-	ErrMissingPromptOrCommand = errors.New("task has neither prompt nor command")
+	// ErrMissingPromptOrCommand reports a task that sets none of the body forms
+	// (`prompt:`, `prompt_file:`, `command:`, `loop:`, `for_each:`, or
+	// `workflow:`). Exactly one must be present.
+	ErrMissingPromptOrCommand = errors.New("task has no prompt, prompt_file, command, loop, for_each, or workflow")
 	// ErrPromptAndCommandSet reports a task that sets both `prompt:` and
 	// `command:`. The two are mutually exclusive.
 	ErrPromptAndCommandSet = errors.New("task sets both prompt and command")
@@ -653,6 +734,11 @@ var (
 	// `for_each:` block. The two are sibling scoped-block forms; a task is at
 	// most one of them.
 	ErrLoopAndForEachSet = errors.New("task sets both loop and for_each")
+	// ErrSubWorkflowWithRuntime reports a sub-workflow task (one with `workflow:`)
+	// that also sets task-level `runtime:`, `model:`, or `effort:`. The linked
+	// child brings its own runtime; these knobs are meaningless on the wrapper,
+	// exactly as for a shell task.
+	ErrSubWorkflowWithRuntime = errors.New("sub-workflow task must not set runtime, model, or effort")
 )
 
 // rejectLoopWrapperFields enforces that a `loop:` task carries nothing but its
@@ -661,10 +747,13 @@ var (
 // load time rather than silently ignored.
 func rejectLoopWrapperFields(tid TaskID, rt rawTask, wrapper string) error {
 	switch {
-	case rt.Prompt != "" || rt.Command != "":
+	case rt.Prompt != "" || rt.Command != "" || rt.Workflow != "":
 		body := "prompt"
-		if rt.Command != "" {
+		switch {
+		case rt.Command != "":
 			body = "command"
+		case rt.Workflow != "":
+			body = "workflow"
 		}
 		return &TaskBodyConflictError{Task: tid, Fields: []string{wrapper, body}}
 	case rt.Runtime != "" || rt.Model != "" || rt.Effort != "":
@@ -1077,6 +1166,83 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 	return deps, nil
 }
 
+// decodeWith decodes a sub-workflow task's `with:` mapping into ordered
+// WithArg entries. An absent block (zero-value node) yields nil. Each key must
+// satisfy the identifier alphabet (it names a child param); each value is taken
+// as its literal scalar text, substituted with the parent context at run time.
+func decodeWith(tid TaskID, node yaml.Node) ([]WithArg, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("task %q: with must be a mapping", tid)
+	}
+	args := make([]WithArg, 0, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k, v := node.Content[i], node.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("task %q: with key must be a scalar", tid)
+		}
+		name, err := NewParamName(k.Value)
+		if err != nil {
+			return nil, fmt.Errorf("task %q: with: %w", tid, err)
+		}
+		var val string
+		if err := v.Decode(&val); err != nil {
+			return nil, fmt.Errorf("task %q: with.%s: %w", tid, name, err)
+		}
+		args = append(args, WithArg{Name: name, Value: val})
+	}
+	return args, nil
+}
+
+// buildSubWorkflowDeps computes a sub-workflow task's dependency list. Unlike a
+// prompt body (where a `{{x}}` placeholder must already be declared in
+// depends_on), a task-id placeholder in a with-VALUE extends the graph: it adds
+// the edge implicitly, unioned with any explicit depends_on. Param placeholders
+// in with-values are validated against the declared params; an unknown task or
+// param reference is rejected the same way buildDeps rejects them.
+func buildSubWorkflowDeps(tid TaskID, declared []string, withArgs []WithArg, known map[TaskID]struct{}, params map[ParamName]struct{}) ([]TaskID, error) {
+	deps := make([]TaskID, 0, len(declared))
+	seen := make(map[TaskID]struct{}, len(declared))
+
+	for _, raw := range declared {
+		d, err := NewTaskID(raw)
+		if err != nil {
+			return nil, fmt.Errorf("task %q depends_on: %w", tid, err)
+		}
+		if _, ok := known[d]; !ok {
+			return nil, &UnknownDependencyError{Task: tid, Dep: d}
+		}
+		if _, dup := seen[d]; dup {
+			return nil, &DuplicateDependencyError{Task: tid, Dep: d}
+		}
+		seen[d] = struct{}{}
+		deps = append(deps, d)
+	}
+
+	for _, a := range withArgs {
+		taskRefs, paramRefs, _ := scanPlaceholders(a.Value)
+		for _, name := range taskRefs {
+			id := TaskID(name)
+			if _, ok := known[id]; !ok {
+				return nil, &UnknownPlaceholderError{Task: tid, Name: name}
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			deps = append(deps, id)
+		}
+		for _, name := range paramRefs {
+			if _, ok := params[ParamName(name)]; !ok {
+				return nil, &UnknownParamError{Task: tid, Name: name}
+			}
+		}
+	}
+	return deps, nil
+}
+
 // scanPlaceholders walks text in a SINGLE pass with combinedPlaceholderRe and
 // returns the task-id, param, and state placeholder names in source order. The
 // combined regex disambiguates `{{params.x}}` (group 1), `{{state.x}}` (group
@@ -1173,6 +1339,12 @@ func checkUnusedParams(wf *Workflow) error {
 		// per the parser's XOR check, so scanning both is safe.
 		scan(wf.Tasks[i].Prompt)
 		scan(wf.Tasks[i].Command)
+		// A sub-workflow task carries its param references in its with-values
+		// rather than a prompt body; scan those so a param used only there is
+		// still counted as referenced.
+		for _, a := range wf.Tasks[i].With {
+			scan(a.Value)
+		}
 	}
 	for _, p := range wf.Params {
 		if _, ok := used[p.Name]; !ok {

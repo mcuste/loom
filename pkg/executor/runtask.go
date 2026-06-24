@@ -6,6 +6,7 @@ import (
 	"maps"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -31,8 +32,7 @@ func bindLoopVar(body string, st *runState) string {
 // are unused when the workflow declares no budget.
 //
 // Bundling these into one value (rather than a sprawling parameter list) lets
-// the per-task dispatch body live in runTask and be reused by a future loop
-// driver.
+// the per-task dispatch body live in runTask and be reused by runLoop.
 type runState struct {
 	rep       *Report
 	succeeded map[workflow.TaskID]bool
@@ -183,7 +183,57 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 	// loop variable to the current element first, so a {{loopVar}} value
 	// containing placeholder-looking text is spliced before (not re-expanded
 	// across) the normal substitution.
-	if t.IsShell() {
+	switch {
+	case t.IsSubWorkflow():
+		// A sub-workflow task is a leaf in this DAG: at dispatch it recursively
+		// runs the linked child via Run and captures its result. The child brings
+		// its own runtime, so there is no runtime.Lookup here (like a shell task).
+		child := opts.Subs[t.ID]
+		if child == nil {
+			return fmt.Errorf("task %q: sub-workflow %q not linked", t.ID, t.Workflow)
+		}
+		if hooks.OnStart != nil {
+			hooks.OnStart(*t, st.iteration, "", "", "")
+		}
+		// with-values are substituted against the PARENT context first, then
+		// handed to the child as its CLI-tier param values.
+		st.mu.Lock()
+		vals := make(map[string]string, len(t.With))
+		for _, a := range t.With {
+			vals[string(a.Name)] = workflow.Substitute(a.Value, st.rep.Outputs, opts.Params, opts.State, st.prev)
+		}
+		st.mu.Unlock()
+		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+			start := time.Now()
+			cp, err := workflow.ResolveParams(child, vals, nil)
+			if err != nil {
+				return TaskResult{TaskID: t.ID}, err
+			}
+			childRep, err := Run(ctx, child, Hooks{}, Options{
+				Params: cp,
+				// Child shares the parent's cross-run state so {{state.x}} placeholders in
+				// child prompts resolve the same store. Write-back (writes_state) is a
+				// CLI-layer pass over the top-level report only, so the child never mutates
+				// the map here.
+				State:          opts.State,
+				Subs:           child.Subs,
+				Cache:          opts.Cache,
+				RetryBaseDelay: opts.RetryBaseDelay,
+			})
+			if err != nil {
+				return TaskResult{TaskID: t.ID}, err
+			}
+			ot, err := child.OutputTask()
+			if err != nil {
+				return TaskResult{TaskID: t.ID}, err
+			}
+			out := childRep.Outputs[ot]
+			// One parent row, child result + SUMMED child usage; schema (if any)
+			// validates the child result uniformly with the LLM branch.
+			r := TaskResult{TaskID: t.ID, Output: out, Usage: childRep.Usage, Elapsed: time.Since(start)}
+			return r, validateSchema(t, out)
+		})
+	case t.IsShell():
 		if hooks.OnStart != nil {
 			hooks.OnStart(*t, st.iteration, "", "", "")
 		}
@@ -193,7 +243,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 			return runShell(ctx, t, body)
 		})
-	} else {
+	default:
 		rt, model, effort := wf.Effective(t)
 		runner, ok := runtime.Lookup(rt)
 		if !ok {

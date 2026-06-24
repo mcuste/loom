@@ -156,7 +156,10 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 			if t == nil {
 				continue
 			}
-			if t.IsShell() {
+			if t.IsShell() || t.IsSubWorkflow() {
+				// Sub-workflow tasks have no runtime of their own (the child brings
+				// its own), so they seed with empty runtime metadata, matching the
+				// ("", "", "") OnStart that runTask fires for them.
 				sh.OnStart(*t, 0, "", "", "")
 			} else {
 				rt, m, e := wf.Effective(t)
@@ -174,7 +177,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
 		sh,
-	), executor.Options{Params: resolved, Seed: seed, State: state})
+	), executor.Options{Params: resolved, Seed: seed, State: state, Subs: wf.Subs})
 	if rep != nil {
 		// A summary write error does not mask a real run failure: surface it only
 		// when the run itself otherwise succeeded.

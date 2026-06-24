@@ -52,7 +52,10 @@ func doResume(w io.Writer, runID string, paramArgs []string) error {
 	if err := chdirToRecorded(w, rec.Cwd); err != nil {
 		return err
 	}
-	return runFromRecord(w, home, []byte(rec.Manifest), rec, paramArgs)
+	// The original workflow file path is not stored in the record, so the parent
+	// links with an empty selfPath: path refs resolve relative to the restored
+	// cwd and the parent has no on-disk identity for cycle detection.
+	return runFromRecord(w, home, "", []byte(rec.Manifest), rec, paramArgs)
 }
 
 // doRunResumeLatest is the --resume-latest entry point for `loom run`. The
@@ -93,7 +96,7 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	if err := chdirToRecorded(w, rec.Cwd); err != nil {
 		return err
 	}
-	return runFromRecord(w, home, manifest, rec, paramArgs)
+	return runFromRecord(w, home, path, manifest, rec, paramArgs)
 }
 
 // chdirToRecorded changes into cwd (the directory the original run was invoked
@@ -129,9 +132,20 @@ func chdirToRecorded(w io.Writer, cwd string) error {
 // seeded task, the new run record gets a synthetic ok entry written through
 // the store hooks before the executor starts, so a subsequent resume of
 // THIS run finds them already-completed instead of re-dispatching.
-func runFromRecord(w io.Writer, home string, manifest []byte, rec *store.RunRecord, paramArgs []string) (err error) {
+func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *store.RunRecord, paramArgs []string) (err error) {
 	wf, err := workflow.Parse(manifest)
 	if err != nil {
+		return err
+	}
+	// Re-resolve and link sub-workflow children from disk at resume time, just as
+	// a fresh run does. selfPath is the parent's on-disk path when known
+	// (--resume-latest reads it from disk); for a stored-manifest resume it is
+	// empty, so path refs resolve relative to the (restored) working directory and
+	// registry-name refs through the cwd-based registry roots.
+	if err := linkSubWorkflows(wf, selfPath, nil); err != nil {
+		return err
+	}
+	if err := checkSubWorkflows(wf); err != nil {
 		return err
 	}
 
