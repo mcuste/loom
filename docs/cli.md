@@ -16,11 +16,11 @@ Exit code is `0` on success, `1` on any validation or execution error.
 
 ## Registry — run by name
 
-A workflow stored under `$LOOM_HOME/workflows/` can be run by name instead of by path:
+A workflow stored in a registry root can be run by name instead of by path:
 
 ```bash
-loom run deploy                   # resolves $LOOM_HOME/workflows/deploy.yaml (or .yml)
-loom run deploy:prod              # resolves $LOOM_HOME/workflows/deploy/prod.yaml
+loom run deploy                   # resolves deploy.yaml from the nearest registry
+loom run deploy:prod              # resolves deploy/prod.yaml
 loom run check deploy             # validate only, no execution
 loom workflows ls                 # list every registered workflow with its description
 ```
@@ -36,15 +36,28 @@ loom workflows ls                 # list every registered workflow with its desc
 
 A Windows drive path such as `C:\wf.yaml` contains `\` and is therefore a filesystem path despite its `:`.
 
-Registry layout under `$LOOM_HOME/workflows/`:
+**Registry search order** — loom searches roots in this order and uses the first match (nearest wins, shadowing later roots):
+
+1. `.loom/workflows/` in the current working directory.
+2. `.loom/workflows/` in each ancestor directory, walking up to and including the git repo root (the first ancestor containing a `.git` entry). The walk stops at the git root, so registries above the repo are never searched.
+3. `$LOOM_HOME/workflows/` — the global registry, searched last.
+
+`loom workflows ls` merges all roots under the same shadowing rule, so the listing reflects exactly what `loom run` would resolve.
+
+Registry layout (example with both a project-local and a global registry):
 
 ```text
-$LOOM_HOME/workflows/
-├── deploy.yaml          → name: deploy
-├── deploy/
-│   └── prod.yaml        → name: deploy:prod
+<repo-root>/.loom/workflows/
+├── deploy.yaml          → name: deploy  (shadows any global deploy)
 └── ci/
     └── test.yaml        → name: ci:test
+
+$LOOM_HOME/workflows/
+├── deploy.yaml          → name: deploy  (shadowed by local above)
+├── deploy/
+│   └── prod.yaml        → name: deploy:prod
+└── infra/
+    └── setup.yaml       → name: infra:setup
 ```
 
 A `.yaml` and a `.yml` file with the same stem map to the same name; `.yaml` takes precedence.
