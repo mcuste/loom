@@ -74,6 +74,12 @@ the workflow's own directory). Nested non-matching files are unaffected
 (`ci/test.yaml` stays `ci:test`). If both a flat file `X.yaml` and the dir form
 `X/X.yaml` exist in one root, the flat file wins.
 
+**Sub-workflow refs** — a task's `workflow:` ref resolves through these exact
+same registry rules: a name (e.g. `release`, `ci:test`) resolves against the
+local and global roots, and a path ref (e.g. `./sub.yaml`) resolves relative to
+the linking workflow's own directory. See
+[Sub-workflows](workflow-spec.md#sub-workflows).
+
 ### Shell completion
 
 The workflow argument of `loom run` / `loom run check` tab-completes against the

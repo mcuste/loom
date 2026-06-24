@@ -19,6 +19,7 @@ parser (`pkg/workflow`) and surfaced by `loom run check` before anything runs.
 - [Caching (memoization)](#caching-memoization)
 - [Cross-run state](#cross-run-state)
 - [Scoped loops](#scoped-loops)
+- [Sub-workflows](#sub-workflows)
   - [`loop`: converge until a target drains](#loop-converge-until-a-target-drains)
   - [`for_each`: iterate a finite list](#for_each-iterate-a-finite-list)
   - [Loop edge semantics](#loop-edge-semantics)
@@ -47,9 +48,10 @@ tasks:                       # required, non-empty
 
 **Unknown keys are rejected.** The decoder runs in known-fields mode, so any
 top-level or task-level key the schema does not recognize is a hard error. There
-is no `inputs:`, `output:`, `workflow:`, `with:`, `uses:`, or top-level `loops:`
-key; sub-workflows are not implemented, and loops are declared inline as tasks
-(see [Scoped loops](#scoped-loops)).
+is no `inputs:` or `uses:` key, and no top-level `loops:` key (loops are declared
+inline as tasks; see [Scoped loops](#scoped-loops)). A task **may** link another
+workflow with `workflow:` / `with:`, and a workflow **may** name its result task
+with a top-level `output:` (see [Sub-workflows](#sub-workflows)).
 
 Identifiers (`name`, every task `id`, every param `name`, loop ids, the
 `for_each` `as` variable) all share one alphabet: **`[A-Za-z0-9_]+`**,
@@ -80,6 +82,10 @@ loop id can never collide.
 - **`budget`** (optional, mapping): `{ max_cost_usd: <positive float> }`;
   cumulative spend ceiling. See [Budgets](#budgets).
 - **`params`** (optional, list): declared CLI parameters. See [Params](#params).
+- **`output`** (optional, string): names the task whose output is this
+  workflow's result string when it is run as a sub-workflow. Absent = the lone
+  terminal task (a task no other task depends on); 0 or >1 terminals with no
+  `output:` is an error. See [Sub-workflows](#sub-workflows).
 - **`tasks`** (required, list): non-empty. The workflow's tasks (and inline
   loop wrappers) in declaration order.
 
@@ -159,8 +165,16 @@ placeholders) works identically.
   [`loop`](#loop-converge-until-a-target-drains).
 - **`for_each`** (wrapper, mapping): marks this task as a `for_each` loop. See
   [`for_each`](#for_each-iterate-a-finite-list).
+- **`workflow`** (sub-workflow, string): a registry name or path of another
+  workflow to run as a leaf. Rejected alongside any other body form, and
+  task-level `runtime:`/`model:`/`effort:` are rejected (the child brings its
+  own). See [Sub-workflows](#sub-workflows).
+- **`with`** (sub-workflow, mapping): values passed to the linked child's
+  params. Only valid with `workflow:`. Each key names a declared child param;
+  each value is substituted against the parent context first.
 
-A single task sets exactly one of `prompt`, `prompt_file`, `command`, `loop`, or `for_each`.
+A single task sets exactly one of `prompt`, `prompt_file`, `command`, `loop`,
+`for_each`, or `workflow`.
 
 ---
 
@@ -655,6 +669,69 @@ In the `loop` example above, `drain` reads `{{prev.refine}}` yet declares only
 
 ---
 
+## Sub-workflows
+
+A task may **link and run another workflow** instead of carrying a prompt or
+command. Set `workflow:` to a registry name or path; the linked child runs as a
+single leaf in the parent DAG, and its result becomes the task's output, usable
+downstream via `{{task_id}}` like any other.
+
+```yaml
+# .loom/workflows/release/release.yaml
+name: release
+output: publish              # this task's output is the workflow's result
+params:
+  - name: version
+    required: true
+tasks:
+  - id: build
+    prompt: build {{params.version}}
+  - id: publish
+    depends_on: [build]
+    prompt: publish {{build}}
+
+# parent workflow
+tasks:
+  - id: cut_release
+    workflow: release        # registry name OR path (e.g. ./sub.yaml)
+    with:
+      version: "1.4.0"       # values substituted with the PARENT ctx first
+  - id: announce
+    depends_on: [cut_release]
+    prompt: "announce {{cut_release}}"   # == release's publish output
+```
+
+- **`workflow:`** resolves through the same registry rules as `loom run <name>`
+  (a name resolves against the local and global registries; a path ref resolves
+  relative to the linking workflow's directory).
+- **`with:`** binds values to the child's params. Each key must be a declared
+  child param; required child params must be covered. Values are substituted
+  against the **parent** context first (so `with: { version: "{{seed}}" }` passes
+  the parent `seed` task's output), which also creates the implicit DAG edge.
+- **Result.** The task output is the child task named by the child's top-level
+  `output:`, or the child's lone terminal task when `output:` is omitted. A
+  child with 0 or >1 terminals and no `output:` fails `loom run check`.
+
+### v1 semantics
+
+The sub-workflow task is an **atomic black box**:
+
+- The parent shows **one task row** for it, carrying the child result and the
+  **summed** token/cost usage. There are no per-child task rows.
+- It is atomic for **resume**: if the task is not yet `ok`, the whole child
+  re-runs (same as a prompt or command task).
+- Children are **re-resolved from disk** at run *and* resume time, not frozen
+  into the parent manifest the way `prompt_file:` is.
+- A child's `writes_state` does **not** persist in v1 (state write-back is a
+  CLI-layer pass over the top-level report only).
+- Child `prompt_file:` paths resolve beside the **child** YAML.
+- A task-level `schema:` validates the child result uniformly with an LLM task;
+  `retry:` / `budget:` wrap the whole child run the same way.
+
+Cycles between linked workflows (A links B links A) are detected and rejected.
+
+---
+
 ## Validation reference
 
 `loom run check <file>` runs the full validation pipeline, roughly in this
@@ -667,9 +744,11 @@ order. Any failure stops the check and prints a precise message.
 4. Params: names valid and unique; `required` and `default` are mutually
    exclusive; defaults are scalar strings (no null); every declared param is
    referenced somewhere.
-5. Each task sets exactly one of `prompt` / `prompt_file` / `command` / `loop` / `for_each`. `prompt_file` paths are relative and the referenced file must be readable.
-6. Command tasks set no task-level `runtime`/`model`/`effort` and no `schema`.
-   Loop wrappers set none of the body-only fields.
+5. Each task sets exactly one of `prompt` / `prompt_file` / `command` / `loop` / `for_each` / `workflow`. `prompt_file` paths are relative and the referenced file must be readable.
+6. Command and sub-workflow tasks set no task-level `runtime`/`model`/`effort`;
+   command tasks also set no `schema`. Loop wrappers set none of the body-only
+   fields. A linked `workflow:` resolves, its `with:` covers the child's
+   required params with no unknown keys, and the child's `output:` resolves.
 7. Every `depends_on` entry names a known task and appears at most once.
 8. Every `{{task_id}}` placeholder is in that task's `depends_on`; every
    `{{params.x}}` names a declared param; `{{prev.x}}` is loop-body-only and

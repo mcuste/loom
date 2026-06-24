@@ -34,6 +34,7 @@ runtime: claude-code         # default for tasks; one of: claude-code | codex
 model: sonnet                # default; one of: haiku | sonnet | opus
 effort: medium               # default; one of: low | medium | high | max  (claude-code)
 system_prompt: ...           # optional, appended to every task
+output: <task_id>            # optional; which task is this workflow's result when linked as sub-workflow
 params:                       # optional; see ## Params
   - name: ...                # required, [A-Za-z0-9_]+, unique
     description: ...         # optional
@@ -54,11 +55,17 @@ tasks:
     # — OR —
     command: |               # runs sh -c instead of dispatching to a runtime
       echo "{{a}}" | wc -l
+    # — OR —
+    workflow: release        # run another workflow (registry name or ./path) as a leaf
+    with:                    # values bound to the child's params; substituted with parent ctx
+      version: "{{a}}"
 ```
 
 `prompt_file` is a path to a plain-text file resolved relative to the workflow YAML's directory. The file is read and inlined before validation, so the run record stores the verbatim prompt text (not the path). Use it to keep long or shared prompts out of the YAML.
 
-Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(true)`). No `inputs:`, `output:`, `workflow:`, `with:` — sub-workflows aren't implemented.
+A task may instead link another workflow with `workflow:` (a registry name or a path relative to the linking YAML); `with:` binds values to the child's params (substituted against the parent context first, which also creates the dep edge). The child runs as one atomic leaf: its result (the child's top-level `output:` task, or its lone terminal task) becomes this task's output. A top-level `output:` names which task is this workflow's result when it is itself linked. See `docs/workflow-spec.md` → Sub-workflows.
+
+Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(true)`). No `inputs:` or `uses:` key.
 
 ## Placeholders and dependencies
 
@@ -71,7 +78,7 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 
 A task with `command:` runs `sh -c <substituted-command>` instead of dispatching to a runtime.
 
-**Discriminator rule** — exactly one of `prompt`, `prompt_file`, or `command` must be set per task (loop/for_each wrappers replace all three). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
+**Discriminator rule** — exactly one of `prompt`, `prompt_file`, `command`, or `workflow` must be set per task (loop/for_each wrappers replace all of them). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
 
 **Rejected fields on command tasks** — `runtime`, `model`, and `effort` at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected.
 
