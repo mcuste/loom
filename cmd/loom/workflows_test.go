@@ -247,6 +247,119 @@ func TestWorkflowsLsDedupsYamlOverYml(t *testing.T) {
 	}
 }
 
+// TestResolveWorkflowRef_EponymousDir pins the dir-based workflow forms: a name
+// resolves to `<...>/<cn>/<cn>.yaml` so a workflow can live in its own directory
+// beside its prompt files. A flat name finds the eponymous-dir file, a nested
+// name finds it under the colon hierarchy, and the '.yml' dir form is a fallback.
+func TestResolveWorkflowRef_EponymousDir(t *testing.T) {
+	home := loomHomeForTest(t)
+	flatDir := writeRegistryWF(t, home, filepath.Join("someworkflow", "someworkflow.yaml"))
+	nestedDir := writeRegistryWF(t, home, filepath.Join("a", "b", "c", "c.yaml"))
+	ymlDir := writeRegistryWF(t, home, filepath.Join("ymlwf", "ymlwf.yml"))
+
+	cases := []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{"flat eponymous dir", "someworkflow", flatDir},
+		{"nested eponymous dir", "a:b:c", nestedDir},
+		{"yml dir fallback", "ymlwf", ymlDir},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveWorkflowRef(tc.arg)
+			if err != nil {
+				t.Fatalf("resolveWorkflowRef(%q): %v", tc.arg, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveWorkflowRef(%q) = %q, want %q", tc.arg, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveWorkflowRef_FlatShadowsDir pins the documented collision
+// precedence: when both a flat file `X.yaml` and the eponymous-dir form
+// `X/X.yaml` exist in one root, the flat file wins.
+func TestResolveWorkflowRef_FlatShadowsDir(t *testing.T) {
+	home := loomHomeForTest(t)
+	flat := writeRegistryWF(t, home, "dup.yaml")
+	writeRegistryWF(t, home, filepath.Join("dup", "dup.yaml"))
+
+	got, err := resolveWorkflowRef("dup")
+	if err != nil {
+		t.Fatalf("resolveWorkflowRef(dup): %v", err)
+	}
+	if got != flat {
+		t.Errorf("resolveWorkflowRef(dup) = %q, want flat file %q (flat shadows dir form)", got, flat)
+	}
+}
+
+// TestResolveWorkflowRef_NonEponymousUnchanged pins that a non-matching nested
+// file keeps every path segment: `someworkflow/somedir/other.yaml` resolves only
+// from `someworkflow:somedir:other`, not from a collapsed name.
+func TestResolveWorkflowRef_NonEponymousUnchanged(t *testing.T) {
+	home := loomHomeForTest(t)
+	want := writeRegistryWF(t, home, filepath.Join("someworkflow", "somedir", "other.yaml"))
+
+	got, err := resolveWorkflowRef("someworkflow:somedir:other")
+	if err != nil {
+		t.Fatalf("resolveWorkflowRef(someworkflow:somedir:other): %v", err)
+	}
+	if got != want {
+		t.Errorf("resolveWorkflowRef(someworkflow:somedir:other) = %q, want %q", got, want)
+	}
+}
+
+// TestWorkflowsLsEponymousDir pins that `loom workflows ls` lists a dir-based
+// workflow under its collapsed name (`someworkflow`, not `someworkflow:someworkflow`)
+// while a non-matching nested file keeps every segment.
+func TestWorkflowsLsEponymousDir(t *testing.T) {
+	home := loomHomeForTest(t)
+	writeRegistryWF(t, home, filepath.Join("someworkflow", "someworkflow.yaml"))
+	writeRegistryWF(t, home, filepath.Join("someworkflow", "somedir", "other.yaml"))
+
+	out := runWorkflowsLs(t)
+	for _, want := range []string{"someworkflow", "someworkflow:somedir:other"} {
+		if !rowWithName(out, want) {
+			t.Errorf("listing missing name %q; got:\n%s", want, out)
+		}
+	}
+	if rowWithName(out, "someworkflow:someworkflow") {
+		t.Errorf("dir-based workflow should collapse to `someworkflow`, not list redundant `someworkflow:someworkflow`; got:\n%s", out)
+	}
+	assertNamesExtensionless(t, out)
+}
+
+// TestWorkflowsLsFlatShadowsDir pins that when a flat file and the eponymous-dir
+// form collide on one name, listing shows the flat file's path (flat wins),
+// matching resolveWorkflowRef.
+func TestWorkflowsLsFlatShadowsDir(t *testing.T) {
+	home := loomHomeForTest(t)
+	flat := writeRegistryWF(t, home, "dup.yaml")
+	dir := writeRegistryWF(t, home, filepath.Join("dup", "dup.yaml"))
+
+	out := runWorkflowsLs(t)
+	if !strings.Contains(out, flat) {
+		t.Errorf("listing should show flat path %q (flat wins); got:\n%s", flat, out)
+	}
+	if strings.Contains(out, dir) {
+		t.Errorf("listing should not show shadowed dir path %q; got:\n%s", dir, out)
+	}
+}
+
+// rowWithName reports whether any listing row's name column (first field) equals
+// name exactly, so a test can assert presence without matching the path column.
+func rowWithName(out, name string) bool {
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == name {
+			return true
+		}
+	}
+	return false
+}
+
 // TestResolveWorkflowRef_RejectsBadComponents pins that empty, '.', and '..'
 // name components are rejected before any filesystem lookup.
 func TestResolveWorkflowRef_RejectsBadComponents(t *testing.T) {

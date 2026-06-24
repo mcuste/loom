@@ -49,8 +49,12 @@ Registry layout (example with both a project-local and a global registry):
 ```text
 <repo-root>/.loom/workflows/
 ├── deploy.yaml          → name: deploy  (shadows any global deploy)
-└── ci/
-    └── test.yaml        → name: ci:test
+├── ci/
+│   └── test.yaml        → name: ci:test
+└── release/
+    ├── release.yaml     → name: release        (eponymous-dir form)
+    └── prompts/
+        └── notes.md     → prompt_file: prompts/notes.md (beside the workflow)
 
 $LOOM_HOME/workflows/
 ├── deploy.yaml          → name: deploy  (shadowed by local above)
@@ -61,6 +65,14 @@ $LOOM_HOME/workflows/
 ```
 
 A `.yaml` and a `.yml` file with the same stem map to the same name; `.yaml` takes precedence.
+
+**Eponymous-dir form** — when a file's name equals its parent directory (`X/X.yaml`),
+the redundant trailing segment is collapsed, so `release/release.yaml` is named
+`release`, not `release:release`. This lets a workflow live in its own directory
+beside the `prompt_file:` text it references (`prompt_file:` resolves relative to
+the workflow's own directory). Nested non-matching files are unaffected
+(`ci/test.yaml` stays `ci:test`). If both a flat file `X.yaml` and the dir form
+`X/X.yaml` exist in one root, the flat file wins.
 
 ### Shell completion
 

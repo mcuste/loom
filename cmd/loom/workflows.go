@@ -24,7 +24,10 @@ import (
 // ordered registry roots (project-local `.loom/workflows` walking up to the git
 // root, then $LOOM_HOME/workflows) with ':' as the hierarchy separator: a
 // trailing .yaml/.yml on the final component is stripped, then '.yaml' (fallback
-// '.yml') is appended. The first existing file along the search order wins
+// '.yml') is appended. A name also resolves to the eponymous-dir form
+// `<...>/<cn>/<cn>.yaml`, so a workflow can live in its own directory beside the
+// `prompt_file:` text it references; the flat file `<...>/<cn>.yaml` wins when
+// both exist in one root. The first existing file along the search order wins
 // (nearest shadows global). Empty, '.', and '..' components are rejected, as is
 // any name that would escape a workflows root.
 func resolveWorkflowRef(arg string) (string, error) {
@@ -43,13 +46,18 @@ func resolveWorkflowRef(arg string) (string, error) {
 	for _, root := range roots {
 		// The per-component checks in splitWorkflowName already forbid any
 		// component that could climb out of the root ("", ".", "..", or one
-		// containing a separator), so the join cannot escape lexically and
-		// needs no further traversal guard.
-		stem := filepath.Join(append([]string{root}, parts...)...)
-		for _, ext := range []string{".yaml", ".yml"} {
-			cand := stem + ext
-			if _, err := os.Stat(cand); err == nil {
-				return cand, nil
+		// containing a separator), so the joins cannot escape lexically and
+		// need no further traversal guard. The dir form only repeats the final
+		// (already-validated) component, so it is equally safe.
+		flat := filepath.Join(append([]string{root}, parts...)...)
+		dir := filepath.Join(flat, parts[len(parts)-1])
+		// Flat before dir gives flat-wins precedence within a root.
+		for _, stem := range []string{flat, dir} {
+			for _, ext := range []string{".yaml", ".yml"} {
+				cand := stem + ext
+				if _, err := os.Stat(cand); err == nil {
+					return cand, nil
+				}
 			}
 		}
 	}
@@ -190,15 +198,38 @@ type workflowRef struct {
 	path string
 }
 
+// registryName converts a file path relative to a registry root (carrying the
+// extension ext) into its colon-joined registry name. The final path segment is
+// dropped when it equals its immediate parent directory (the eponymous-dir form
+// `X/X.yaml` -> `X`), so a workflow that lives in its own directory beside the
+// `prompt_file:` text it references does not pick up a redundant trailing
+// segment. It reports whether that collapse happened, so a caller can give a
+// flat file precedence over a colliding dir form.
+func registryName(rel, ext string) (name string, collapsed bool) {
+	parts := strings.Split(strings.TrimSuffix(rel, ext), string(filepath.Separator))
+	if n := len(parts); n >= 2 && parts[n-1] == parts[n-2] {
+		parts = parts[:n-1]
+		collapsed = true
+	}
+	return strings.Join(parts, ":"), collapsed
+}
+
 // walkRegistry walks root, returning every *.yaml/*.yml file as a workflowRef
 // whose name is the path relative to root with '/'->':' and the extension
-// stripped, sorted by name. A <stem>.yaml and <stem>.yml collide on one name;
-// WalkDir visits lexically (.yaml before .yml), so the first wins and the rest
-// are dropped, mirroring the '.yaml'-over-'.yml' preference in
-// resolveWorkflowRef. An absent registry root yields no refs.
+// stripped, collapsing the eponymous-dir form `X/X.yaml` to `X` (see
+// registryName), sorted by name. A <stem>.yaml and <stem>.yml collide on one
+// name; WalkDir visits lexically (.yaml before .yml), so the first wins and the
+// rest are dropped, mirroring the '.yaml'-over-'.yml' preference in
+// resolveWorkflowRef. A flat file `X.yaml` and a dir form `X/X.yaml` also
+// collide on the name `X`; the flat file wins (it shadows the dir form),
+// matching resolveWorkflowRef. An absent registry root yields no refs.
 func walkRegistry(root string) ([]workflowRef, error) {
 	var refs []workflowRef
-	seen := make(map[string]bool)
+	// idx maps a registry name to its slot in refs; collapsed records whether
+	// that slot came from an eponymous-dir path, so a later flat file can
+	// shadow it (flat wins).
+	idx := make(map[string]int)
+	collapsed := make(map[string]bool)
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -217,11 +248,19 @@ func walkRegistry(root string) ([]workflowRef, error) {
 		if err != nil {
 			return err
 		}
-		name := strings.ReplaceAll(strings.TrimSuffix(rel, ext), string(filepath.Separator), ":")
-		if seen[name] {
+		name, isCollapsed := registryName(rel, ext)
+		if i, ok := idx[name]; ok {
+			// Flat file shadows a previously recorded dir form; any other
+			// collision (same form, or .yaml already chosen over .yml) keeps
+			// the first.
+			if collapsed[name] && !isCollapsed {
+				refs[i] = workflowRef{name: name, path: path}
+				collapsed[name] = false
+			}
 			return nil
 		}
-		seen[name] = true
+		idx[name] = len(refs)
+		collapsed[name] = isCollapsed
 		refs = append(refs, workflowRef{name: name, path: path})
 		return nil
 	})

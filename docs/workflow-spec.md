@@ -131,7 +131,11 @@ placeholders) works identically.
   rejected) and is resolved relative to the directory containing the workflow
   YAML. The file is read and inlined before validation, so the run record
   embeds the verbatim prompt text (not the path). Mutually exclusive with
-  `prompt` and `command`.
+  `prompt` and `command`. To keep these prompt files beside the workflow, put
+  the workflow in its own registry directory as `<name>/<name>.yaml` (the
+  registry collapses the redundant segment, so it still runs as `<name>` — see
+  the [CLI registry docs](cli.md)) and reference siblings like
+  `prompt_file: prompts/step.md`.
 - **`command`** (shell, string): body run via `sh -c`. Non-empty. Mutually
   exclusive with `prompt` and `prompt_file`.
 - **`description`** (all tasks, string): plan output only; never sent to a model.
