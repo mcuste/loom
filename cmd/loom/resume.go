@@ -63,6 +63,10 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
+	path, err = resolveWorkflowRef(path)
+	if err != nil {
+		return err
+	}
 	// The YAML path arg is relative to the CURRENT cwd, so read and parse the
 	// manifest BEFORE any chdir; otherwise a relative path would resolve against
 	// the recorded dir and miss the file the user pointed at.

@@ -1,19 +1,73 @@
 # Loom CLI
 
 ```bash
-loom run    <workflow.yaml> [-p key=val ...] [--resume-latest]   # validate, then execute
-loom run check <workflow.yaml> [-p key=val ...]                  # validate + print plan, no execution
+loom run    <workflow> [-p key=val ...] [--resume-latest]        # validate, then execute
+loom run check <workflow> [-p key=val ...]                       # validate + print plan, no execution
 loom resume <run-id> [-p key=val ...]                            # resume a past run
 loom runs   [workflow]                                           # browse past runs (TUI / table)
 loom runs ls   [workflow] [-n N]                                 # list past runs as a table
 loom runs show <run-id> [--task ID] [--summary]                  # print a stored run inline
+loom workflows ls                                                # list registry workflows by name
 ```
 
 Exit code is `0` on success, `1` on any validation or execution error.
 
 ---
 
-## `loom run check <workflow.yaml>`
+## Registry — run by name
+
+A workflow stored under `$LOOM_HOME/workflows/` can be run by name instead of by path:
+
+```bash
+loom run deploy                   # resolves $LOOM_HOME/workflows/deploy.yaml (or .yml)
+loom run deploy:prod              # resolves $LOOM_HOME/workflows/deploy/prod.yaml
+loom run check deploy             # validate only, no execution
+loom workflows ls                 # list every registered workflow with its description
+```
+
+**Classification rule** (syntactic, cwd-independent — an argument with `/` or `\` is always a path):
+
+| Argument form | Treated as |
+|---|---|
+| contains `/` or `\` | filesystem path (returned verbatim) |
+| contains `:` (no separator) | registry name; `:` is the hierarchy separator |
+| ends `.yaml` or `.yml` (no separator) | filesystem path |
+| anything else | flat registry name |
+
+A Windows drive path such as `C:\wf.yaml` contains `\` and is therefore a filesystem path despite its `:`.
+
+Registry layout under `$LOOM_HOME/workflows/`:
+
+```text
+$LOOM_HOME/workflows/
+├── deploy.yaml          → name: deploy
+├── deploy/
+│   └── prod.yaml        → name: deploy:prod
+└── ci/
+    └── test.yaml        → name: ci:test
+```
+
+A `.yaml` and a `.yml` file with the same stem map to the same name; `.yaml` takes precedence.
+
+### Shell completion
+
+The workflow argument of `loom run` / `loom run check` tab-completes against the
+registry, so `loom run tui<TAB>` expands to `tui_demo` (nested workflows
+complete with their `:` name). Path-mode arguments still fall back to normal
+file completion. Resolution itself is exact-name only — completion is what turns
+a typed prefix into a full name; no prefix matching happens at run time.
+
+Install the completion script once per shell (cobra generates it):
+
+```bash
+loom completion fish > ~/.config/fish/completions/loom.fish        # fish
+loom completion zsh  > "${fpath[1]}/_loom"                          # zsh
+source <(loom completion bash)                                     # bash (current shell)
+```
+
+---
+
+## `loom run check <workflow>`
 
 Parse and validate the manifest, then print the execution plan — **without
 dispatching a single model call**. This is the authoring workhorse: it surfaces
@@ -32,7 +86,7 @@ workflow need?" probe), whereas `loom run` treats it as a hard failure.
 
 ---
 
-## `loom run <workflow.yaml>`
+## `loom run <workflow>`
 
 Runs the same validation/plan phase as `check`, and only if it passes, executes
 every task. Independent tasks (no edge between them) are dispatched
@@ -159,7 +213,8 @@ followed by a `resume` (which may `chdir`) always reach the same store. Layout:
 $LOOM_HOME/
 ├── runs/<workflow_id>/<run_id>.json   per-run records
 ├── runs/<workflow_id>/latest.json     symlink to the newest run
-└── state/<workflow_id>.json           cross-run state (writes_state / {{state.x}})
+├── state/<workflow_id>.json           cross-run state (writes_state / {{state.x}})
+└── workflows/<name>.yaml             registry — workflows runnable by name
 ```
 
 > Note: the embeddable library layer defaults its root to a local `.loom`

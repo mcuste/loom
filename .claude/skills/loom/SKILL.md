@@ -9,12 +9,15 @@ Author and execute loom workflows. Loom parses a YAML workflow, builds a DAG ove
 ## CLI
 
 ```bash
-loom run check <workflow.yaml>                 # parse + validate + print execution order, no execution
-loom run       <workflow.yaml>                 # check + execute every task (independent tasks run concurrently)
-loom run       <workflow.yaml> --resume-latest # resume the last run of this workflow: skip ok tasks, re-run the rest
-loom resume    <run-id>                         # resume a specific .loom/runs/<wf>/<id>.json; "latest" follows latest.json
-loom runs                                       # browse past runs (TUI); `ls` lists, `show <id>` prints one inline
+loom run check <workflow>                      # parse + validate + print execution order, no execution
+loom run       <workflow>                      # check + execute every task (independent tasks run concurrently)
+loom run       <workflow> --resume-latest      # resume the last run of this workflow: skip ok tasks, re-run the rest
+loom resume    <run-id>                        # resume a specific run; "latest" follows latest.json
+loom runs                                      # browse past runs (TUI); `ls` lists, `show <id>` prints one inline
+loom workflows ls                              # list registry workflows runnable by name
 ```
+
+`<workflow>` is a YAML path **or a registry name** resolved under `$LOOM_HOME/workflows/`. A name has no path separator and either contains `:` (hierarchy separator, e.g. `deploy:prod`) or lacks a `.yaml`/`.yml` extension. `loom workflows ls` lists the registry. Name resolution is exact-only; the workflow argument tab-completes against the registry (`loom completion <shell>`), so a typed prefix like `tui<TAB>` expands to `tui_demo` at the shell. See `docs/cli.md` for the full classification rule.
 
 Always run `loom run check <file>` first when authoring — it surfaces every validation error (cycles, unknown deps, unknown placeholders, bad model/effort) without burning tokens on `claude`.
 

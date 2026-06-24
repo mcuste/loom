@@ -2,9 +2,12 @@
 //
 // Usage:
 //
-//	loom run <workflow.yaml> [-p key=val ...]    validate, print execution order, and run
-//	loom check <workflow.yaml> [-p key=val ...]  validate and print execution order only
-//	loom --help                                  show usage
+//	loom run <workflow> [-p key=val ...]    validate, print execution order, and run
+//	loom check <workflow> [-p key=val ...]  validate and print execution order only
+//	loom --help                             show usage
+//
+// <workflow> is a YAML path or a registry name resolved under $LOOM_HOME/workflows
+// (':' is the hierarchy separator); `loom workflows ls` lists the registry.
 //
 // The plan, per-task progress, and the final summary are written to stdout.
 // Exit code 0 on success, 1 on any validation or execution error.
@@ -40,7 +43,7 @@ func newRootCmd() *cobra.Command {
 		Short:        "Validate and run workflow YAML files",
 		SilenceUsage: true,
 	}
-	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd())
+	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd(), newWorkflowsCmd())
 	return root
 }
 
@@ -55,9 +58,10 @@ func newRunCmd() *cobra.Command {
 		resumeLatest bool
 	)
 	cmd := &cobra.Command{
-		Use:   "run <workflow.yaml>",
-		Short: "Validate and run a workflow",
-		Args:  cobra.ExactArgs(1),
+		Use:               "run <workflow>",
+		Short:             "Validate and run a workflow",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if resumeLatest {
 				return doRunResumeLatest(cmd.OutOrStdout(), args[0], paramArgs)
@@ -75,7 +79,7 @@ func newRunCmd() *cobra.Command {
 func newCheckCmd() *cobra.Command {
 	var paramArgs []string
 	cmd := &cobra.Command{
-		Use:   "check <workflow.yaml>",
+		Use:   "check <workflow>",
 		Short: "Validate a workflow and print its execution plan, without running",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -132,6 +136,10 @@ func check(r tui.Renderer, wf *workflow.Workflow, paramArgs []string, file map[s
 // doRun runs the shared check phase (validate + print the plan) and then, only
 // if it passes, executes the whole workflow fresh.
 func doRun(w io.Writer, path string, paramArgs []string) (err error) {
+	path, err = resolveWorkflowRef(path)
+	if err != nil {
+		return err
+	}
 	manifest, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -166,6 +174,10 @@ func doRun(w io.Writer, path string, paramArgs []string) (err error) {
 // doCheck runs the shared check phase only: validate and print the plan, then
 // stop without executing.
 func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
+	path, err = resolveWorkflowRef(path)
+	if err != nil {
+		return err
+	}
 	wf, err := workflow.ParseFile(path)
 	if err != nil {
 		return err
