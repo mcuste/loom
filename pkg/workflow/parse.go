@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -75,9 +77,13 @@ func Parse(data []byte) (*Workflow, error) {
 		// `loop:` and `for_each:` are sibling scoped-block wrappers; a task
 		// declaring both is ambiguous.
 		if isLoop && isForEach {
-			return nil, fmt.Errorf("task %q: %w", tid, ErrLoopAndForEachSet)
+			return nil, &TaskBodyConflictError{Task: tid, Fields: []string{"loop", "for_each"}}
 		}
-		if err := rejectLoopWrapperFields(tid, rt); err != nil {
+		wrapper := "loop"
+		if isForEach {
+			wrapper = "for_each"
+		}
+		if err := rejectLoopWrapperFields(tid, rt, wrapper); err != nil {
 			return nil, err
 		}
 		rl := rawLoop{id: LoopID(tid), description: rt.Description}
@@ -210,7 +216,7 @@ func Parse(data []byte) (*Workflow, error) {
 		case rt.Prompt == "" && rt.Command == "":
 			return nil, fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
 		case rt.Prompt != "" && rt.Command != "":
-			return nil, fmt.Errorf("task %q: %w", tid, ErrPromptAndCommandSet)
+			return nil, &TaskBodyConflictError{Task: tid, Fields: []string{"prompt", "command"}}
 		}
 		// body is the text that placeholder validation runs against;
 		// substitution targets the same string at execution time.
@@ -335,11 +341,192 @@ func ParseFile(path string) (*Workflow, error) {
 	if err != nil {
 		return nil, err
 	}
-	wf, err := Parse(data)
+	// Inline any `prompt_file:` references relative to the YAML's own directory
+	// before Parse, so Parse only ever sees inline `prompt:` bodies.
+	inlined, err := InlinePromptFiles(data, filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	wf, err := Parse(inlined)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return wf, nil
+}
+
+// InlinePromptFiles rewrites every task's `prompt_file:` key into an inline
+// `prompt:` key by reading the referenced file relative to baseDir.
+//
+// It walks the YAML node tree and, for each mapping node that carries a
+// `prompt_file` key, enforces the 5-way body-form mutual exclusivity (a task
+// sets at most one of prompt, prompt_file, command, loop, for_each), rejects
+// absolute paths, reads the file at filepath.Join(baseDir, path), and replaces
+// the `prompt_file` key+value with a `prompt` whose literal-block value is the
+// file content. The walk covers nested loop bodies, so a `prompt_file` inside a
+// `loop:` or `for_each:` body is inlined the same way.
+//
+// The rewritten bytes are self-contained: Parse never sees `prompt_file`, so
+// KnownFields(true) strictness is preserved. InlinePromptFiles short-circuits
+// with no YAML round-trip when the raw bytes contain no `prompt_file` token.
+func InlinePromptFiles(data []byte, baseDir string) ([]byte, error) {
+	// Fast path: the overwhelming majority of workflows carry no `prompt_file`
+	// key, so skip the unmarshal + node walk + marshal round-trip entirely when
+	// the token is absent from the raw bytes.
+	if !bytes.Contains(data, []byte("prompt_file")) {
+		return data, nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	if err := inlinePromptFileNodes(&doc, baseDir); err != nil {
+		return nil, err
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	return out, nil
+}
+
+// inlinePromptFileNodes recurses the node tree, inlining `prompt_file` in every
+// mapping it visits. Walking the whole tree (not just top-level tasks) means a
+// `prompt_file` inside a nested loop body is inlined the same way.
+func inlinePromptFileNodes(n *yaml.Node, baseDir string) error {
+	if n.Kind == yaml.MappingNode {
+		if err := inlinePromptFileMapping(n, baseDir); err != nil {
+			return err
+		}
+		// A mapping's Content alternates key/value; keys are scalars that can
+		// never hold a nested body, so recurse into the value nodes only.
+		for i := 1; i < len(n.Content); i += 2 {
+			if err := inlinePromptFileNodes(n.Content[i], baseDir); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, c := range n.Content {
+		if err := inlinePromptFileNodes(c, baseDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// inlinePromptFileMapping inlines a single mapping's `prompt_file` key in place.
+// A mapping without `prompt_file` is left untouched.
+func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
+	var (
+		taskID         TaskID
+		keyNode, value *yaml.Node
+		bodyFields     []string
+		hasID          bool
+	)
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k, v := m.Content[i], m.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			continue
+		}
+		switch k.Value {
+		case "id":
+			taskID = TaskID(v.Value)
+			hasID = true
+		case "prompt_file":
+			keyNode, value = k, v
+			bodyFields = append(bodyFields, k.Value)
+		case "prompt", "command", "loop", "for_each":
+			bodyFields = append(bodyFields, k.Value)
+		}
+	}
+	if keyNode == nil {
+		return nil
+	}
+	// Only task mappings legitimately carry `prompt_file`, and every task has an
+	// `id`. A stray `prompt_file` in any other mapping (schema body, loop block,
+	// workflow root) is left untouched for Parse's known-fields check to reject
+	// in context, rather than inlined or reported against an empty task id.
+	if !hasID {
+		return nil
+	}
+	// prompt_file is one of the mutually exclusive body forms: any sibling body
+	// key is a conflict, reported with every offending field in declaration order.
+	if len(bodyFields) > 1 {
+		return &TaskBodyConflictError{Task: taskID, Fields: bodyFields}
+	}
+	if filepath.IsAbs(value.Value) {
+		return &AbsolutePromptFilePathError{Task: taskID, Path: value.Value}
+	}
+	content, err := os.ReadFile(filepath.Join(baseDir, value.Value))
+	if err != nil {
+		return &PromptFileError{Task: taskID, Path: value.Value, Err: err}
+	}
+	keyNode.Value = "prompt"
+	value.Kind = yaml.ScalarNode
+	value.Tag = "!!str"
+	value.Style = yaml.LiteralStyle
+	value.Value = string(content)
+	return nil
+}
+
+// AbsolutePromptFilePathError reports a `prompt_file:` whose value is an
+// absolute path. Only paths relative to the workflow file's own directory are
+// permitted; this keeps workflows self-contained and shareable.
+type AbsolutePromptFilePathError struct {
+	Task TaskID
+	Path string
+}
+
+func (e *AbsolutePromptFilePathError) Error() string {
+	return fmt.Sprintf("task %q: prompt_file %q must be a relative path", e.Task, e.Path)
+}
+
+// PromptFileError reports a `prompt_file:` that could not be read (file missing,
+// permission denied, or any other I/O failure). Err wraps the underlying OS
+// error so errors.Is(err, os.ErrNotExist) works for callers that need to
+// distinguish "file not found" from other failures.
+type PromptFileError struct {
+	Task TaskID
+	Path string
+	Err  error
+}
+
+func (e *PromptFileError) Error() string {
+	return fmt.Sprintf("task %q: read prompt_file %q: %v", e.Task, e.Path, e.Err)
+}
+
+func (e *PromptFileError) Unwrap() error { return e.Err }
+
+// TaskBodyConflictError reports a task that sets more than one of the five
+// mutually exclusive body forms: prompt, prompt_file, command, loop, for_each.
+// Fields lists every conflicting key in the order they appear in the YAML
+// document, so the error message is deterministic and points directly at the
+// offending lines.
+//
+// TaskBodyConflictError unifies the legacy pairwise sentinels: its Is method
+// returns true for ErrPromptAndCommandSet, ErrLoopTaskWithBody, and
+// ErrLoopAndForEachSet when Fields contains the corresponding combination, so
+// callers using errors.Is against those sentinel values continue to work.
+type TaskBodyConflictError struct {
+	Task   TaskID
+	Fields []string
+}
+
+func (e *TaskBodyConflictError) Error() string {
+	return fmt.Sprintf("task %q sets mutually exclusive fields: %s", e.Task, strings.Join(e.Fields, ", "))
+}
+
+func (e *TaskBodyConflictError) Is(target error) bool {
+	has := func(f string) bool { return slices.Contains(e.Fields, f) }
+	switch target {
+	case ErrPromptAndCommandSet:
+		return has("prompt") && has("command")
+	case ErrLoopAndForEachSet:
+		return has("loop") && has("for_each")
+	case ErrLoopTaskWithBody:
+		return (has("loop") || has("for_each")) && (has("prompt") || has("command") || has("prompt_file"))
+	}
+	return false
 }
 
 // rawWorkflow mirrors the YAML schema as decoded by yaml.v3. It exists only so
@@ -435,8 +622,6 @@ var (
 	// blocks but no top-level `tasks:`. A scoped loop refines a workflow that
 	// must have at least one top-level task to seed it.
 	ErrLoopsWithoutTopLevelTask = errors.New("loops require at least one top-level task")
-	// ErrMissingPrompt is returned when a task declares no prompt.
-	ErrMissingPrompt = errors.New("task has no prompt")
 	// ErrMissingParamName is returned when a params entry omits the name field.
 	ErrMissingParamName = errors.New("param has no name")
 
@@ -452,9 +637,9 @@ var (
 	// defaults are tolerated.
 	ErrShellTaskWithRuntime = errors.New("shell task must not set runtime, model, or effort")
 	// ErrLoopTaskWithBody reports a loop-wrapper task (one with a `loop:` block)
-	// that also sets `prompt:` or `command:`. A loop task has no body of its own;
-	// its work lives in the nested loop tasks.
-	ErrLoopTaskWithBody = errors.New("loop task must not set prompt or command")
+	// that also sets a body form (`prompt:`, `prompt_file:`, or `command:`). A
+	// loop task has no body of its own; its work lives in the nested loop tasks.
+	ErrLoopTaskWithBody = errors.New("loop task must not set prompt, prompt_file, or command")
 	// ErrLoopTaskWithRuntime reports a loop-wrapper task that sets task-level
 	// `runtime:`, `model:`, or `effort:`. These belong to the loop's body tasks,
 	// not the wrapper.
@@ -474,10 +659,14 @@ var (
 // id, description, and the loop block: a loop wrapper is not an executable task,
 // so prompt/command, runtime knobs, and every task-only field are rejected at
 // load time rather than silently ignored.
-func rejectLoopWrapperFields(tid TaskID, rt rawTask) error {
+func rejectLoopWrapperFields(tid TaskID, rt rawTask, wrapper string) error {
 	switch {
 	case rt.Prompt != "" || rt.Command != "":
-		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithBody)
+		body := "prompt"
+		if rt.Command != "" {
+			body = "command"
+		}
+		return &TaskBodyConflictError{Task: tid, Fields: []string{wrapper, body}}
 	case rt.Runtime != "" || rt.Model != "" || rt.Effort != "":
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithRuntime)
 	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" ||

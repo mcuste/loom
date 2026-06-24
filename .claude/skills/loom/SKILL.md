@@ -47,12 +47,16 @@ tasks:
     model: ...               # optional task-level override
     effort: ...              # optional task-level override
     depends_on: [a, b]       # optional; explicit DAG edges
-    prompt: |                # exactly one of prompt or command; non-empty
+    prompt: |                # exactly one of prompt / prompt_file / command; non-empty
       Text with {{a}} and {{b}} placeholders.
+    # — OR —
+    prompt_file: prompts/step_a.txt   # relative path; inlined before validation
     # — OR —
     command: |               # runs sh -c instead of dispatching to a runtime
       echo "{{a}}" | wc -l
 ```
+
+`prompt_file` is a path to a plain-text file resolved relative to the workflow YAML's directory. The file is read and inlined before validation, so the run record stores the verbatim prompt text (not the path). Use it to keep long or shared prompts out of the YAML.
 
 Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(true)`). No `inputs:`, `output:`, `workflow:`, `with:` — sub-workflows aren't implemented.
 
@@ -67,7 +71,7 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 
 A task with `command:` runs `sh -c <substituted-command>` instead of dispatching to a runtime.
 
-**Discriminator rule** — exactly one of `prompt` or `command` must be set per task. Setting both or neither is rejected by the parser (`loom run check` surfaces the error before execution).
+**Discriminator rule** — exactly one of `prompt`, `prompt_file`, or `command` must be set per task (loop/for_each wrappers replace all three). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
 
 **Rejected fields on command tasks** — `runtime`, `model`, and `effort` at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected.
 

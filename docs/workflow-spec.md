@@ -97,8 +97,10 @@ prompt or a shell command) or a loop wrapper (a task carrying a `loop:` or
 
 ### LLM tasks vs. command tasks
 
-Every executable task sets **exactly one** of `prompt:` or `command:`. Setting
-both, or neither, is a hard validation error.
+Every executable task sets **exactly one** of `prompt:`, `prompt_file:`, or
+`command:`. Setting more than one, or none, is a hard validation error.
+`prompt_file:` is a path form of `prompt:` — it is inlined at parse time and
+is otherwise identical to an inline `prompt:` body.
 
 - A **prompt task** dispatches its (substituted) prompt to the effective
   runtime/model/effort. Its output is the model's text response.
@@ -122,10 +124,16 @@ placeholders) works identically.
 ### Task fields
 
 - **`id`** (all tasks, string): required, unique, `[A-Za-z0-9_]+`.
-- **`prompt`** (LLM, string): the text sent to the model. Mutually exclusive
-  with `command`. Non-empty.
-- **`command`** (shell, string): body run via `sh -c`. Mutually exclusive with
-  `prompt`. Non-empty.
+- **`prompt`** (LLM, string): the text sent to the model. Non-empty. Mutually
+  exclusive with `prompt_file` and `command` — set exactly one.
+- **`prompt_file`** (LLM, string): path to a plain-text file whose content is
+  used as the prompt. The path must be **relative** (absolute paths are
+  rejected) and is resolved relative to the directory containing the workflow
+  YAML. The file is read and inlined before validation, so the run record
+  embeds the verbatim prompt text (not the path). Mutually exclusive with
+  `prompt` and `command`.
+- **`command`** (shell, string): body run via `sh -c`. Non-empty. Mutually
+  exclusive with `prompt` and `prompt_file`.
 - **`description`** (all tasks, string): plan output only; never sent to a model.
 - **`runtime`** (LLM, enum): task-level override. Rejected on command tasks.
 - **`model`** (LLM, enum): task-level override. Rejected on command tasks.
@@ -148,7 +156,7 @@ placeholders) works identically.
 - **`for_each`** (wrapper, mapping): marks this task as a `for_each` loop. See
   [`for_each`](#for_each-iterate-a-finite-list).
 
-A single task sets exactly one of `prompt`, `command`, `loop`, or `for_each`.
+A single task sets exactly one of `prompt`, `prompt_file`, `command`, `loop`, or `for_each`.
 
 ---
 
@@ -655,7 +663,7 @@ order. Any failure stops the check and prints a precise message.
 4. Params: names valid and unique; `required` and `default` are mutually
    exclusive; defaults are scalar strings (no null); every declared param is
    referenced somewhere.
-5. Each task sets exactly one of `prompt` / `command` / `loop` / `for_each`.
+5. Each task sets exactly one of `prompt` / `prompt_file` / `command` / `loop` / `for_each`. `prompt_file` paths are relative and the referenced file must be readable.
 6. Command tasks set no task-level `runtime`/`model`/`effort` and no `schema`.
    Loop wrappers set none of the body-only fields.
 7. Every `depends_on` entry names a known task and appears at most once.

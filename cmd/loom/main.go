@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -140,9 +141,16 @@ func doRun(w io.Writer, path string, paramArgs []string) (err error) {
 	if err != nil {
 		return err
 	}
-	manifest, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	// Inline `prompt_file:` references relative to the workflow's directory, then
+	// parse the inlined bytes. The inlined manifest is what gets stored, so the
+	// run record stays self-contained even if the referenced files later change.
+	manifest, err := workflow.InlinePromptFiles(raw, filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	wf, err := workflow.Parse(manifest)
 	if err != nil {

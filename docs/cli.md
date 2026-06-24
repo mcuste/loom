@@ -135,7 +135,10 @@ so a crash mid-run still leaves a parseable file.
 
 The record embeds:
 
-- the **verbatim manifest** (byte-identical to what you ran);
+- the **verbatim manifest** (byte-identical to what you ran, with any
+  `prompt_file:` references already inlined as literal `prompt:` text — the
+  record is self-contained even when the external file is later changed or
+  deleted);
 - the resolved **params** and the **cwd** the run was invoked from;
 - a top-level **usage** total (`input_tokens`, `output_tokens`,
   `cache_read_tokens`, `total_cost_usd`), `task_count`, `status`, and timing;
