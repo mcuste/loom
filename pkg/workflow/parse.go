@@ -417,30 +417,43 @@ func ParseFile(path string) (*Workflow, error) {
 	return wf, nil
 }
 
-// InlinePromptFiles rewrites every task's `prompt_file:` key into an inline
-// `prompt:` key by reading the referenced file relative to baseDir.
+// InlinePromptFiles rewrites file-reference keys into their inline equivalents
+// by reading the referenced files relative to baseDir:
 //
-// It walks the YAML node tree and, for each mapping node that carries a
-// `prompt_file` key, enforces the 5-way body-form mutual exclusivity (a task
-// sets at most one of prompt, prompt_file, command, loop, for_each), rejects
-// absolute paths, reads the file at filepath.Join(baseDir, path), and replaces
-// the `prompt_file` key+value with a `prompt` whose literal-block value is the
-// file content. The walk covers nested loop bodies, so a `prompt_file` inside a
-// `loop:` or `for_each:` body is inlined the same way.
+//   - every task's `prompt_file:` becomes an inline `prompt:`, and
+//   - a top-level `system_prompt_file:` becomes an inline `system_prompt:`.
 //
-// The rewritten bytes are self-contained: Parse never sees `prompt_file`, so
+// For task prompts it walks the YAML node tree and, for each mapping node that
+// carries a `prompt_file` key, enforces the 5-way body-form mutual exclusivity
+// (a task sets at most one of prompt, prompt_file, command, loop, for_each),
+// rejects absolute paths, reads the file at filepath.Join(baseDir, path), and
+// replaces the `prompt_file` key+value with a `prompt` whose literal-block value
+// is the file content. The walk covers nested loop bodies, so a `prompt_file`
+// inside a `loop:` or `for_each:` body is inlined the same way.
+//
+// system_prompt is a workflow-level field, so `system_prompt_file` is inlined
+// only on the document's root mapping; one nested in a task is left for Parse's
+// known-fields check to reject. Setting both `system_prompt` and
+// `system_prompt_file` is rejected with ErrSystemPromptAndFileSet.
+//
+// The rewritten bytes are self-contained: Parse never sees either *_file key, so
 // KnownFields(true) strictness is preserved. InlinePromptFiles short-circuits
-// with no YAML round-trip when the raw bytes contain no `prompt_file` token.
+// with no YAML round-trip when the raw bytes contain no `prompt_file` token
+// (which also covers `system_prompt_file`, since it contains that substring).
 func InlinePromptFiles(data []byte, baseDir string) ([]byte, error) {
 	// Fast path: the overwhelming majority of workflows carry no `prompt_file`
 	// key, so skip the unmarshal + node walk + marshal round-trip entirely when
-	// the token is absent from the raw bytes.
+	// the token is absent from the raw bytes. `system_prompt_file` contains the
+	// `prompt_file` substring, so this guard catches it too.
 	if !bytes.Contains(data, []byte("prompt_file")) {
 		return data, nil
 	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	if err := inlineSystemPromptFile(&doc, baseDir); err != nil {
+		return nil, err
 	}
 	if err := inlinePromptFileNodes(&doc, baseDir); err != nil {
 		return nil, err
@@ -450,6 +463,62 @@ func InlinePromptFiles(data []byte, baseDir string) ([]byte, error) {
 		return nil, fmt.Errorf("yaml: %w", err)
 	}
 	return out, nil
+}
+
+// inlineSystemPromptFile rewrites a top-level `system_prompt_file:` key into an
+// inline `system_prompt:` by reading the referenced file relative to baseDir.
+//
+// Only the document's root mapping is considered: system_prompt is a
+// workflow-level field, so a `system_prompt_file` nested in a task mapping is
+// left untouched for Parse's known-fields check to reject in context. A workflow
+// that sets both `system_prompt` and `system_prompt_file` is rejected with
+// ErrSystemPromptAndFileSet. The rules otherwise mirror task prompt_file:
+// absolute paths are rejected, and a read failure surfaces as a
+// SystemPromptFileError wrapping the OS error.
+func inlineSystemPromptFile(doc *yaml.Node, baseDir string) error {
+	root := doc
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil
+		}
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	var keyNode, value *yaml.Node
+	hasInline := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		k, v := root.Content[i], root.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			continue
+		}
+		switch k.Value {
+		case "system_prompt_file":
+			keyNode, value = k, v
+		case "system_prompt":
+			hasInline = true
+		}
+	}
+	if keyNode == nil {
+		return nil
+	}
+	if hasInline {
+		return ErrSystemPromptAndFileSet
+	}
+	if filepath.IsAbs(value.Value) {
+		return &AbsoluteSystemPromptFilePathError{Path: value.Value}
+	}
+	content, err := os.ReadFile(filepath.Join(baseDir, value.Value))
+	if err != nil {
+		return &SystemPromptFileError{Path: value.Value, Err: err}
+	}
+	keyNode.Value = "system_prompt"
+	value.Kind = yaml.ScalarNode
+	value.Tag = "!!str"
+	value.Style = yaml.LiteralStyle
+	value.Value = string(content)
+	return nil
 }
 
 // inlinePromptFileNodes recurses the node tree, inlining `prompt_file` in every
@@ -559,6 +628,31 @@ func (e *PromptFileError) Error() string {
 }
 
 func (e *PromptFileError) Unwrap() error { return e.Err }
+
+// AbsoluteSystemPromptFilePathError reports a top-level `system_prompt_file:`
+// whose value is an absolute path. Only paths relative to the workflow file's
+// own directory are permitted, matching the task-level prompt_file rule.
+type AbsoluteSystemPromptFilePathError struct {
+	Path string
+}
+
+func (e *AbsoluteSystemPromptFilePathError) Error() string {
+	return fmt.Sprintf("system_prompt_file %q must be a relative path", e.Path)
+}
+
+// SystemPromptFileError reports a top-level `system_prompt_file:` that could not
+// be read (file missing, permission denied, or any other I/O failure). Err
+// wraps the underlying OS error so errors.Is(err, os.ErrNotExist) works.
+type SystemPromptFileError struct {
+	Path string
+	Err  error
+}
+
+func (e *SystemPromptFileError) Error() string {
+	return fmt.Sprintf("read system_prompt_file %q: %v", e.Path, e.Err)
+}
+
+func (e *SystemPromptFileError) Unwrap() error { return e.Err }
 
 // TaskBodyConflictError reports a task that sets more than one of the five
 // mutually exclusive body forms: prompt, prompt_file, command, loop, for_each.
@@ -712,6 +806,10 @@ var (
 	// ErrPromptAndCommandSet reports a task that sets both `prompt:` and
 	// `command:`. The two are mutually exclusive.
 	ErrPromptAndCommandSet = errors.New("task sets both prompt and command")
+	// ErrSystemPromptAndFileSet reports a workflow that sets both the inline
+	// `system_prompt:` and `system_prompt_file:`. The two are mutually exclusive:
+	// system_prompt_file is just the file-backed spelling of system_prompt.
+	ErrSystemPromptAndFileSet = errors.New("workflow sets both system_prompt and system_prompt_file")
 	// ErrShellTaskWithRuntime reports a shell task (one with `command:`) that
 	// also sets task-level `runtime:`, `model:`, or `effort:`. These fields are
 	// meaningless for shell tasks and rejected at the task level; workflow-level
