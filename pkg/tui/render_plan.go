@@ -235,21 +235,29 @@ func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
 
 // richTaskRow renders a single indented task row shared by the wave and loop
 // listings: a shell task shows its command, an LLM task its effective
-// runtime/model/effort. Both surface incoming deps.
+// runtime/model/effort, a sub-workflow task its linked ref and child-task count
+// followed by its resolved child tasks indented one level deeper. All surface
+// incoming deps.
 func richTaskRow(wf *workflow.Workflow, id workflow.TaskID, idWidth int) string {
 	t := wf.ByID(id)
 	if t == nil {
 		return ""
 	}
-	if t.IsShell() {
-		cmd := t.Command
-		if len(cmd) > 60 {
-			cmd = cmd[:60] + "…"
-		}
-		return fmt.Sprintf("    %-*s  kind=shell  cmd=%q  deps=%s\n",
-			idWidth, id, cmd, depsList(t.DependsOn))
+	row := fmt.Sprintf("    %-*s  %s  deps=%s\n", idWidth, id, planTaskCols(wf, t), depsList(t.DependsOn))
+	if !t.IsSubWorkflow() {
+		return row
 	}
-	rt, m, e := wf.Effective(t)
-	return fmt.Sprintf("    %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
-		idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+	child := wf.Subs[id]
+	if child == nil {
+		return row
+	}
+	var b strings.Builder
+	b.WriteString(row)
+	cw := childIDWidth(child)
+	for i := range child.Tasks {
+		ct := &child.Tasks[i]
+		b.WriteString(fmt.Sprintf("        %-*s  %s  deps=%s\n",
+			cw, ct.ID, planTaskCols(child, ct), depsList(ct.DependsOn)))
+	}
+	return b.String()
 }

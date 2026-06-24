@@ -622,6 +622,9 @@ func (m *browserModel) detailLines(width int) []string {
 	} else if tr.Prompt != "" {
 		out = append(out, sectionStyle.Render("── prompt ──"))
 		out = append(out, wrapText(tr.Prompt, width)...)
+	} else if t := m.taskFromManifest(s.id); t != nil && t.IsSubWorkflow() {
+		out = append(out, sectionStyle.Render("── sub-workflow ──"))
+		out = append(out, wrapText("workflow="+t.Workflow, width)...)
 	}
 	out = append(out, "", sectionStyle.Render("── output ──"))
 	if strings.TrimSpace(tr.Output) == "" {

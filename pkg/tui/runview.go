@@ -85,9 +85,17 @@ func shortID(runID string) string {
 	return runID
 }
 
-// taskRouting renders a task record's runtime facts for a summary line: shell
-// tasks read "(shell)", LLM tasks "model/effort" (effort omitted when unset).
-func taskRouting(tr store.TaskRecord) string {
+// taskRouting renders a task record's runtime facts for a summary line:
+// sub-workflow tasks read "(subworkflow <ref>)", shell tasks "(shell)", LLM
+// tasks "model/effort" (effort omitted when unset). The parsed manifest (nil
+// when absent or no longer parsing) supplies the sub-workflow ref, which the
+// record alone does not carry.
+func taskRouting(wf *workflow.Workflow, tr store.TaskRecord) string {
+	if wf != nil {
+		if t := wf.ByID(workflow.TaskID(tr.ID)); t != nil && t.IsSubWorkflow() {
+			return "(subworkflow " + t.Workflow + ")"
+		}
+	}
 	if tr.Command != "" {
 		return "(shell)"
 	}
@@ -176,7 +184,7 @@ func ShowRun(w io.Writer, rec *store.RunRecord, full bool) error {
 		}
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t$%.6f%s\n",
 			statusGlyph(tr.Status, sym), tr.ID+iterSuffix(tr.Iteration),
-			taskRouting(tr), humanDur(tr.ElapsedMs), tr.Usage.TotalCostUSD, note)
+			taskRouting(wf, tr), humanDur(tr.ElapsedMs), tr.Usage.TotalCostUSD, note)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

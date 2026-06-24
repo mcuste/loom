@@ -229,18 +229,8 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 			}
 			for _, id := range lg.Members {
 				t := wf.ByID(id)
-				if t.IsShell() {
-					cmd := t.Command
-					if len(cmd) > 60 {
-						cmd = cmd[:60] + "…"
-					}
-					ew.printf("      - %-*s  kind=shell  cmd=%q  deps=%s\n",
-						bodyWidth, id, cmd, depsList(t.DependsOn))
-					continue
-				}
-				rt, m, e := wf.Effective(t)
-				ew.printf("      - %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s\n",
-					bodyWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn))
+				ew.printf("      - %-*s  %s  deps=%s\n",
+					bodyWidth, id, planTaskCols(wf, t), depsList(t.DependsOn))
 			}
 		}
 	}
@@ -256,17 +246,17 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 			suffix += "  (seeded; using stored output)"
 		}
 		step++
-		if t.IsShell() {
-			cmd := t.Command
-			if len(cmd) > 60 {
-				cmd = cmd[:60] + "…"
+		ew.printf("  %2d. %-*s  %s  deps=%s%s\n",
+			step, idWidth, id, planTaskCols(wf, t), depsList(t.DependsOn), suffix)
+		if t.IsSubWorkflow() {
+			if child := wf.Subs[id]; child != nil {
+				cw := childIDWidth(child)
+				for i := range child.Tasks {
+					ct := &child.Tasks[i]
+					ew.printf("      - %-*s  %s  deps=%s\n",
+						cw, ct.ID, planTaskCols(child, ct), depsList(ct.DependsOn))
+				}
 			}
-			ew.printf("  %2d. %-*s  kind=shell  cmd=%q  deps=%s%s\n",
-				step, idWidth, id, cmd, depsList(t.DependsOn), suffix)
-		} else {
-			rt, m, e := wf.Effective(t)
-			ew.printf("  %2d. %-*s  runtime=%-12s  model=%-8s  effort=%-7s  deps=%s%s\n",
-				step, idWidth, id, orDash(string(rt)), orDash(string(m)), orDash(string(e)), depsList(t.DependsOn), suffix)
 		}
 		emitLoops(oi)
 	}
@@ -296,6 +286,47 @@ func loopDescriptor(lg workflow.LoopGroup) string {
 	return fmt.Sprintf("%s  max=%d", loopConvergence(lg), lg.Max)
 }
 
+// subworkflowDescriptor renders a sub-workflow task's plan summary: the linked
+// ref and, once the child is resolved into wf.Subs, its direct task count.
+func subworkflowDescriptor(wf *workflow.Workflow, t *workflow.Task) string {
+	if child := wf.Subs[t.ID]; child != nil {
+		return fmt.Sprintf("workflow=%s  (%d task%s)", t.Workflow, len(child.Tasks), plural(len(child.Tasks)))
+	}
+	return fmt.Sprintf("workflow=%s", t.Workflow)
+}
+
+// planTaskCols renders the kind-specific middle columns of a plan row (between
+// the id and the trailing deps): a shell task shows its command, a sub-workflow
+// task its linked ref and child-task count, an LLM task its effective
+// runtime/model/effort triple.
+func planTaskCols(wf *workflow.Workflow, t *workflow.Task) string {
+	switch {
+	case t.IsShell():
+		cmd := t.Command
+		if len(cmd) > 60 {
+			cmd = cmd[:60] + "…"
+		}
+		return fmt.Sprintf("kind=shell  cmd=%q", cmd)
+	case t.IsSubWorkflow():
+		return "kind=subworkflow  " + subworkflowDescriptor(wf, t)
+	default:
+		rt, m, e := wf.Effective(t)
+		return fmt.Sprintf("runtime=%-12s  model=%-8s  effort=%-7s", orDash(string(rt)), orDash(string(m)), orDash(string(e)))
+	}
+}
+
+// childIDWidth returns the widest task id among a resolved child workflow's
+// direct tasks, for aligning the indented child rows under a sub-workflow entry.
+func childIDWidth(child *workflow.Workflow) int {
+	w := 0
+	for i := range child.Tasks {
+		if n := len(child.Tasks[i].ID); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
 // Hooks serializes concurrent OnStart/OnFinish writes behind a mutex so output
 // lines never interleave mid-write. The denominator is RunMeta.Total, set by a
 // prior Header call: invoking Hooks() before Header() renders every line as
@@ -311,9 +342,12 @@ func (p *plainRenderer) Hooks() executor.Hooks {
 			n := p.step.Add(1)
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			if t.IsShell() {
+			switch {
+			case t.IsShell():
 				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (shell)%s\n", n, p.total, t.ID, iterSuffix(iter))
-			} else {
+			case t.IsSubWorkflow():
+				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (subworkflow %s)%s\n", n, p.total, t.ID, t.Workflow, iterSuffix(iter))
+			default:
 				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (%s/%s%s)%s\n", n, p.total, t.ID, rt, m, effortSuffix(e), iterSuffix(iter))
 			}
 		},

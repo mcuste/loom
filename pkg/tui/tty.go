@@ -29,6 +29,8 @@ type taskStartMsg struct {
 	model    runtime.Model
 	effort   runtime.Effort
 	shell    bool
+	sub      bool
+	ref      string
 	retrying bool
 }
 
@@ -59,6 +61,8 @@ type liveTask struct {
 	model    runtime.Model
 	effort   runtime.Effort
 	shell    bool
+	sub      bool
+	ref      string
 	state    taskState
 	retrying bool
 }
@@ -174,6 +178,8 @@ func (m *runModel) onStart(msg taskStartMsg) {
 		model:    msg.model,
 		effort:   msg.effort,
 		shell:    msg.shell,
+		sub:      msg.sub,
+		ref:      msg.ref,
 		state:    stateRunning,
 		retrying: msg.retrying,
 	}
@@ -272,10 +278,14 @@ func (m *runModel) statusBar() string {
 
 // descriptor renders the runtime facts shown after a running task's id.
 func descriptor(t *liveTask) string {
-	if t.shell {
+	switch {
+	case t.shell:
 		return "(shell)"
+	case t.sub:
+		return fmt.Sprintf("(subworkflow %s)", t.ref)
+	default:
+		return fmt.Sprintf("(%s/%s%s)", t.rt, t.model, effortSuffix(t.effort))
 	}
-	return fmt.Sprintf("(%s/%s%s)", t.rt, t.model, effortSuffix(t.effort))
 }
 
 // finishLine builds the permanent scrollback summary for a finished task,
@@ -420,7 +430,7 @@ func (t *ttyRenderer) Hooks() executor.Hooks {
 		// looped task's running and finish lines with its pass number; iter is
 		// 0 for a non-looped task, where the badge is empty.
 		OnStart: func(task workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort) {
-			send(taskStartMsg{id: task.ID, iter: iter, rt: rt, model: m, effort: e, shell: task.IsShell()})
+			send(taskStartMsg{id: task.ID, iter: iter, rt: rt, model: m, effort: e, shell: task.IsShell(), sub: task.IsSubWorkflow(), ref: task.Workflow})
 		},
 		OnFinish: func(task workflow.Task, iter int, res executor.TaskResult, err error) {
 			send(taskFinishMsg{id: task.ID, iter: iter, res: res, err: err, shell: task.IsShell()})
