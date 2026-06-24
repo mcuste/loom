@@ -214,3 +214,37 @@ func TestPlainRenderer_HooksRenderProgressLines(t *testing.T) {
 		})
 	}
 }
+
+// TestPlainRenderer_HooksGrowDenominatorAcrossLoopPasses pins that a for_each
+// fan-out keeps the [n/total] denominator honest: RunMeta.Total counts the loop
+// node once (the iter-1 pass), so each extra pass (iter >= 2) grows total. A plan
+// of {setup, analyze-loop, synthesize} expanding to three analyze passes ends at
+// [5/5], never [5/3].
+func TestPlainRenderer_HooksGrowDenominatorAcrossLoopPasses(t *testing.T) {
+	analyze := workflow.Task{ID: "analyze", Prompt: "hi"}
+	setup := workflow.Task{ID: "setup", Command: "true"}
+	synth := workflow.Task{ID: "synthesize", Prompt: "hi"}
+
+	var buf bytes.Buffer
+	r := tui.New(&buf)
+	r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
+	buf.Reset()
+
+	h := r.Hooks()
+	h.OnStart(setup, 0, "", "", "")
+	h.OnStart(analyze, 1, "claude-code", "sonnet", "high")
+	h.OnStart(analyze, 2, "claude-code", "sonnet", "high")
+	h.OnStart(analyze, 3, "claude-code", "sonnet", "high")
+	h.OnStart(synth, 0, "claude-code", "opus", "high")
+
+	got := buf.String()
+	for _, want := range []string{
+		"[1/3] setup (shell)",
+		"[4/5] analyze (claude-code/sonnet/high) iter 3",
+		"[5/5] synthesize (claude-code/opus/high)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("progress output missing %q, got:\n%s", want, got)
+		}
+	}
+}

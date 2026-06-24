@@ -342,6 +342,12 @@ func (p *plainRenderer) Hooks() executor.Hooks {
 			n := p.step.Add(1)
 			p.mu.Lock()
 			defer p.mu.Unlock()
+			// A for_each fans one task node into many passes; total counts the node
+			// once (the iter-1 pass), so each extra pass (iter >= 2) grows the
+			// denominator to keep [n/total] honest as the loop expands.
+			if iter >= 2 {
+				p.total++
+			}
 			switch {
 			case t.IsShell():
 				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (shell)%s\n", n, p.total, t.ID, iterSuffix(iter))

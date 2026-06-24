@@ -99,6 +99,33 @@ func TestRunModel_StatusBarShowsCompletedTotals(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(waitWindow))
 }
 
+// TestRunModel_StatusBarGrowsDenominatorAcrossLoopPasses pins that a for_each
+// fan-out keeps done/total honest: RunMeta.Total counts the loop node once (the
+// iter-1 pass), so every extra pass (iter >= 2) grows the denominator. A plan of
+// {setup, analyze-loop, synthesize} that expands to three analyze passes must end
+// at 5/5, not overshoot to 5/3.
+func TestRunModel_StatusBarGrowsDenominatorAcrossLoopPasses(t *testing.T) {
+	m := newRunModel(RunMeta{Total: 3}, func() {})
+
+	run := func(id workflow.TaskID, iter int) {
+		m.onStart(taskStartMsg{id: id, iter: iter, rt: "claude-code", model: "sonnet"})
+		m.onFinish(taskFinishMsg{id: id, iter: iter, res: executor.TaskResult{TaskID: id}})
+	}
+
+	run("setup", 0)
+	run("analyze", 1)
+	run("analyze", 2)
+	run("analyze", 3)
+	run("synthesize", 0)
+
+	if m.total != 5 {
+		t.Fatalf("total = %d, want 5 (3 static nodes + 2 extra loop passes)", m.total)
+	}
+	if got := m.statusBar(); !strings.Contains(got, "5/5 done") {
+		t.Fatalf("status bar = %q, want it to contain %q", got, "5/5 done")
+	}
+}
+
 // TestRunModel_ViewBoundsHeightWithOverflow pins the height-overflow branch in
 // View: when more tasks run than fit in the height budget, the region is capped
 // and a single "… N more running" line accounts for the remainder.

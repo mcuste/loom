@@ -170,6 +170,12 @@ func (m *runModel) onStart(msg taskStartMsg) {
 		t.retrying = msg.retrying
 		return
 	}
+	// A for_each fans one task node into many passes; RunMeta.Total counts the
+	// node once (the iter-1 pass), so each extra pass (iter >= 2) grows the
+	// denominator to keep done/total honest as the loop expands.
+	if msg.iter >= 2 {
+		m.total++
+	}
 	m.order = append(m.order, msg.id)
 	m.tasks[msg.id] = &liveTask{
 		id:       msg.id,
