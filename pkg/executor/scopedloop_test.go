@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
@@ -460,5 +461,59 @@ tasks:
 	var be *executor.BudgetExceededError
 	if !errors.As(err, &be) {
 		t.Fatalf("Run error = %v, want *BudgetExceededError", err)
+	}
+}
+
+// TestRun_ScopedLoop_IndependentMembersRunConcurrently pins that loop-body
+// members with no depends_on between them dispatch in parallel within a pass,
+// exactly like independent top-level tasks: a barrier that blocks every member
+// until all have entered Run completes only under concurrent dispatch. If the
+// loop body were serialized, only one member would reach the barrier and the
+// test would time out. seed is a shell task so it bypasses the barrier runtime;
+// only the two independent members a and b arrive.
+func TestRun_ScopedLoop_IndependentMembersRunConcurrently(t *testing.T) {
+	rt, barrier := newBarrier(t)
+	src := `
+name: wf
+runtime: ` + rt + `
+model: m1
+tasks:
+  - id: seed
+    command: "true"
+  - id: work
+    loop:
+      until_empty: a
+      max: 1
+      tasks:
+        - id: a
+          prompt: A
+        - id: b
+          prompt: B
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.Run(ctx, wf, executor.Hooks{}, executor.Options{})
+		done <- err
+	}()
+
+	for i := range 2 {
+		select {
+		case <-barrier.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d/2 loop members reached Run before timeout: loop body is serial", i)
+		}
+	}
+	close(barrier.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }

@@ -171,12 +171,12 @@ tasks:
 
 Rules (all surfaced by `loom run check`):
 
-- **Discriminator** — a task sets exactly one of `prompt`, `command`, `loop`, or `for_each` (`loop:` and `for_each:` are sibling scoped-block forms; a task setting both is rejected). A `loop:`/`for_each:` task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
+- **Discriminator** — a task sets exactly one of `prompt`, `command`, `loop`, `for_each`, or `for_each_parallel` (`loop:`, `for_each:`, and `for_each_parallel:` are sibling scoped-block forms; a task setting more than one is rejected). A loop-wrapper task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
 - **Loop id** — the wrapper task id; `[A-Za-z0-9_]+`, unique, and distinct from every other task id and param name.
 - **Convergence** — exactly one of `until_empty` or `until` per loop. `until_empty` names a body member whose empty trimmed output ends the loop; `until` is a `when`-style expression that may reference **only** members of the same loop.
 - **`max`** — required and `>= 1`; bounds iterations even if the target never converges.
 - **Body** — `tasks:` is non-empty and uses the identical task schema (prompt/command, model/effort, etc.). Each body task carries its loop id; a task belongs to at most one loop.
-- **Connected** — the body must form a single connected subgraph via its internal edges.
+- **DAG body** — the body is an ordinary DAG; members need not be connected to one another. Members with no `depends_on` between them run **in parallel within a pass**, exactly like independent top-level tasks. `depends_on` edges between members order them within a pass.
 
 ### `for_each:` block — iterate a finite list
 
@@ -202,6 +202,28 @@ tasks:
 - **`as`** — the loop variable; `[A-Za-z0-9_]+`, and distinct from every task id and param name. Reference it as `{{as}}` in any body member's prompt, command, or sub-workflow `with:` value; it is bound per iteration and **exempt from `depends_on`** (it is not a task output).
 - **No `until_*` / `max`** — the list length fixes the iteration count. An **empty list runs zero iterations**: the members never run and the loop closes their gates immediately, so an exit consumer sees empty output (this composes with loop-until-dry: nothing to process reads as drained).
 - **Sequential** — passes run in list order; `{{prev.<member>}}` carries the prior pass's output forward exactly as in a `loop:`. A body member's published output is the **final** iteration's value (loop semantics), not a join across iterations.
+
+### `for_each_parallel:` block — iterate concurrently
+
+`for_each_parallel:` is the concurrent spelling of `for_each:`: an identical `in`/`as`/`tasks` block, but every element's pass runs **at the same time** instead of in list order. Reach for it to fan a body out over independent items (probe N services, fix N bugs) where the passes do not depend on each other.
+
+```yaml
+tasks:
+  - id: fan
+    for_each_parallel:
+      in: '{{discover}}'
+      as: item
+      tasks:
+        - id: handle
+          prompt: process {{item}}
+```
+
+It shares every `for_each:` rule (static/dynamic `in`, the `as` variable, required non-empty `tasks`, empty-list-runs-nothing, the entry/internal/exit edges) with two differences:
+
+- **Isolated passes** — each pass runs over its own copy of the member outputs, so one item never observes another's results; a multi-member body whose tasks reference each other (`b` reads `{{a}}`) resolves those references within the same pass.
+- **No `{{prev.<id>}}`** — the passes have no ordering, so there is no prior iteration to read; a `prev` reference inside a parallel body fails `loom run check`.
+
+Because the passes race, **which pass's value an exit consumer reads for a member is unspecified** — a downstream task needing a specific element must reference that element, not the loop member. Budget and usage stay global across all passes.
 
 ### Edge semantics
 

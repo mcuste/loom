@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,14 +62,14 @@ type barrierRuntime struct {
 	release chan struct{}
 }
 
-func (barrierRuntime) Validate(req runtime.Request) error {
+func (*barrierRuntime) Validate(req runtime.Request) error {
 	if req.Model == "" {
 		return runtime.ErrMissingModel
 	}
 	return nil
 }
 
-func (b barrierRuntime) Run(ctx context.Context, req runtime.Request) (runtime.Response, error) {
+func (b *barrierRuntime) Run(ctx context.Context, req runtime.Request) (runtime.Response, error) {
 	select {
 	case b.entered <- struct{}{}:
 	case <-ctx.Done():
@@ -101,9 +105,23 @@ func (r *systemPromptCaptureRuntime) Run(_ context.Context, req runtime.Request)
 	return runtime.Response{Output: req.Prompt}, nil
 }
 
-var execBarrier = barrierRuntime{
-	entered: make(chan struct{}, 16),
-	release: make(chan struct{}),
+// barrierSeq makes each barrierRuntime registration name unique within a test
+// binary run, mirroring flakySeq: the runtime registry has no deregister and
+// panics on a duplicate name, so a per-test value needs a distinct key.
+var barrierSeq atomic.Uint64
+
+// newBarrier registers a fresh barrierRuntime under a name unique to t and
+// returns the runtime name and the stub. A per-test value means no channel is
+// ever shared across tests or closed twice under `go test -count=N`.
+func newBarrier(t *testing.T) (string, *barrierRuntime) {
+	t.Helper()
+	b := &barrierRuntime{
+		entered: make(chan struct{}, 16),
+		release: make(chan struct{}),
+	}
+	name := "exec-barrier-" + t.Name() + "-" + strconv.FormatUint(barrierSeq.Add(1), 10)
+	runtime.Register(runtime.Name(name), b)
+	return name, b
 }
 
 var execSysCapture = &systemPromptCaptureRuntime{}
@@ -111,7 +129,6 @@ var execSysCapture = &systemPromptCaptureRuntime{}
 func init() {
 	runtime.Register("exec-echo", echoRuntime{})
 	runtime.Register("exec-err", errRuntime{})
-	runtime.Register("exec-barrier", execBarrier)
 	runtime.Register("exec-syscapture", execSysCapture)
 }
 
@@ -171,7 +188,10 @@ tasks:
     prompt: |
       {{a}}
 `
-	wf, _ := workflow.Parse([]byte(src))
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
 
 	var events []string
 	hooks := executor.Hooks{
@@ -227,9 +247,10 @@ tasks:
 // allowed to return. If the executor were serial, only one task would reach
 // the barrier and the test would time out.
 func TestRunIndependentTasksAreConcurrent(t *testing.T) {
+	rt, barrier := newBarrier(t)
 	src := `
 name: wf
-runtime: exec-barrier
+runtime: ` + rt + `
 model: m1
 tasks:
   - id: a
@@ -244,20 +265,25 @@ tasks:
 		t.Fatalf("Parse: %v", err)
 	}
 
+	// Cancel the background Run on any early return so the goroutine unwinds
+	// (barrierRuntime.Run observes ctx.Done) instead of leaking past the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+		_, err := executor.Run(ctx, wf, executor.Hooks{}, executor.Options{})
 		done <- err
 	}()
 
 	for i := range 3 {
 		select {
-		case <-execBarrier.entered:
+		case <-barrier.entered:
 		case <-time.After(2 * time.Second):
-			t.Fatalf("only %d/3 tasks reached Run before timeout — executor is serial", i)
+			t.Fatalf("only %d/3 tasks reached Run before timeout: executor is serial", i)
 		}
 	}
-	close(execBarrier.release)
+	close(barrier.release)
 
 	if err := <-done; err != nil {
 		t.Fatalf("Run: %v", err)
@@ -436,10 +462,17 @@ func TestShellFailure(t *testing.T) {
 // TestShellContextCancel verifies that cancelling the context interrupts a
 // long-running shell command and returns an error within a short deadline.
 func TestShellContextCancel(t *testing.T) {
+	// The command touches a marker file the instant the subprocess starts, then
+	// execs sleep so the shell is replaced by a single long-lived process. The
+	// test waits for the marker before cancelling, a real ready signal rather
+	// than a fixed sleep that can fire before the fork. `exec` matters: a
+	// compound `touch; sleep` would leave the shell parenting an orphaned sleep
+	// that keeps the stdout pipe open, so cmd.Wait could not return on cancel.
+	marker := filepath.Join(t.TempDir(), "started")
 	wf := &workflow.Workflow{
 		ID: "wf",
 		Tasks: []workflow.Task{
-			{ID: "a", Command: "sleep 60"},
+			{ID: "a", Command: "touch " + marker + "; exec sleep 60"},
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -450,8 +483,18 @@ func TestShellContextCancel(t *testing.T) {
 		done <- err
 	}()
 
-	// Give the process a moment to start, then cancel.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the subprocess has actually started before cancelling.
+	startDeadline := time.After(2 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case <-startDeadline:
+			t.Fatal("subprocess did not start within 2s")
+		case <-time.After(time.Millisecond):
+		}
+	}
 	cancel()
 
 	select {

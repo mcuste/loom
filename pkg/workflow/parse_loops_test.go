@@ -300,10 +300,11 @@ tasks:
 	}
 }
 
-// TestParse_RejectsDisconnectedLoopSubgraph pins that a loop whose members share
-// no edge (the induced subgraph is not weakly connected) is rejected with
-// DisconnectedLoopError.
-func TestParse_RejectsDisconnectedLoopSubgraph(t *testing.T) {
+// TestParse_AcceptsDisconnectedLoopSubgraph pins that a loop body is an ordinary
+// DAG: members sharing no edge (the induced subgraph is not connected) are
+// accepted, so independent members run in parallel within a pass just like
+// independent top-level tasks.
+func TestParse_AcceptsDisconnectedLoopSubgraph(t *testing.T) {
 	src := `
 name: wf_dc
 runtime: test-rt
@@ -321,13 +322,15 @@ tasks:
         - id: b
           prompt: B
 `
-	_, err := workflow.Parse([]byte(src))
-	var got *workflow.DisconnectedLoopError
-	if !errors.As(err, &got) {
-		t.Fatalf("errors.As DisconnectedLoopError failed; err = %v", err)
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse rejected a disconnected loop body: %v", err)
 	}
-	if got.Loop != "work" {
-		t.Errorf("DisconnectedLoopError.Loop = %q, want work", got.Loop)
+	if len(wf.Loops) != 1 {
+		t.Fatalf("len(Loops) = %d, want 1", len(wf.Loops))
+	}
+	if want := []workflow.TaskID{"a", "b"}; !slices.Equal(wf.Loops[0].Members, want) {
+		t.Errorf("Members = %v, want %v", wf.Loops[0].Members, want)
 	}
 }
 
@@ -359,10 +362,10 @@ loops:
 	}
 }
 
-// TestParse_RejectsPartiallyConnectedLoopSubgraph pins the partial-connectivity
-// failure: a 3-member loop where two members share an edge and the third is
-// isolated is still rejected with DisconnectedLoopError.
-func TestParse_RejectsPartiallyConnectedLoopSubgraph(t *testing.T) {
+// TestParse_AcceptsPartiallyConnectedLoopSubgraph pins that a mixed body is also
+// fine: a 3-member loop where two members share an edge (a <- b) and the third
+// (c) is independent is accepted. b runs after a; c runs in parallel with both.
+func TestParse_AcceptsPartiallyConnectedLoopSubgraph(t *testing.T) {
 	src := `
 name: wf_pc3
 runtime: test-rt
@@ -383,13 +386,12 @@ tasks:
         - id: c
           prompt: C
 `
-	_, err := workflow.Parse([]byte(src))
-	var got *workflow.DisconnectedLoopError
-	if !errors.As(err, &got) {
-		t.Fatalf("errors.As DisconnectedLoopError failed; err = %v", err)
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse rejected a partially connected loop body: %v", err)
 	}
-	if got.Loop != "work" {
-		t.Errorf("DisconnectedLoopError.Loop = %q, want work", got.Loop)
+	if want := []workflow.TaskID{"a", "b", "c"}; !slices.Equal(wf.Loops[0].Members, want) {
+		t.Errorf("Members = %v, want %v", wf.Loops[0].Members, want)
 	}
 }
 

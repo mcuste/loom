@@ -108,6 +108,15 @@ type Usage struct {
 	TotalCostUSD    float64 // not surfaced by every runtime
 }
 
+// Add folds other into the receiver, accumulating a running total across task
+// executions.
+func (u *Usage) Add(other Usage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.TotalCostUSD += other.TotalCostUSD
+}
+
 // Response is the output of a single task execution.
 type Response struct {
 	Output string

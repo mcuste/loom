@@ -13,11 +13,13 @@ import (
 // runTask needs for a budget-free, condition-free task.
 func newTrivialState(id workflow.TaskID) *runState {
 	var mu sync.Mutex
+	rep := &Report{
+		Tasks:   make([]TaskResult, 0),
+		Outputs: make(map[workflow.TaskID]string),
+	}
 	return &runState{
-		rep: &Report{
-			Tasks:   make([]TaskResult, 0),
-			Outputs: make(map[workflow.TaskID]string),
-		},
+		rep:         rep,
+		outputs:     rep.Outputs,
 		succeeded:   make(map[workflow.TaskID]bool),
 		skipped:     make(map[workflow.TaskID]bool),
 		gates:       map[workflow.TaskID]chan struct{}{id: make(chan struct{})},

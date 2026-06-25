@@ -22,6 +22,7 @@ parser (`pkg/workflow`) and surfaced by `loom run check` before anything runs.
 - [Sub-workflows](#sub-workflows)
   - [`loop`: converge until a target drains](#loop-converge-until-a-target-drains)
   - [`for_each`: iterate a finite list](#for_each-iterate-a-finite-list)
+  - [`for_each_parallel`: iterate concurrently](#for_each_parallel-iterate-concurrently)
   - [Loop edge semantics](#loop-edge-semantics)
   - [`prev.<id>`: read the prior iteration](#previd-read-the-prior-iteration)
 - [Validation reference](#validation-reference)
@@ -165,6 +166,9 @@ placeholders) works identically.
   [`loop`](#loop-converge-until-a-target-drains).
 - **`for_each`** (wrapper, mapping): marks this task as a `for_each` loop. See
   [`for_each`](#for_each-iterate-a-finite-list).
+- **`for_each_parallel`** (wrapper, mapping): like `for_each`, but runs the body
+  once per element concurrently. See
+  [`for_each_parallel`](#for_each_parallel-iterate-concurrently).
 - **`workflow`** (sub-workflow, string): a registry name or path of another
   workflow to run as a leaf. Rejected alongside any other body form, and
   task-level `runtime:`/`model:`/`effort:` are rejected (the child brings its
@@ -174,7 +178,7 @@ placeholders) works identically.
   each value is substituted against the parent context first.
 
 A single task sets exactly one of `prompt`, `prompt_file`, `command`, `loop`,
-`for_each`, or `workflow`.
+`for_each`, `for_each_parallel`, or `workflow`.
 
 ---
 
@@ -531,7 +535,8 @@ forms, both declared **inline as a task** carrying a block instead of a
 
 - `loop:` — re-runs the body **until a convergence target drains** (a
   while-style loop with a hard iteration cap).
-- `for_each:` — runs the body **once per element** of a finite list.
+- `for_each:` — runs the body **once per element** of a finite list,
+  sequentially. `for_each_parallel:` is the same, run concurrently.
 
 The wrapper task's `id` is the loop id, and the loop renders in the execution
 flow at its position. There is **no top-level `loops:` block** (a stray one is
@@ -541,12 +546,14 @@ A loop-wrapper task may carry only its `id`, `description`, and the loop block.
 It must **not** set `prompt`/`command`, runtime knobs (`runtime`/`model`/
 `effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `schema`,
 `retry`, `budget`, `cache`) — those belong to the body tasks. A task setting
-both `loop:` and `for_each:` is rejected.
+more than one of `loop:`, `for_each:`, and `for_each_parallel:` is rejected.
 
 The loop id shares the global namespace: it must be unique and distinct from
-every task id and param name. The loop body (`tasks:`) is non-empty, uses the
-identical task schema, and must form a single **weakly connected** subgraph via
-its internal edges. Each body task belongs to exactly one loop.
+every task id and param name. The loop body (`tasks:`) is non-empty and uses the
+identical task schema. It is otherwise an ordinary DAG: members carry their own
+`depends_on` edges and **need not be connected to one another**, so independent
+members run **in parallel within a pass**, exactly like independent top-level
+tasks. Each body task belongs to exactly one loop.
 
 ### `loop`: converge until a target drains
 
@@ -635,6 +642,39 @@ There is no `until_*` or `max` — the list length fixes the iteration count. An
 their gates immediately, and an exit consumer sees empty output. Passes run in
 list order; a body member's published output is the **final** iteration's value
 (not a join across iterations).
+
+### `for_each_parallel`: iterate concurrently
+
+`for_each_parallel` is the concurrent spelling of `for_each`: an identical
+`in` / `as` / `tasks` block, but every element's pass runs **at the same time**
+instead of in list order. Use it to fan a body out over independent items.
+
+```yaml
+tasks:
+  - id: fan
+    for_each_parallel:
+      in: '{{discover}}'
+      as: item
+      tasks:
+        - id: handle
+          prompt: "Process {{item}}."
+```
+
+It shares every `for_each` rule (static or dynamic `in`, the `as` loop variable,
+the required non-empty `tasks`, empty-list-runs-nothing, the entry/internal/exit
+edge semantics) with two differences:
+
+- Each pass runs over an **isolated copy** of the member outputs, so one item's
+  body never observes another's results. A multi-member body whose tasks
+  reference each other (`b` reads `{{a}}`) resolves those references **within the
+  same pass**.
+- **`{{prev.<id>}}` is rejected** inside a parallel body: the passes have no
+  ordering, so there is no prior iteration to read (`loom run check` fails).
+
+Because the passes race, **which pass's value an exit consumer reads for a given
+member is unspecified**. A downstream task that needs a specific element's result
+must reference that element, not the loop member. Cost-budget and usage
+accounting stay global across all passes, exactly as with the sequential loop.
 
 ### Loop edge semantics
 
@@ -744,7 +784,7 @@ order. Any failure stops the check and prints a precise message.
 4. Params: names valid and unique; `required` and `default` are mutually
    exclusive; defaults are scalar strings (no null); every declared param is
    referenced somewhere.
-5. Each task sets exactly one of `prompt` / `prompt_file` / `command` / `loop` / `for_each` / `workflow`. `prompt_file` paths are relative and the referenced file must be readable.
+5. Each task sets exactly one of `prompt` / `prompt_file` / `command` / `loop` / `for_each` / `for_each_parallel` / `workflow`. `prompt_file` paths are relative and the referenced file must be readable.
 6. Command and sub-workflow tasks set no task-level `runtime`/`model`/`effort`;
    command tasks also set no `schema`. Loop wrappers set none of the body-only
    fields. A linked `workflow:` resolves, its `with:` covers the child's
@@ -755,8 +795,9 @@ order. Any failure stops the check and prints a precise message.
    names a member of the same loop.
 9. `system_prompt` has no `{{task_id}}` placeholders.
 10. The task graph has no cycles.
-11. Each loop sets a valid convergence/iteration spec, names a member as its
-    target, and induces a connected member subgraph.
+11. Each loop sets a valid convergence/iteration spec (a `loop:` names a member
+    as its target) and a non-empty body. The body is an ordinary DAG; its
+    members need not be connected.
 12. Each LLM task's effective `runtime`/`model`/`effort` is accepted by the
     registered runtime; `system_prompt` is only set for a runtime that supports
     it.

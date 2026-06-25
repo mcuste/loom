@@ -40,13 +40,14 @@ func TestRawMirrorsPublic(t *testing.T) {
 			// a task is nested under, not a task-level YAML key. Neither has a
 			// separate raw field.
 			extraPublic: map[string]struct{}{"Cond": {}, "Loop": {}},
-			// rawTask.Loop and rawTask.ForEach are the per-task scoped-block
-			// wrappers: parse-only nodes folded into a LoopGroup that never become
-			// a Task, so they have no public counterpart (rawTask.Loop shares the
-			// name with the derived Task.Loop above only by coincidence).
-			// rawTask.PromptFile is parse-only too: InlinePromptFiles rewrites it
-			// to `prompt:` before Parse, so it never reaches a public Task field.
-			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "PromptFile": {}},
+			// rawTask.Loop, rawTask.ForEach, and rawTask.ForEachParallel are the
+			// per-task scoped-block wrappers: parse-only nodes folded into a
+			// LoopGroup that never become a Task, so they have no public counterpart
+			// (rawTask.Loop shares the name with the derived Task.Loop above only by
+			// coincidence). rawTask.PromptFile is parse-only too: InlinePromptFiles
+			// rewrites it to `prompt:` before Parse, so it never reaches a public
+			// Task field.
+			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "ForEachParallel": {}, "PromptFile": {}},
 		},
 		{
 			name:   "param",

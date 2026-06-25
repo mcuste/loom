@@ -50,6 +50,13 @@ type LoopGroup struct {
 	// Kind selects the loop form. UntilEmpty/Until/Cond/Max are meaningful only
 	// for LoopWhile; List/ListSource/As only for LoopForEach.
 	Kind LoopKind
+	// Parallel runs a LoopForEach body once per element concurrently rather than
+	// sequentially: every element's pass dispatches at the same time, each over
+	// an isolated copy of the member outputs, so no element observes another's
+	// body results. Always false for a LoopWhile (whose passes are inherently
+	// ordered) and for a sequential for_each. A parallel for_each body may not
+	// use `{{prev.id}}`: there is no prior iteration to read.
+	Parallel bool
 	// UntilEmpty names the member task whose empty trimmed output ends the loop.
 	// Set when the loop converges by emptiness; "" when Until is used. Exactly
 	// one of UntilEmpty / Until is set. LoopWhile only.
@@ -88,6 +95,7 @@ type rawLoop struct {
 	id            LoopID
 	description   string
 	kind          LoopKind
+	parallel      bool
 	untilEmpty    string
 	hasUntilEmpty bool
 	until         string
@@ -146,8 +154,8 @@ func decodeLoopBody(entry *yaml.Node, rl *rawLoop) error {
 // block, so only in / as / tasks are recognized here; any other key is an
 // unknown field. `in` is a sequence (static list -> List) or a scalar holding
 // exactly one `{{...}}` placeholder (dynamic source -> ListSource). Cross-task
-// validation (the `as` alphabet/collision, list-ref existence, connectivity)
-// happens in buildLoopGroups once the full task set is known.
+// validation (the `as` alphabet/collision, list-ref existence) happens in
+// buildLoopGroups once the full task set is known.
 func decodeForEachBody(entry *yaml.Node, rl *rawLoop) error {
 	if entry.Kind != yaml.MappingNode {
 		return errors.New("for_each: must be a mapping")
@@ -214,58 +222,22 @@ func ListSourceTaskRef(source string) (TaskID, bool) {
 	return "", false
 }
 
-// loopConnected reports whether the induced subgraph over members is weakly
-// connected: treating each member-to-member depends_on edge as undirected, a
-// single BFS from the first member must reach every member. A loop with one
-// member is trivially connected. depsByID maps each task id to its declared
-// dependencies; edges to non-members are ignored.
-func loopConnected(members []TaskID, depsByID map[TaskID][]TaskID) bool {
-	if len(members) <= 1 {
-		return true
-	}
-	memberSet := make(map[TaskID]bool, len(members))
-	for _, m := range members {
-		memberSet[m] = true
-	}
-	adj := make(map[TaskID][]TaskID, len(members))
-	for _, m := range members {
-		for _, d := range depsByID[m] {
-			if memberSet[d] {
-				adj[m] = append(adj[m], d)
-				adj[d] = append(adj[d], m)
-			}
-		}
-	}
-	seen := make(map[TaskID]bool, len(members))
-	queue := []TaskID{members[0]}
-	seen[members[0]] = true
-	for len(queue) > 0 {
-		n := queue[0]
-		queue = queue[1:]
-		for _, x := range adj[n] {
-			if !seen[x] {
-				seen[x] = true
-				queue = append(queue, x)
-			}
-		}
-	}
-	return len(seen) == len(memberSet)
-}
-
 // buildLoopGroups validates each rawLoop against the task set and returns the
 // resolved LoopGroups in declaration order, plus a per-loop member set used by
-// the prev-placeholder check. Every loop must declare a non-empty body and
-// induce a weakly connected member subgraph. A LoopWhile must additionally set
-// exactly one of until_empty / until, carry max >= 1, and name a member as its
-// convergence target. A LoopForEach must declare a valid `as` loop variable
-// (alphabet-clean, not colliding with a task id or param name) and an `in` that
-// resolves to a known task/param when dynamic.
+// the prev-placeholder check. Every loop must declare a non-empty body. The body
+// is otherwise an ordinary DAG: members carry their own depends_on edges and
+// need not be connected to one another, so independent members run in parallel
+// within a pass exactly like independent top-level tasks. A LoopWhile must
+// additionally set exactly one of until_empty / until, carry max >= 1, and name
+// a member as its convergence target. A LoopForEach must declare a valid `as`
+// loop variable (alphabet-clean, not colliding with a task id or param name) and
+// an `in` that resolves to a known task/param when dynamic.
 //
 // Loop id collisions and uniqueness are checked by the caller (they need the
 // full task and param sets); this function assumes ids are already distinct.
 // ids and params are used only for the for_each `as`/`in` collision and
 // existence checks.
-func buildLoopGroups(rawLoops []rawLoop, depsByID map[TaskID][]TaskID, ids map[TaskID]struct{}, params map[ParamName]struct{}) ([]LoopGroup, map[LoopID]map[TaskID]bool, error) {
+func buildLoopGroups(rawLoops []rawLoop, ids map[TaskID]struct{}, params map[ParamName]struct{}) ([]LoopGroup, map[LoopID]map[TaskID]bool, error) {
 	loops := make([]LoopGroup, 0, len(rawLoops))
 	memberByLoop := make(map[LoopID]map[TaskID]bool, len(rawLoops))
 	for _, rl := range rawLoops {
@@ -282,7 +254,7 @@ func buildLoopGroups(rawLoops []rawLoop, depsByID map[TaskID][]TaskID, ids map[T
 		}
 		memberByLoop[rl.id] = memberSet
 
-		lg := LoopGroup{ID: rl.id, Description: rl.description, Kind: rl.kind, Members: members}
+		lg := LoopGroup{ID: rl.id, Description: rl.description, Kind: rl.kind, Parallel: rl.parallel, Members: members}
 		switch rl.kind {
 		case LoopForEach:
 			if err := resolveForEach(&lg, rl, ids, params); err != nil {
@@ -294,9 +266,6 @@ func buildLoopGroups(rawLoops []rawLoop, depsByID map[TaskID][]TaskID, ids map[T
 			}
 		}
 
-		if !loopConnected(members, depsByID) {
-			return nil, nil, &DisconnectedLoopError{Loop: rl.id}
-		}
 		loops = append(loops, lg)
 	}
 	return loops, memberByLoop, nil
@@ -388,8 +357,16 @@ func resolveForEach(lg *LoopGroup, rl rawLoop, ids map[TaskID]struct{}, params m
 // checkPrevPlaceholders enforces that every `{{prev.id}}` placeholder appears
 // only inside a loop body task and references a member of that same loop. A
 // prev reference names the prior iteration's output of a sibling member, so it
-// is meaningless outside a loop and may never cross a loop boundary.
+// is meaningless outside a loop and may never cross a loop boundary. It is also
+// rejected inside a parallel for_each body: its passes run concurrently with no
+// ordering, so there is no prior iteration to read.
 func checkPrevPlaceholders(wf *Workflow, memberByLoop map[LoopID]map[TaskID]bool) error {
+	parallelLoop := make(map[LoopID]bool, len(wf.Loops))
+	for i := range wf.Loops {
+		if wf.Loops[i].Parallel {
+			parallelLoop[wf.Loops[i].ID] = true
+		}
+	}
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
 		for _, text := range t.TextBodies() {
@@ -397,6 +374,9 @@ func checkPrevPlaceholders(wf *Workflow, memberByLoop map[LoopID]map[TaskID]bool
 				name := m[1]
 				if t.Loop == "" {
 					return &PrevOutsideLoopError{Task: t.ID, Name: name}
+				}
+				if parallelLoop[t.Loop] {
+					return &PrevInParallelLoopError{Task: t.ID, Loop: t.Loop, Name: name}
 				}
 				if !memberByLoop[t.Loop][TaskID(name)] {
 					return &PrevNotMemberError{Task: t.ID, Loop: t.Loop, Name: name}
@@ -430,15 +410,6 @@ type EmptyLoopError struct{ Loop LoopID }
 
 func (e *EmptyLoopError) Error() string {
 	return fmt.Sprintf("loop %q: has no tasks", e.Loop)
-}
-
-// DisconnectedLoopError reports a loop whose member subgraph is not weakly
-// connected: the induced graph over the loop's members splits into more than
-// one component.
-type DisconnectedLoopError struct{ Loop LoopID }
-
-func (e *DisconnectedLoopError) Error() string {
-	return fmt.Sprintf("loop %q: member subgraph is not weakly connected", e.Loop)
 }
 
 // LoopTargetNotMemberError reports a loop convergence target (until_empty task
@@ -571,4 +542,17 @@ type PrevNotMemberError struct {
 
 func (e *PrevNotMemberError) Error() string {
 	return fmt.Sprintf("task %q: placeholder {{prev.%s}} does not reference a member of loop %q", e.Task, e.Name, e.Loop)
+}
+
+// PrevInParallelLoopError reports a `{{prev.id}}` placeholder inside a parallel
+// for_each body. Its passes run concurrently with no ordering, so there is no
+// prior iteration to read; prev is only meaningful in a sequential loop.
+type PrevInParallelLoopError struct {
+	Task TaskID
+	Loop LoopID
+	Name string
+}
+
+func (e *PrevInParallelLoopError) Error() string {
+	return fmt.Sprintf("task %q: placeholder {{prev.%s}} is not allowed in parallel for_each %q", e.Task, e.Name, e.Loop)
 }

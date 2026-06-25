@@ -274,14 +274,19 @@ func loopConvergence(lg workflow.LoopGroup) string {
 
 // loopDescriptor renders a scoped loop's kind-specific summary: a while loop
 // shows its convergence target and iteration cap; a for_each loop shows its
-// loop variable and list source (static `[n]` or dynamic `<-{{src}}`).
+// loop variable and list source (static `[n]` or dynamic `<-{{src}}`), with the
+// label reading `for_each_parallel` when its passes run concurrently.
 func loopDescriptor(lg workflow.LoopGroup) string {
 	if lg.Kind == workflow.LoopForEach {
 		src := fmt.Sprintf("static[%d]", len(lg.List))
 		if lg.ListSource != "" {
 			src = "dynamic<-" + lg.ListSource
 		}
-		return fmt.Sprintf("for_each  as=%s  in=%s", lg.As, src)
+		label := "for_each"
+		if lg.Parallel {
+			label = "for_each_parallel"
+		}
+		return fmt.Sprintf("%s  as=%s  in=%s", label, lg.As, src)
 	}
 	return fmt.Sprintf("%s  max=%d", loopConvergence(lg), lg.Max)
 }

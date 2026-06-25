@@ -67,9 +67,12 @@ func runLoop(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup,
 	}
 
 	var err error
-	if lg.Kind == workflow.LoopForEach {
+	switch {
+	case lg.Kind == workflow.LoopForEach && lg.Parallel:
+		err = runForEachParallel(ctx, wf, lg, st, hooks, opts, entryDeps)
+	case lg.Kind == workflow.LoopForEach:
 		err = runForEachLoop(ctx, wf, lg, st, hooks, opts, entryDeps)
-	} else {
+	default:
 		err = runWhileLoop(ctx, wf, lg, st, hooks, opts, entryDeps)
 	}
 	if err != nil {
@@ -107,20 +110,23 @@ func runWhileLoop(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopG
 	return nil
 }
 
-// runForEachLoop resolves the loop's list once (static List, or parseList of the
-// substituted ListSource) and runs the body once per element in order, binding
-// the loop variable to each element and threading prev forward. An empty list
-// runs no passes.
-func runForEachLoop(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, st *runState, hooks Hooks, opts Options, entryDeps map[workflow.TaskID]bool) error {
-	var list []string
+// forEachList resolves a for_each loop's element list: the static List as-is, or
+// parseList of the substituted ListSource for a dynamic source.
+func forEachList(lg *workflow.LoopGroup, st *runState, opts Options) []string {
 	if lg.ListSource == "" {
-		list = lg.List
-	} else {
-		st.mu.Lock()
-		resolved := workflow.Substitute(lg.ListSource, st.rep.Outputs, opts.Params, opts.State, nil)
-		st.mu.Unlock()
-		list = parseList(resolved)
+		return lg.List
 	}
+	st.mu.Lock()
+	resolved := workflow.Substitute(lg.ListSource, st.outputs, opts.Params, opts.State, nil)
+	st.mu.Unlock()
+	return parseList(resolved)
+}
+
+// runForEachLoop resolves the loop's list once and runs the body once per
+// element in order, binding the loop variable to each element and threading prev
+// forward. An empty list runs no passes.
+func runForEachLoop(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, st *runState, hooks Hooks, opts Options, entryDeps map[workflow.TaskID]bool) error {
+	list := forEachList(lg, st, opts)
 	var prev map[workflow.TaskID]string
 	for i := range list {
 		passOutputs, err := runLoopPass(ctx, wf, lg, st, hooks, opts, entryDeps, prev, i+1, lg.As, list[i])
@@ -129,6 +135,80 @@ func runForEachLoop(ctx context.Context, wf *workflow.Workflow, lg *workflow.Loo
 		}
 		prev = passOutputs
 	}
+	return nil
+}
+
+// runForEachParallel resolves the loop's list once and runs the body for every
+// element concurrently, binding the loop variable per element. Each pass runs
+// over a private snapshot of the member outputs (see forParallelIteration), so
+// passes never observe or clobber one another; after a pass completes its member
+// outputs are merged back into the shared report. The first pass to error
+// cancels the rest via the errgroup context. An empty list runs no passes.
+func runForEachParallel(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, st *runState, hooks Hooks, opts Options, entryDeps map[workflow.TaskID]bool) error {
+	list := forEachList(lg, st, opts)
+	pg, pgctx := errgroup.WithContext(ctx)
+	for i := range list {
+		iter, val := i+1, list[i]
+		pg.Go(func() error {
+			return runParallelPass(pgctx, wf, lg, st, hooks, opts, entryDeps, iter, lg.As, val)
+		})
+	}
+	return pg.Wait()
+}
+
+// runParallelPass runs one pass of a parallel for_each body: a fresh gate per
+// member plus the aliased entry-dependency gates, over an isolated runState.
+// After the members complete it merges their outputs and succeeded/skipped
+// dispositions back into the shared report under st.mu so exit consumers (and
+// outer status guards) observe a member value.
+//
+// The merge makes a member's disposition coherent under the race: a pass that
+// ran the member to completion wins over one that skipped it (its real output is
+// published and any prior skip mark is cleared), and a skipped pass neither
+// clobbers an already-published real output nor downgrades a success. A member
+// is therefore reported succeeded if ANY element ran it (with that element's
+// output) and skipped only if EVERY element skipped it; never both. Which
+// succeeding element's value survives is still unspecified, since the passes
+// race; a downstream task that needs a specific element must reference that
+// element, not the loop member.
+func runParallelPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, st *runState, hooks Hooks, opts Options, entryDeps map[workflow.TaskID]bool, iter int, loopVar, loopVal string) error {
+	innerGates := make(map[workflow.TaskID]chan struct{}, len(lg.Members)+len(entryDeps))
+	for _, m := range lg.Members {
+		innerGates[m] = make(chan struct{})
+	}
+	for dep := range entryDeps {
+		innerGates[dep] = st.gates[dep]
+	}
+
+	inner := st.forParallelIteration(innerGates, iter, loopVar, loopVal)
+	ig, igctx := errgroup.WithContext(ctx)
+	for _, m := range lg.Members {
+		t := wf.ByID(m)
+		ig.Go(func() error {
+			return runTask(igctx, wf, t, inner, hooks, opts)
+		})
+	}
+	if err := ig.Wait(); err != nil {
+		return err
+	}
+
+	st.mu.Lock()
+	for _, m := range lg.Members {
+		switch {
+		case inner.succeeded[m]:
+			// An element ran the member to completion: publish its output and let
+			// success dominate any prior or concurrent skip mark.
+			st.outputs[m] = inner.outputs[m]
+			st.succeeded[m] = true
+			st.skipped[m] = false
+		case inner.skipped[m] && !st.succeeded[m]:
+			// This element skipped and no element has succeeded yet: record the
+			// skip without clobbering a real output a later success may still set.
+			st.outputs[m] = inner.outputs[m]
+			st.skipped[m] = true
+		}
+	}
+	st.mu.Unlock()
 	return nil
 }
 
@@ -163,7 +243,7 @@ func runLoopPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGr
 	st.mu.Lock()
 	passOutputs := make(map[workflow.TaskID]string, len(lg.Members))
 	for _, m := range lg.Members {
-		passOutputs[m] = st.rep.Outputs[m]
+		passOutputs[m] = st.outputs[m]
 	}
 	st.mu.Unlock()
 	return passOutputs, nil
@@ -175,10 +255,10 @@ func runLoopPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGr
 // member outputs. The caller holds st.mu.
 func loopConverged(lg *workflow.LoopGroup, st *runState) (bool, error) {
 	if lg.Cond == nil {
-		return strings.TrimSpace(st.rep.Outputs[lg.UntilEmpty]) == "", nil
+		return strings.TrimSpace(st.outputs[lg.UntilEmpty]) == "", nil
 	}
 	env := workflow.Env{
-		Outputs:   maps.Clone(st.rep.Outputs),
+		Outputs:   maps.Clone(st.outputs),
 		Succeeded: maps.Clone(st.succeeded),
 		Skipped:   maps.Clone(st.skipped),
 	}

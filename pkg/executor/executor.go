@@ -215,6 +215,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	// budgetReady wakes a waiter once the in-flight task records its cost.
 	st := &runState{
 		rep:            rep,
+		outputs:        rep.Outputs,
 		succeeded:      succeeded,
 		skipped:        skipped,
 		gates:          gates,

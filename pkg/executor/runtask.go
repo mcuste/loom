@@ -34,7 +34,15 @@ func bindLoopVar(body string, st *runState) string {
 // Bundling these into one value (rather than a sprawling parameter list) lets
 // the per-task dispatch body live in runTask and be reused by runLoop.
 type runState struct {
-	rep       *Report
+	rep *Report
+	// outputs is the map a task reads upstream values from and writes its own
+	// output to. It aliases rep.Outputs for the top-level schedule, sequential
+	// loops, and while loops, so those paths publish straight into the report. A
+	// parallel for_each iteration swaps in a private copy (seeded from a snapshot
+	// of the shared outputs) so concurrent passes neither observe nor clobber one
+	// another's member outputs; the driver merges each pass's outputs back into
+	// rep.Outputs afterward.
+	outputs   map[workflow.TaskID]string
 	succeeded map[workflow.TaskID]bool
 	skipped   map[workflow.TaskID]bool
 	gates     map[workflow.TaskID]chan struct{}
@@ -77,6 +85,29 @@ func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, pr
 	return &inner
 }
 
+// forParallelIteration derives a runState for one pass of a parallel for_each.
+// Unlike forLoopIteration it swaps in private outputs/succeeded/skipped maps,
+// each a snapshot of the shared state taken under st.mu, so concurrent passes
+// neither read nor overwrite one another's member results: an item's sub-DAG
+// sees only entry-dependency outputs plus its own members. The shared report
+// (rows, usage, budget slot) and mutex stay shared; the driver merges each
+// pass's member outputs back afterward. prev is nil: a parallel body has no
+// prior iteration to read (the parser rejects {{prev.id}} inside one).
+func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
+	inner := *st
+	inner.gates = gates
+	inner.prev = nil
+	inner.iteration = iteration
+	inner.loopVar = loopVar
+	inner.loopVal = loopVal
+	st.mu.Lock()
+	inner.outputs = maps.Clone(st.outputs)
+	inner.succeeded = maps.Clone(st.succeeded)
+	inner.skipped = maps.Clone(st.skipped)
+	st.mu.Unlock()
+	return &inner
+}
+
 // runTask executes one task end to end: it waits for the task's dependency
 // gates, substitutes placeholders, evaluates the `when:` guard, enforces the
 // workflow budget gate, dispatches with retry (schema validation and cache
@@ -108,7 +139,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 	if t.Cond != nil {
 		st.mu.Lock()
 		env := workflow.Env{
-			Outputs:   maps.Clone(st.rep.Outputs),
+			Outputs:   maps.Clone(st.outputs),
 			Succeeded: maps.Clone(st.succeeded),
 			Skipped:   maps.Clone(st.skipped),
 		}
@@ -123,7 +154,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 				hooks.OnFinish(*t, st.iteration, res, nil)
 			}
 			st.mu.Lock()
-			st.rep.Outputs[t.ID] = ""
+			st.outputs[t.ID] = ""
 			st.skipped[t.ID] = true
 			st.rep.Tasks = append(st.rep.Tasks, res)
 			st.mu.Unlock()
@@ -200,7 +231,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 		st.mu.Lock()
 		vals := make(map[string]string, len(t.With))
 		for _, a := range t.With {
-			vals[string(a.Name)] = workflow.Substitute(a.Value, st.rep.Outputs, opts.Params, opts.State, st.prev)
+			vals[string(a.Name)] = workflow.Substitute(a.Value, st.outputs, opts.Params, opts.State, st.prev)
 		}
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
@@ -238,7 +269,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			hooks.OnStart(*t, st.iteration, "", "", "")
 		}
 		st.mu.Lock()
-		body := workflow.Substitute(bindLoopVar(t.Command, st), st.rep.Outputs, opts.Params, opts.State, st.prev)
+		body := workflow.Substitute(bindLoopVar(t.Command, st), st.outputs, opts.Params, opts.State, st.prev)
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 			return runShell(ctx, t, body)
@@ -254,7 +285,7 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			hooks.OnStart(*t, st.iteration, rt, model, effort)
 		}
 		st.mu.Lock()
-		body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.rep.Outputs, opts.Params, opts.State, st.prev)
+		body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.outputs, opts.Params, opts.State, st.prev)
 		st.mu.Unlock()
 		dispatch := func() (TaskResult, error) {
 			return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
@@ -292,13 +323,10 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 
 	res.Status = StatusOK
 	st.mu.Lock()
-	st.rep.Outputs[t.ID] = res.Output
+	st.outputs[t.ID] = res.Output
 	st.succeeded[t.ID] = true
 	st.rep.Tasks = append(st.rep.Tasks, res)
-	st.rep.Usage.InputTokens += res.Usage.InputTokens
-	st.rep.Usage.OutputTokens += res.Usage.OutputTokens
-	st.rep.Usage.CacheReadTokens += res.Usage.CacheReadTokens
-	st.rep.Usage.TotalCostUSD += res.Usage.TotalCostUSD
+	st.rep.Usage.Add(res.Usage)
 	st.mu.Unlock()
 
 	close(st.gates[t.ID])

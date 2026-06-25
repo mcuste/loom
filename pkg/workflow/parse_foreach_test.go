@@ -346,6 +346,157 @@ tasks:
 	}
 }
 
+// TestParseForEachParallel pins that a `for_each_parallel:` block folds into the
+// same LoopForEach group as `for_each:` but with Parallel set: it shares the
+// in/as/tasks shape and all the static/dynamic resolution.
+func TestParseForEachParallel(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: probe
+    for_each_parallel:
+      in: [redis, postgres, nats]
+      as: backend
+      tasks:
+        - id: handle
+          prompt: probe {{backend}}
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	lg := wf.Loops[0]
+	if lg.Kind != workflow.LoopForEach {
+		t.Errorf("Loop Kind = %v, want LoopForEach", lg.Kind)
+	}
+	if !lg.Parallel {
+		t.Errorf("Parallel = false, want true")
+	}
+	if lg.As != "backend" {
+		t.Errorf("As = %q, want backend", lg.As)
+	}
+	if want := []string{"redis", "postgres", "nats"}; !slices.Equal(lg.List, want) {
+		t.Errorf("List = %v, want %v", lg.List, want)
+	}
+}
+
+// TestParseForEachParallelSequentialNotParallel pins that a plain `for_each:`
+// leaves Parallel false, so the flag is opt-in to the new spelling.
+func TestParseForEachParallelSequentialNotParallel(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: probe
+    for_each:
+      in: [a, b]
+      as: item
+      tasks:
+        - id: handle
+          prompt: handle {{item}}
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if wf.Loops[0].Parallel {
+		t.Errorf("Parallel = true for a sequential for_each, want false")
+	}
+}
+
+// TestParseLoopAndForEachParallelSet pins that a task declaring both a `loop:`
+// and a `for_each_parallel:` block is rejected like the loop+for_each conflict.
+func TestParseLoopAndForEachParallelSet(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: both
+    loop:
+      until_empty: w
+      max: 2
+      tasks:
+        - id: w
+          prompt: while
+    for_each_parallel:
+      in: [a]
+      as: item
+      tasks:
+        - id: f
+          prompt: each {{item}}
+`
+	if _, err := workflow.Parse([]byte(src)); !errors.Is(err, workflow.ErrLoopAndForEachSet) {
+		t.Fatalf("Parse error = %v, want ErrLoopAndForEachSet", err)
+	}
+}
+
+// TestParseForEachAndForEachParallelSet pins that a task setting both the
+// sequential and parallel for_each spellings is a body-form conflict.
+func TestParseForEachAndForEachParallelSet(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: both
+    for_each:
+      in: [a]
+      as: item
+      tasks:
+        - id: f
+          prompt: each {{item}}
+    for_each_parallel:
+      in: [b]
+      as: other
+      tasks:
+        - id: g
+          prompt: each {{other}}
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.TaskBodyConflictError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As TaskBodyConflictError failed; err = %v", err)
+	}
+}
+
+// TestParseForEachParallelRejectsPrev pins that a `{{prev.id}}` placeholder
+// inside a parallel for_each body is rejected: parallel passes have no ordering,
+// so there is no prior iteration to read.
+func TestParseForEachParallelRejectsPrev(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: seed
+    prompt: seed
+  - id: probe
+    for_each_parallel:
+      in: [a, b]
+      as: item
+      tasks:
+        - id: handle
+          prompt: "handle {{item}} {{prev.handle}}"
+`
+	_, err := workflow.Parse([]byte(src))
+	var got *workflow.PrevInParallelLoopError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As PrevInParallelLoopError failed; err = %v", err)
+	}
+}
+
 // TestParseForEachEmptyTasks pins that a `for_each:` block with no nested tasks
 // is rejected with EmptyLoopError, the shared empty-body sentinel.
 func TestParseForEachEmptyTasks(t *testing.T) {

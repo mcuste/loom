@@ -67,7 +67,8 @@ func Parse(data []byte) (*Workflow, error) {
 	for _, rt := range raw.Tasks {
 		isLoop := rt.Loop.Kind != 0
 		isForEach := rt.ForEach.Kind != 0
-		if !isLoop && !isForEach {
+		isForEachParallel := rt.ForEachParallel.Kind != 0
+		if !isLoop && !isForEach && !isForEachParallel {
 			topTasks = append(topTasks, rt)
 			continue
 		}
@@ -75,26 +76,42 @@ func Parse(data []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
-		// `loop:` and `for_each:` are sibling scoped-block wrappers; a task
-		// declaring both is ambiguous.
-		if isLoop && isForEach {
-			return nil, &TaskBodyConflictError{Task: tid, Fields: []string{"loop", "for_each"}}
+		// `loop:`, `for_each:`, and `for_each_parallel:` are sibling scoped-block
+		// wrappers; a task declaring more than one is ambiguous.
+		var wrappers []string
+		if isLoop {
+			wrappers = append(wrappers, "loop")
 		}
-		wrapper := "loop"
 		if isForEach {
-			wrapper = "for_each"
+			wrappers = append(wrappers, "for_each")
 		}
+		if isForEachParallel {
+			wrappers = append(wrappers, "for_each_parallel")
+		}
+		if len(wrappers) > 1 {
+			return nil, &TaskBodyConflictError{Task: tid, Fields: wrappers}
+		}
+		wrapper := wrappers[0]
 		if err := rejectLoopWrapperFields(tid, rt, wrapper); err != nil {
 			return nil, err
 		}
 		rl := rawLoop{id: LoopID(tid), description: rt.Description}
-		if isForEach {
+		switch {
+		case isForEach:
 			rl.kind = LoopForEach
 			if err := decodeForEachBody(&rt.ForEach, &rl); err != nil {
 				return nil, fmt.Errorf("task %q: %w", tid, err)
 			}
-		} else if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
-			return nil, fmt.Errorf("task %q: %w", tid, err)
+		case isForEachParallel:
+			rl.kind = LoopForEach
+			rl.parallel = true
+			if err := decodeForEachBody(&rt.ForEachParallel, &rl); err != nil {
+				return nil, fmt.Errorf("task %q: %w", tid, err)
+			}
+		default:
+			if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
+				return nil, fmt.Errorf("task %q: %w", tid, err)
+			}
 		}
 		rawLoops = append(rawLoops, rl)
 	}
@@ -184,18 +201,7 @@ func Parse(data []byte) (*Workflow, error) {
 		seenLoops[rl.id] = struct{}{}
 	}
 
-	// depsByID feeds the per-loop connectivity check; it is built from the raw
-	// depends_on text (unknown-dependency rejection happens later in buildDeps).
-	depsByID := make(map[TaskID][]TaskID, len(allTasks))
-	for _, lt := range allTasks {
-		ds := make([]TaskID, 0, len(lt.rt.DependsOn))
-		for _, d := range lt.rt.DependsOn {
-			ds = append(ds, TaskID(d))
-		}
-		depsByID[TaskID(lt.rt.ID)] = ds
-	}
-
-	loops, memberByLoop, err := buildLoopGroups(rawLoops, depsByID, ids, paramSet)
+	loops, memberByLoop, err := buildLoopGroups(rawLoops, ids, paramSet)
 	if err != nil {
 		return nil, err
 	}
@@ -676,13 +682,14 @@ func (e *TaskBodyConflictError) Error() string {
 
 func (e *TaskBodyConflictError) Is(target error) bool {
 	has := func(f string) bool { return slices.Contains(e.Fields, f) }
+	anyForEach := has("for_each") || has("for_each_parallel")
 	switch target {
 	case ErrPromptAndCommandSet:
 		return has("prompt") && has("command")
 	case ErrLoopAndForEachSet:
-		return has("loop") && has("for_each")
+		return has("loop") && anyForEach
 	case ErrLoopTaskWithBody:
-		return (has("loop") || has("for_each")) && (has("prompt") || has("command") || has("prompt_file"))
+		return (has("loop") || anyForEach) && (has("prompt") || has("command") || has("prompt_file"))
 	}
 	return false
 }
@@ -755,6 +762,12 @@ type rawTask struct {
 	// nested `tasks:` the loop body, decoded by decodeForEachBody. A sibling of
 	// Loop; a task may set at most one of the two.
 	ForEach yaml.Node `yaml:"for_each"`
+	// ForEachParallel is the concurrent spelling of ForEach: an identical
+	// in/as/tasks block whose body runs once per element in parallel rather than
+	// in declaration order. Captured as a raw yaml.Node for the same
+	// absent-vs-present reason. A sibling of Loop and ForEach; a task may set at
+	// most one of the three.
+	ForEachParallel yaml.Node `yaml:"for_each_parallel"`
 	// Budget is captured as a raw yaml.Node so the parser can distinguish an
 	// absent per-task `budget:` key (no limit) from a present block validated
 	// the same way as the workflow-level budget.
@@ -801,9 +814,9 @@ var (
 	ErrMissingParamName = errors.New("param has no name")
 
 	// ErrMissingPromptOrCommand reports a task that sets none of the body forms
-	// (`prompt:`, `prompt_file:`, `command:`, `loop:`, `for_each:`, or
-	// `workflow:`). Exactly one must be present.
-	ErrMissingPromptOrCommand = errors.New("task has no prompt, prompt_file, command, loop, for_each, or workflow")
+	// (`prompt:`, `prompt_file:`, `command:`, `loop:`, `for_each:`,
+	// `for_each_parallel:`, or `workflow:`). Exactly one must be present.
+	ErrMissingPromptOrCommand = errors.New("task has no prompt, prompt_file, command, loop, for_each, for_each_parallel, or workflow")
 	// ErrPromptAndCommandSet reports a task that sets both `prompt:` and
 	// `command:`. The two are mutually exclusive.
 	ErrPromptAndCommandSet = errors.New("task sets both prompt and command")
