@@ -34,7 +34,7 @@ import (
 //     effort.
 //  5. Every depends_on entry names a known task and appears at most once.
 //  6. Every {{id}} placeholder in a prompt or command is a member of that
-//     task's depends_on. Placeholders are pure templating — they never extend
+//     task's depends_on. Placeholders are pure templating; they never extend
 //     the dependency graph implicitly.
 //  7. Every {{params.x}} placeholder (in prompt, command, or system_prompt)
 //     references a declared param.
@@ -282,11 +282,12 @@ func Parse(data []byte) (*Workflow, error) {
 		if schema != nil && rt.Command != "" {
 			return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
 		}
+		dc := depsCtx{tid: tid, known: ids, params: paramSet, loopVar: asByLoop[lt.loop]}
 		var deps []TaskID
 		if rt.Workflow != "" {
-			deps, err = buildSubWorkflowDeps(tid, rt.DependsOn, withArgs, ids, paramSet, asByLoop[lt.loop])
+			deps, err = buildSubWorkflowDeps(dc, rt.DependsOn, withArgs)
 		} else {
-			deps, err = buildDeps(tid, rt.DependsOn, body, ids, paramSet, asByLoop[lt.loop])
+			deps, err = buildDeps(dc, rt.DependsOn, body)
 		}
 		if err != nil {
 			return nil, err
@@ -780,7 +781,7 @@ type rawTask struct {
 // rawParam mirrors the typed (non-default) fields of a single `params:`
 // entry. `default:` is captured separately as a yaml.Node so the raw scalar
 // text (e.g. `1` from `default: 1`) survives without yaml.v3 coercing it to
-// !!int — see decodeRawParam.
+// !!int, see decodeRawParam.
 type rawParam struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
@@ -899,7 +900,7 @@ func (e *UnknownDependencyError) Error() string {
 // up front so the DAG is unambiguous.
 //
 // Hint, when non-empty, carries a clarifying suggestion appended to the error
-// message — currently "did you mean {{params.<name>}}?" when the offending
+// message: currently "did you mean {{params.<name>}}?" when the offending
 // bare {{x}} matches a declared param.
 type UnknownPlaceholderError struct {
 	Task TaskID
@@ -946,7 +947,7 @@ func (e *DuplicateParamNameError) Error() string {
 }
 
 // ConflictingParamSpecError reports a param that sets both `required: true`
-// and a `default:` — a default would never apply, so the spec is contradictory.
+// and a `default:`; a default would never apply, so the spec is contradictory.
 type ConflictingParamSpecError struct{ Name ParamName }
 
 func (e *ConflictingParamSpecError) Error() string {
@@ -976,7 +977,7 @@ func (e *UnknownParamError) Error() string {
 }
 
 // MalformedParamPlaceholderError reports a `{{params.…}}` token that does not
-// match the strict `{{params.name}}` shape — typically `{{params.x.y}}` or
+// match the strict `{{params.name}}` shape, typically `{{params.x.y}}` or
 // `{{ params.x }}` with stray whitespace.
 type MalformedParamPlaceholderError struct {
 	Task  TaskID
@@ -1056,7 +1057,7 @@ func (e *UnknownRetryFieldError) Error() string {
 // parseParams validates the raw `params:` block and returns the resolved
 // Params slice in declaration order plus an index from name → slice position.
 //
-// node is the top-level `params:` yaml.Node — either zero (no `params:` key),
+// node is the top-level `params:` yaml.Node: either zero (no `params:` key),
 // a sequence, or anything else (which is a structural error). Walking the
 // node by hand (rather than relying on `[]rawParam` decoding) preserves the
 // raw default scalar text and lets the parser reject non-scalar / null
@@ -1201,12 +1202,49 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 	return r, nil
 }
 
+// depsCtx bundles the per-task context shared by the dependency builders: the
+// task id, the set of known task ids and declared params used to validate
+// references, and the enclosing for_each loop variable ("" outside a loop
+// body), which is exempt from the task-ref check because it is bound
+// per-instance at run time rather than via the DAG.
+type depsCtx struct {
+	tid     TaskID
+	known   map[TaskID]struct{}
+	params  map[ParamName]struct{}
+	loopVar string
+}
+
+// buildDeclaredDeps validates a task's explicit depends_on list: every entry
+// must be a well-formed, known, non-duplicate task id. It returns the
+// dependency slice in declaration order together with the set of ids seen, so
+// callers can union in further edges (e.g. from with-value placeholders)
+// without re-scanning.
+func buildDeclaredDeps(dc depsCtx, declared []string) ([]TaskID, map[TaskID]struct{}, error) {
+	deps := make([]TaskID, 0, len(declared))
+	seen := make(map[TaskID]struct{}, len(declared))
+	for _, raw := range declared {
+		d, err := NewTaskID(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("task %q depends_on: %w", dc.tid, err)
+		}
+		if _, ok := dc.known[d]; !ok {
+			return nil, nil, &UnknownDependencyError{Task: dc.tid, Dep: d}
+		}
+		if _, dup := seen[d]; dup {
+			return nil, nil, &DuplicateDependencyError{Task: dc.tid, Dep: d}
+		}
+		seen[d] = struct{}{}
+		deps = append(deps, d)
+	}
+	return deps, seen, nil
+}
+
 // buildDeps validates a task's depends_on list and checks that every
 // `{{x}}` and `{{params.x}}` placeholder in its prompt is well-defined.
 //
 // depends_on is the single source of truth for the dependency graph; the
 // parser never extends it implicitly from prompt text. Repeating a
-// placeholder in the prompt body (e.g. `{{a}}` twice) is fine — placeholders
+// placeholder in the prompt body (e.g. `{{a}}` twice) is fine; placeholders
 // are templating, not dependency declarations.
 //
 // Self-edges are kept so findCycle reports them uniformly as a cycle of
@@ -1216,26 +1254,13 @@ func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
 // match a declared param, the returned UnknownPlaceholderError carries a
 // hint suggesting `{{params.x}}` so users notice the missing prefix.
 //
-// loopVar, when non-empty, is a `for_each` task's `as` variable: a `{{loopVar}}`
-// placeholder is resolved per-instance at run time, not via the DAG, so it is
-// excluded from the task-ref check (it creates no dependency edge).
-func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]struct{}, params map[ParamName]struct{}, loopVar string) ([]TaskID, error) {
-	deps := make([]TaskID, 0, len(declared))
-	declaredSet := make(map[TaskID]struct{}, len(declared))
-
-	for _, raw := range declared {
-		d, err := NewTaskID(raw)
-		if err != nil {
-			return nil, fmt.Errorf("task %q depends_on: %w", tid, err)
-		}
-		if _, ok := known[d]; !ok {
-			return nil, &UnknownDependencyError{Task: tid, Dep: d}
-		}
-		if _, dup := declaredSet[d]; dup {
-			return nil, &DuplicateDependencyError{Task: tid, Dep: d}
-		}
-		declaredSet[d] = struct{}{}
-		deps = append(deps, d)
+// A placeholder whose name is the loop variable (e.g. `{{item}}`) is resolved
+// per-instance at run time, not via the DAG, so it is excluded from the
+// task-ref check (it creates no dependency edge).
+func buildDeps(dc depsCtx, declared []string, prompt string) ([]TaskID, error) {
+	deps, seen, err := buildDeclaredDeps(dc, declared)
+	if err != nil {
+		return nil, err
 	}
 
 	// Task refs first, then param refs: this order makes the first error
@@ -1243,22 +1268,22 @@ func buildDeps(tid TaskID, declared []string, prompt string, known map[TaskID]st
 	// are ignored here: they need no declaration and create no dependency edge.
 	taskRefs, paramRefs, _ := scanPlaceholders(prompt)
 	for _, name := range taskRefs {
-		if name == loopVar {
+		if name == dc.loopVar {
 			continue
 		}
-		if _, ok := declaredSet[TaskID(name)]; ok {
+		if _, ok := seen[TaskID(name)]; ok {
 			continue
 		}
-		err := &UnknownPlaceholderError{Task: tid, Name: name}
-		if _, isParam := params[ParamName(name)]; isParam {
+		err := &UnknownPlaceholderError{Task: dc.tid, Name: name}
+		if _, isParam := dc.params[ParamName(name)]; isParam {
 			err.Hint = fmt.Sprintf("did you mean {{params.%s}}?", name)
 		}
 		return nil, err
 	}
 
 	for _, name := range paramRefs {
-		if _, ok := params[ParamName(name)]; !ok {
-			return nil, &UnknownParamError{Task: tid, Name: name}
+		if _, ok := dc.params[ParamName(name)]; !ok {
+			return nil, &UnknownParamError{Task: dc.tid, Name: name}
 		}
 	}
 	return deps, nil
@@ -1299,38 +1324,25 @@ func decodeWith(tid TaskID, node yaml.Node) ([]WithArg, error) {
 // depends_on), a task-id placeholder in a with-VALUE extends the graph: it adds
 // the edge implicitly, unioned with any explicit depends_on. Param placeholders
 // in with-values are validated against the declared params; an unknown task or
-// param reference is rejected the same way buildDeps rejects them. loopVar is
-// the owning for_each's `as` variable ("" outside a for_each body): a with-value
-// may reference it like any body member's prompt, so it is neither an edge nor
-// an unknown ref.
-func buildSubWorkflowDeps(tid TaskID, declared []string, withArgs []WithArg, known map[TaskID]struct{}, params map[ParamName]struct{}, loopVar string) ([]TaskID, error) {
-	deps := make([]TaskID, 0, len(declared))
-	seen := make(map[TaskID]struct{}, len(declared))
-
-	for _, raw := range declared {
-		d, err := NewTaskID(raw)
-		if err != nil {
-			return nil, fmt.Errorf("task %q depends_on: %w", tid, err)
-		}
-		if _, ok := known[d]; !ok {
-			return nil, &UnknownDependencyError{Task: tid, Dep: d}
-		}
-		if _, dup := seen[d]; dup {
-			return nil, &DuplicateDependencyError{Task: tid, Dep: d}
-		}
-		seen[d] = struct{}{}
-		deps = append(deps, d)
+// param reference is rejected the same way buildDeps rejects them. The owning
+// for_each's `as` variable (dc.loopVar, "" outside a for_each body) may be
+// referenced in a with-value like any body member's prompt, so it is neither an
+// edge nor an unknown ref.
+func buildSubWorkflowDeps(dc depsCtx, declared []string, withArgs []WithArg) ([]TaskID, error) {
+	deps, seen, err := buildDeclaredDeps(dc, declared)
+	if err != nil {
+		return nil, err
 	}
 
 	for _, a := range withArgs {
 		taskRefs, paramRefs, _ := scanPlaceholders(a.Value)
 		for _, name := range taskRefs {
-			if name == loopVar {
+			if name == dc.loopVar {
 				continue
 			}
 			id := TaskID(name)
-			if _, ok := known[id]; !ok {
-				return nil, &UnknownPlaceholderError{Task: tid, Name: name}
+			if _, ok := dc.known[id]; !ok {
+				return nil, &UnknownPlaceholderError{Task: dc.tid, Name: name}
 			}
 			if _, dup := seen[id]; dup {
 				continue
@@ -1339,8 +1351,8 @@ func buildSubWorkflowDeps(tid TaskID, declared []string, withArgs []WithArg, kno
 			deps = append(deps, id)
 		}
 		for _, name := range paramRefs {
-			if _, ok := params[ParamName(name)]; !ok {
-				return nil, &UnknownParamError{Task: tid, Name: name}
+			if _, ok := dc.params[ParamName(name)]; !ok {
+				return nil, &UnknownParamError{Task: dc.tid, Name: name}
 			}
 		}
 	}
@@ -1380,8 +1392,8 @@ func scanPlaceholders(text string) (taskRefs, paramRefs, stateRefs []string) {
 var brokenBraceRe = regexp.MustCompile(`\{\{[^}]*\}\}`)
 
 // checkMalformedParamPlaceholders scans prompt for any `{{params.…}}`-shaped
-// token that combinedPlaceholderRe rejects — typically `{{params.x.y}}` or
-// `{{ params.x }}` — and reports it. Other malformed `{{…}}` tokens (bare,
+// token that combinedPlaceholderRe rejects, typically `{{params.x.y}}` or
+// `{{ params.x }}`, and reports it. Other malformed `{{...}}` tokens (bare,
 // non-param shapes) fall through to buildDeps' UnknownPlaceholderError path.
 func checkMalformedParamPlaceholders(tid TaskID, prompt string) error {
 	for _, tok := range brokenBraceRe.FindAllString(prompt, -1) {
@@ -1438,16 +1450,11 @@ func checkUnusedParams(wf *Workflow) error {
 	}
 	scan(wf.SystemPrompt)
 	for i := range wf.Tasks {
-		// Shell tasks reference params via {{params.x}} in their command body
-		// exactly like LLM tasks do in their prompt; one of the two is empty
-		// per the parser's XOR check, so scanning both is safe.
-		scan(wf.Tasks[i].Prompt)
-		scan(wf.Tasks[i].Command)
-		// A sub-workflow task carries its param references in its with-values
-		// rather than a prompt body; scan those so a param used only there is
-		// still counted as referenced.
-		for _, a := range wf.Tasks[i].With {
-			scan(a.Value)
+		// TextBodies yields the task's effective body (prompt or command) plus
+		// each with-value, so a param referenced in any of those positions is
+		// counted as used regardless of the task's body form.
+		for _, body := range wf.Tasks[i].TextBodies() {
+			scan(body)
 		}
 	}
 	for _, p := range wf.Params {

@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -167,18 +168,91 @@ func TestParseSubWorkflowRejectsRuntimeFields(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			src := "name: parent\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    workflow: release\n" + tc.field
-			if _, err := workflow.Parse([]byte(src)); err == nil {
-				t.Fatalf("Parse accepted %s on a sub-workflow task; want rejection", tc.name)
+			_, err := workflow.Parse([]byte(src))
+			if !errors.Is(err, workflow.ErrSubWorkflowWithRuntime) {
+				t.Fatalf("Parse error = %v, want ErrSubWorkflowWithRuntime for %s on a sub-workflow task", err, tc.name)
 			}
 		})
 	}
 }
 
-// TestParseSubWorkflowAllowsTaskFields pins that the task-only fields a
-// sub-workflow task legitimately carries are accepted: depends_on, when,
-// writes_state, retry, budget, schema, and with.
+// TestParseSubWorkflowAllowsTaskFields pins, one field per case, that the
+// task-only fields a sub-workflow task legitimately carries are accepted and
+// recorded: depends_on, when, writes_state, retry, budget, schema, and with.
 func TestParseSubWorkflowAllowsTaskFields(t *testing.T) {
-	src := `
+	cases := []struct {
+		name  string
+		field string // YAML lines appended to the `cut` sub-workflow task
+		check func(t *testing.T, cut *workflow.Task)
+	}{
+		{
+			name:  "DependsOn",
+			field: "    depends_on: [seed]",
+			check: func(t *testing.T, cut *workflow.Task) {
+				if !slices.Contains(cut.DependsOn, workflow.TaskID("seed")) {
+					t.Errorf("DependsOn = %v, want it to include seed", cut.DependsOn)
+				}
+			},
+		},
+		{
+			name:  "When",
+			field: "    depends_on: [seed]\n    when: succeeded(seed)",
+			check: func(t *testing.T, cut *workflow.Task) {
+				if cut.When != "succeeded(seed)" {
+					t.Errorf("When = %q, want %q", cut.When, "succeeded(seed)")
+				}
+			},
+		},
+		{
+			name:  "WritesState",
+			field: "    writes_state: cut_out",
+			check: func(t *testing.T, cut *workflow.Task) {
+				if cut.WritesState != "cut_out" {
+					t.Errorf("WritesState = %q, want %q", cut.WritesState, "cut_out")
+				}
+			},
+		},
+		{
+			name:  "Retry.Max",
+			field: "    retry:\n      max: 1",
+			check: func(t *testing.T, cut *workflow.Task) {
+				if cut.Retry.Max != 1 {
+					t.Errorf("Retry.Max = %d, want 1", cut.Retry.Max)
+				}
+			},
+		},
+		{
+			name:  "Budget",
+			field: "    budget:\n      max_cost_usd: 1.0",
+			check: func(t *testing.T, cut *workflow.Task) {
+				if cut.Budget == nil || cut.Budget.MaxCostUSD != 1.0 {
+					t.Errorf("Budget = %+v, want MaxCostUSD 1.0", cut.Budget)
+				}
+			},
+		},
+		{
+			name:  "Schema",
+			field: "    schema:\n      type: object",
+			check: func(t *testing.T, cut *workflow.Task) {
+				if cut.Schema == nil {
+					t.Error("Schema = nil, want a parsed object schema")
+				}
+			},
+		},
+		{
+			name:  "With",
+			field: "    with:\n      version: \"{{seed}}\"",
+			check: func(t *testing.T, cut *workflow.Task) {
+				want := []workflow.WithArg{{Name: "version", Value: "{{seed}}"}}
+				if !slices.Equal(cut.With, want) {
+					t.Errorf("With = %+v, want %+v", cut.With, want)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := fmt.Sprintf(`
 name: parent
 runtime: test-rt
 model: m1
@@ -187,28 +261,18 @@ tasks:
     prompt: hi
   - id: cut
     workflow: release
-    depends_on: [seed]
-    when: succeeded(seed)
-    writes_state: cut_out
-    retry:
-      max: 1
-    budget:
-      max_cost_usd: 1.0
-    schema:
-      type: object
-    with:
-      version: "{{seed}}"
-`
-	wf, err := workflow.Parse([]byte(src))
-	if err != nil {
-		t.Fatalf("Parse rejected allowed sub-workflow fields: %v", err)
-	}
-	cut := wf.ByID("cut")
-	if cut == nil {
-		t.Fatal("ByID(cut) = nil")
-	}
-	if !slices.Contains(cut.DependsOn, workflow.TaskID("seed")) {
-		t.Errorf("DependsOn = %v, want it to include seed", cut.DependsOn)
+%s
+`, tc.field)
+			wf, err := workflow.Parse([]byte(src))
+			if err != nil {
+				t.Fatalf("Parse rejected allowed sub-workflow field %s: %v", tc.name, err)
+			}
+			cut := wf.ByID("cut")
+			if cut == nil {
+				t.Fatal("ByID(cut) = nil")
+			}
+			tc.check(t, cut)
+		})
 	}
 }
 
@@ -225,8 +289,13 @@ tasks:
     with:
       "bad-key": "1.0"
 `
-	if _, err := workflow.Parse([]byte(src)); err == nil {
-		t.Fatal("Parse accepted a non-identifier with: key; want rejection")
+	_, err := workflow.Parse([]byte(src))
+	var bad *workflow.InvalidParamNameError
+	if !errors.As(err, &bad) {
+		t.Fatalf("errors.As InvalidParamNameError failed; err = %v", err)
+	}
+	if bad.Value != "bad-key" {
+		t.Errorf("InvalidParamNameError.Value = %q, want %q", bad.Value, "bad-key")
 	}
 }
 
@@ -242,8 +311,13 @@ tasks:
   - id: a
     prompt: hi
 `
-	if _, err := workflow.Parse([]byte(src)); err == nil {
-		t.Fatal("Parse accepted output: naming an unknown task; want rejection")
+	_, err := workflow.Parse([]byte(src))
+	var unknown *workflow.UnknownOutputTaskError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("errors.As UnknownOutputTaskError failed; err = %v", err)
+	}
+	if unknown.Task != "ghost" {
+		t.Errorf("UnknownOutputTaskError.Task = %q, want %q", unknown.Task, "ghost")
 	}
 }
 
@@ -341,9 +415,6 @@ tasks:
           workflow: release
           with:
             target: "{{item}}"
-  - id: done
-    depends_on: [run]
-    prompt: "{{run}}"
 `
 	wf, err := workflow.Parse([]byte(src))
 	if err != nil {
@@ -355,5 +426,81 @@ tasks:
 	}
 	if slices.Contains(run.DependsOn, workflow.TaskID("item")) {
 		t.Errorf("loop var leaked into DependsOn = %v; want no `item` edge", run.DependsOn)
+	}
+}
+
+// TestParseSubWorkflowWithPrevReferencingNonMember pins that a `{{prev.id}}`
+// placeholder living in a sub-workflow task's `with:` value is validated for
+// loop membership exactly as a prompt body is. The member references a task
+// that is not part of its own loop, so Parse must reject it with
+// PrevNotMemberError rather than letting the dangling reference through to
+// resolve to "" at runtime.
+//
+// Regression for .loom/report.md top priority #2: checkPrevPlaceholders now
+// scans the With values as well as Prompt/Command, so this reference is
+// rejected at parse time.
+func TestParseSubWorkflowWithPrevReferencingNonMember(t *testing.T) {
+	src := `
+name: wf_prev_sub_nonmember
+runtime: test-rt
+model: m1
+tasks:
+  - id: outside
+    prompt: O
+  - id: work
+    loop:
+      until_empty: a
+      max: 2
+      tasks:
+        - id: a
+          workflow: release
+          with:
+            version: "{{prev.outside}}"
+`
+	_, err := workflow.Parse([]byte(src))
+
+	var got *workflow.PrevNotMemberError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As PrevNotMemberError failed; err = %v", err)
+	}
+	if got.Task != "a" {
+		t.Errorf("PrevNotMemberError.Task = %q, want a", got.Task)
+	}
+	if got.Name != "outside" {
+		t.Errorf("PrevNotMemberError.Name = %q, want outside", got.Name)
+	}
+}
+
+// TestParseSubWorkflowWithPrevOutsideLoop pins that a `{{prev.id}}` placeholder
+// in a top-level sub-workflow task's `with:` value is rejected with
+// PrevOutsideLoopError: prev names the prior iteration's output of a sibling
+// loop member, so it is meaningless on a task that belongs to no loop.
+//
+// Regression for .loom/report.md top priority #2: the prev refs returned by
+// scanPlaceholders for with-values are now validated (buildSubWorkflowDeps no
+// longer discards them), so this reference is rejected rather than substituting
+// "" at runtime.
+func TestParseSubWorkflowWithPrevOutsideLoop(t *testing.T) {
+	src := `
+name: wf_prev_sub_toplevel
+runtime: test-rt
+model: m1
+tasks:
+  - id: cut
+    workflow: release
+    with:
+      version: "{{prev.a}}"
+`
+	_, err := workflow.Parse([]byte(src))
+
+	var got *workflow.PrevOutsideLoopError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As PrevOutsideLoopError failed; err = %v", err)
+	}
+	if got.Task != "cut" {
+		t.Errorf("PrevOutsideLoopError.Task = %q, want cut", got.Task)
+	}
+	if got.Name != "a" {
+		t.Errorf("PrevOutsideLoopError.Name = %q, want a", got.Name)
 	}
 }

@@ -26,7 +26,7 @@ type TaskID string
 type ParamName string
 
 // identifierClass is the character class that defines a valid WorkflowID,
-// TaskID, or ParamName, and — by extension — the alphabet for `{{id}}` and
+// TaskID, or ParamName, and (by extension) the alphabet for `{{id}}` and
 // `{{params.name}}` placeholder names recognized by the parser. identifierRe,
 // placeholderRe, paramPlaceholderRe, and combinedPlaceholderRe all derive
 // from this constant so the regexes cannot drift apart.
@@ -334,7 +334,28 @@ func (r Retry) Enabled() bool {
 // reliable discriminator at the executor, CLI, and store layers.
 func (t Task) IsShell() bool { return t.Command != "" }
 
-// Param is a declared workflow parameter — a named value supplied at run time
+// TextBodies returns every substitutable text fragment a task carries: its
+// prompt or command body, followed by each with-value. A shell task keeps its
+// body in Command; a sub-workflow task has no prompt body for this form (prompt
+// is empty), so its prev and placeholder refs live in the with-values instead.
+// Centralizing the body-form discrimination here keeps placeholder scanning
+// from drifting as new body forms are added.
+func (t Task) TextBodies() []string {
+	body := t.Prompt
+	if t.IsShell() {
+		body = t.Command
+	}
+	bodies := make([]string, 0, 1+len(t.With))
+	if body != "" {
+		bodies = append(bodies, body)
+	}
+	for _, a := range t.With {
+		bodies = append(bodies, a.Value)
+	}
+	return bodies
+}
+
+// Param is a declared workflow parameter: a named value supplied at run time
 // via `-p key=val` (or a defaults block) and substituted into prompts via
 // `{{params.name}}`.
 type Param struct {

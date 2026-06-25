@@ -392,17 +392,15 @@ func resolveForEach(lg *LoopGroup, rl rawLoop, ids map[TaskID]struct{}, params m
 func checkPrevPlaceholders(wf *Workflow, memberByLoop map[LoopID]map[TaskID]bool) error {
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
-		body := t.Prompt
-		if t.IsShell() {
-			body = t.Command
-		}
-		for _, m := range prevPlaceholderRe.FindAllStringSubmatch(body, -1) {
-			name := m[1]
-			if t.Loop == "" {
-				return &PrevOutsideLoopError{Task: t.ID, Name: name}
-			}
-			if !memberByLoop[t.Loop][TaskID(name)] {
-				return &PrevNotMemberError{Task: t.ID, Loop: t.Loop, Name: name}
+		for _, text := range t.TextBodies() {
+			for _, m := range prevPlaceholderRe.FindAllStringSubmatch(text, -1) {
+				name := m[1]
+				if t.Loop == "" {
+					return &PrevOutsideLoopError{Task: t.ID, Name: name}
+				}
+				if !memberByLoop[t.Loop][TaskID(name)] {
+					return &PrevNotMemberError{Task: t.ID, Loop: t.Loop, Name: name}
+				}
 			}
 		}
 	}
