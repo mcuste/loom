@@ -186,3 +186,38 @@ func TestRunSubWorkflowSubstitutesWithValues(t *testing.T) {
 		t.Errorf("Outputs[cut] = %q, want %q (with-value substituted from parent ctx)", rep.Outputs["cut"], "publish build 2.0.0")
 	}
 }
+
+// TestRunSubWorkflowBindsLoopVarInWithValues pins that a for_each loop variable
+// is bound into a sub-workflow member's `with:` values, exactly as it is in a
+// plain task's prompt or command. Without the bindLoopVar pass on the
+// with-values, `{{ver}}` would reach the child verbatim and every iteration
+// would build the literal placeholder instead of the element.
+func TestRunSubWorkflowBindsLoopVarInWithValues(t *testing.T) {
+	child := releaseChild()
+	parent := &workflow.Workflow{
+		ID:      "parent",
+		Runtime: "exec-echo",
+		Model:   "m1",
+		Tasks: []workflow.Task{
+			{ID: "cut", Workflow: "release", With: []workflow.WithArg{{Name: "version", Value: "{{ver}}"}}},
+		},
+		Loops: []workflow.LoopGroup{{
+			ID:      "fan",
+			Kind:    workflow.LoopForEach,
+			List:    []string{"1.0.0", "2.0.0"},
+			As:      "ver",
+			Members: []workflow.TaskID{"cut"},
+		}},
+		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
+	}
+
+	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{Subs: parent.Subs})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A sequential for_each publishes the final element's result; the loop var
+	// must have been spliced into the with-value before reaching the child.
+	if rep.Outputs["cut"] != "publish build 2.0.0" {
+		t.Errorf("Outputs[cut] = %q, want %q (loop var bound into with-value)", rep.Outputs["cut"], "publish build 2.0.0")
+	}
+}

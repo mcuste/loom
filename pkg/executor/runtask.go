@@ -227,11 +227,14 @@ func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *r
 			hooks.OnStart(*t, st.iteration, "", "", "")
 		}
 		// with-values are substituted against the PARENT context first, then
-		// handed to the child as its CLI-tier param values.
+		// handed to the child as its CLI-tier param values. A for_each member
+		// binds its loop variable first (like the shell and LLM branches), so a
+		// `{{unit}}` reference resolves to the current element instead of leaking
+		// through to the child verbatim.
 		st.mu.Lock()
 		vals := make(map[string]string, len(t.With))
 		for _, a := range t.With {
-			vals[string(a.Name)] = workflow.Substitute(a.Value, st.outputs, opts.Params, opts.State, st.prev)
+			vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.outputs, opts.Params, opts.State, st.prev)
 		}
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
