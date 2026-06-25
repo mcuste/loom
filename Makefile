@@ -3,7 +3,7 @@ BIN := loom
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install build clean test test-race fmt vet tidy check run check-all
+.PHONY: help install build clean test test-race fmt vet tidy lint lint-test check run check-all
 
 help: ## list available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -32,6 +32,10 @@ vet: ## run go vet
 
 tidy: ## tidy go.mod / go.sum
 	go mod tidy
+
+lint: fmt vet ## run all lint checks (fmt + vet)
+
+lint-test: lint test ## run all lint checks then tests
 
 check: ## check one workflow: make check WORKFLOW=path/to.yaml
 	go run $(PKG) check $(WORKFLOW)

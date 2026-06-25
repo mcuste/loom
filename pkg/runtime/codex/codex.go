@@ -36,7 +36,7 @@ var (
 	// pricing carries per-million-token USD rates for each whitelisted model
 	// (OpenAI standard pricing, June 2026). Cache reads are 90% discounted
 	// from the standard input rate. Models absent from this map produce
-	// TotalCostUSD = 0 — non-fatal so a newly released model still runs;
+	// TotalCostUSD = 0; non-fatal so a newly released model still runs;
 	// callers wanting strict accounting should keep this map in sync with
 	// OpenAI's published rates.
 	pricing = map[runtime.Model]prices{

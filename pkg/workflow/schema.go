@@ -46,7 +46,7 @@ type rawProperty struct {
 }
 
 // parseSchema decodes a task's `schema:` node into a *Schema. An absent block
-// (zero-value node) yields nil — the no-validation default.
+// (zero-value node) yields nil, the no-validation default.
 func parseSchema(node yaml.Node) (*Schema, error) {
 	if node.Kind == 0 {
 		return nil, nil

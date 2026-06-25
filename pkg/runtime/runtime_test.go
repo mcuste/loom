@@ -75,7 +75,6 @@ func TestRunnerValidate(t *testing.T) {
 		{"unsupported system prompt", noSys, runtime.Request{Model: "m1", SystemPrompt: "sys"}, runtime.ErrUnsupportedSystemPrompt},
 	}
 
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.runner.Validate(tc.req)

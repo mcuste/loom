@@ -17,8 +17,8 @@ type CacheEntry struct {
 	Output string `json:"output"`
 }
 
-// CacheKey hashes the inputs that fully determine an LLM task's output —
-// runtime, model, effort, system prompt, and the substituted prompt — into the
+// CacheKey hashes the inputs that fully determine an LLM task's output
+// (runtime, model, effort, system prompt, and the substituted prompt) into the
 // stable filename stem used by LoadCache and SaveCache. Two calls with
 // identical inputs return the same key; changing any input changes the key.
 func CacheKey(rt runtime.Name, model runtime.Model, effort runtime.Effort, systemPrompt, prompt string) string {

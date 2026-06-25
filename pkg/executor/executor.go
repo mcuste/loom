@@ -95,7 +95,7 @@ func (e *ShellError) Error() string {
 
 // Report is the aggregate outcome of a Run call.
 //
-// Tasks lists per-task results in completion order — not Plan order — because
+// Tasks lists per-task results in completion order (not Plan order) because
 // independent tasks run concurrently and finish at different times. Outputs is
 // the same data keyed by id for placeholder lookups. Usage sums Usage across
 // every completed task. Params carries opts.Params verbatim so callers can

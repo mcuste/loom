@@ -228,7 +228,7 @@ func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runEr
 }
 
 // Close finalizes the run: it records totals from summary, sets the overall
-// status, and refreshes the latest.json symlink. Idempotent — subsequent
+// status, and refreshes the latest.json symlink. Idempotent; subsequent
 // calls return nil without rewriting the file or updating the symlink.
 func (r *Run) Close(summary *Summary, runErr error) error {
 	r.mu.Lock()

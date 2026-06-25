@@ -242,7 +242,7 @@ func stringifyParams(p workflow.ParamValues) map[string]string {
 }
 
 // storeHooks binds store.Run.OnStart and store.Run.OnFinish as method values
-// directly — their signatures match executor.Hooks with no adapter needed.
+// directly: their signatures match executor.Hooks with no adapter needed.
 func storeHooks(run *store.Run) executor.Hooks {
 	return executor.Hooks{
 		OnStart:  run.OnStart,

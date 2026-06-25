@@ -4,7 +4,7 @@
 // Runner is the single contract every registered runtime satisfies: it both
 // validates a Request's routing fields (Validate) and executes a task (Run).
 // Capability sub-interfaces (Subprocess, API) describe transport-specific
-// preflight needs — binary on PATH, env vars set — without affecting the
+// preflight needs (binary on PATH, env vars set) without affecting the
 // core contract.
 //
 // Runtimes register themselves with the package registry at init time;
@@ -47,7 +47,7 @@ type Effort string
 type Request struct {
 	// TaskID is the workflow.TaskID this Request was built for, as a plain
 	// string. Typed as string (not workflow.TaskID) because the workflow
-	// package imports this one — promoting it to workflow.TaskID here would
+	// package imports this one: promoting it to workflow.TaskID here would
 	// create an import cycle. Runtimes treat it as an opaque identifier for
 	// telemetry and error context.
 	TaskID       string

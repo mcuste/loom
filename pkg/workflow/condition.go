@@ -68,7 +68,7 @@ var (
 // task ids the expression may reference: a placeholder or status-helper
 // argument naming any other id is an UnknownConditionRefError. Callers pass the
 // guarded task's dependency set (not the whole workflow) so a reference to a
-// task that is not waited on — including the task's own id — is rejected at
+// task that is not waited on (including the task's own id) is rejected at
 // load time. A syntactically invalid expression is a MalformedConditionError.
 func ParseCondition(expr string, known map[TaskID]bool) (*Condition, error) {
 	raw := expr

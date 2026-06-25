@@ -1,5 +1,26 @@
 # Loom
 
+## Build, lint, test
+
+Use the Makefile targets; they are the canonical commands. Run from
+the repo root. After any code change, run `make lint-test` and make
+sure it is clean before committing.
+
+- **Lint**: `make lint` (runs `fmt` + `vet`: `go fmt ./...` then
+  `go vet ./...`). There is no golangci-lint config; `go vet` is the
+  lint gate.
+- **Lint + test**: `make lint-test` (runs `lint` then `test`). This is
+  the default pre-commit gate.
+- **Format only**: `make fmt` (`go fmt ./...`).
+- **Vet only**: `make vet` (`go vet ./...`).
+- **Test**: `make test` (runs `go test ./...`). Use
+  `make test-race` (`go test -race ./...`) when touching concurrency.
+- **Build/install**: `make build` (binary `./loom`) or `make install`
+  (`go install ./cmd/loom`).
+- **Tidy modules**: `make tidy` after changing dependencies.
+- **Validate workflows**: `make check WORKFLOW=path/to.yaml` for one,
+  or `make check-all` for every YAML under `workflows/`.
+
 ## Commit convention
 
 Subsystem-prefixed, imperative subject. Format:

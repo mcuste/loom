@@ -8,7 +8,7 @@ import "slices"
 // reading a workflow top-to-bottom matches the order loom will execute it in).
 //
 // Plan assumes w has been produced by Parse, which guarantees the graph is a
-// DAG. If a cycle is present (hand-built Workflow only), Plan panics — the
+// DAG. If a cycle is present (hand-built Workflow only), Plan panics: the
 // invariant is violated and there is no defensible partial-order behavior.
 func (w *Workflow) Plan() []TaskID {
 	pos := make(map[TaskID]int, len(w.Tasks))
@@ -53,7 +53,7 @@ func (w *Workflow) Plan() []TaskID {
 		}
 	}
 	if len(order) != len(w.Tasks) {
-		panic("workflow.Plan: cycle detected — Workflow must be produced by Parse")
+		panic("workflow.Plan: cycle detected; Workflow must be produced by Parse")
 	}
 	return order
 }

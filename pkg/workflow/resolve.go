@@ -60,7 +60,7 @@ func (w *Workflow) CacheEnabled(t *Task) bool {
 // `{{prev.draft}}` each resolve from their own map.
 //
 // Any map may be nil. An unknown task or param placeholder is left in place
-// verbatim — mirroring the parser-time invariant that every such placeholder in
+// verbatim, mirroring the parser-time invariant that every such placeholder in
 // a Workflow returned by Parse is guaranteed to resolve. A missing state key or
 // prev id, by contrast, substitutes to the empty string: both are legitimately
 // empty on the first tick (state across runs, prev on the first loop
@@ -230,7 +230,7 @@ func (e *DuplicateCLIParamError) Error() string {
 }
 
 // InvalidParamValueError reports a CLI/file param value containing invalid
-// UTF-8 or a NUL byte — values that would not survive a YAML round trip.
+// UTF-8 or a NUL byte: values that would not survive a YAML round trip.
 type InvalidParamValueError struct{ Name string }
 
 func (e *InvalidParamValueError) Error() string {

@@ -21,7 +21,6 @@ type InvalidBudgetError struct {
 	Value float64
 }
 
-// Error reports the invalid value that was rejected.
 func (e *InvalidBudgetError) Error() string {
 	return fmt.Sprintf("invalid budget max_cost_usd %v: must be a positive float", e.Value)
 }
@@ -30,7 +29,6 @@ func (e *InvalidBudgetError) Error() string {
 // `max_cost_usd`.
 type UnknownBudgetFieldError struct{ Field string }
 
-// Error reports the unrecognized field name.
 func (e *UnknownBudgetFieldError) Error() string {
 	return fmt.Sprintf("budget: unknown field %q", e.Field)
 }
@@ -41,13 +39,12 @@ func (e *UnknownBudgetFieldError) Error() string {
 // InvalidBudgetError and UnknownBudgetFieldError.
 type MalformedBudgetError struct{ Reason string }
 
-// Error reports the reason the budget block's structure was rejected.
 func (e *MalformedBudgetError) Error() string {
 	return "budget: " + e.Reason
 }
 
 // parseBudget decodes a `budget:` mapping (workflow- or task-level) into a
-// *Budget. An absent block (zero-value node) yields nil — no limit. A present
+// *Budget. An absent block (zero-value node) yields nil: no limit. A present
 // block requires `max_cost_usd` to be a positive float; zero, negative, or
 // absent is rejected with InvalidBudgetError.
 func parseBudget(node yaml.Node) (*Budget, error) {
