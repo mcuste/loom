@@ -197,10 +197,7 @@ func (m *runModel) onStart(msg taskStartMsg) {
 // scrollback.
 func (m *runModel) onFinish(msg taskFinishMsg) string {
 	m.done++
-	m.usage.InputTokens += msg.res.Usage.InputTokens
-	m.usage.OutputTokens += msg.res.Usage.OutputTokens
-	m.usage.CacheReadTokens += msg.res.Usage.CacheReadTokens
-	m.usage.TotalCostUSD += msg.res.Usage.TotalCostUSD
+	m.usage.Add(msg.res.Usage)
 
 	if t, ok := m.tasks[msg.id]; ok {
 		if msg.err != nil {

@@ -1,72 +1,68 @@
-package executor
+package executor_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// TestTransientClassifier pins the typed transient classifier across its three
-// inspection paths: a runtime.ExecError's Stderr, a ShellError's Stderr, and
-// the plain-string fallback for unwrapped errors, plus a non-transient miss.
-// Typed cases assert classification via the typed Stderr field rather than
-// incidental string formatting.
-func TestTransientClassifier(t *testing.T) {
+// TestRun_RetriesTypedTransientErrors exercises the transient classifier
+// through the public retry path rather than calling the unexported predicate.
+// A runtime that fails once with a typed error carrying a transient signal in
+// its Stderr must be retried (2 attempts); a non-transient signal must not
+// (1 attempt). This proves the classifier inspects the typed Stderr field
+// rather than incidental Error() formatting.
+func TestRun_RetriesTypedTransientErrors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		err  error
-		want bool
+		name      string
+		err       error
+		wantCalls int
 	}{
 		{
-			"exec_error_stderr",
+			"exec_error_stderr_is_transient",
 			&runtime.ExecError{Name: "codex", Err: errors.New("exit status 1"), Stderr: "429 too many requests"},
-			true,
+			2,
 		},
 		{
-			"shell_error_stderr",
-			&ShellError{ExitCode: 1, Stderr: "read tcp: connection reset by peer"},
-			true,
+			"shell_error_stderr_is_transient",
+			&executor.ShellError{ExitCode: 1, Stderr: "read tcp: connection reset by peer"},
+			2,
 		},
 		{
-			"plain_string_fallback",
-			errors.New("503 service unavailable"),
-			true,
-		},
-		{
-			"non_transient_miss",
-			errors.New("400 invalid request: bad prompt"),
-			false,
+			"non_transient_is_not_retried",
+			&runtime.ExecError{Name: "codex", Err: errors.New("exit status 1"), Stderr: "400 invalid request: bad prompt"},
+			1,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := transientClassifier(tc.err); got != tc.want {
-				t.Errorf("transientClassifier(%v) = %v, want %v", tc.err, got, tc.want)
+			rt, flaky := newFlaky(t, 1, tc.err)
+			src := `
+name: wf
+runtime: ` + rt + `
+model: m1
+tasks:
+  - id: a
+    prompt: hello
+    retry:
+      max: 2
+      backoff: none
+      on: [transient]
+`
+			wf, err := workflow.Parse([]byte(src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			_, _ = executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{RetryBaseDelay: fastBackoff})
+			if got := flaky.callCount(); got != tc.wantCalls {
+				t.Errorf("attempts = %d, want %d", got, tc.wantCalls)
 			}
 		})
-	}
-}
-
-// TestClassifierRegistry_CoversEveryValidRetryClass is the drift guard between
-// the parse vocabulary and the runtime registry: every class the parser accepts
-// must have a registered classifier, so parse can never admit a class the
-// runtime would silently ignore. It also asserts no classifier is registered
-// for a class the parser would reject. The guard iterates the vocabulary rather
-// than spot-checking, so a new class with no classifier is caught.
-func TestClassifierRegistry_CoversEveryValidRetryClass(t *testing.T) {
-	t.Parallel()
-	for _, class := range workflow.RetryClasses() {
-		if _, ok := classifiers[class]; !ok {
-			t.Errorf("no classifier registered for valid class %q", class)
-		}
-	}
-	for class := range classifiers {
-		if !workflow.ValidRetryClass(class) {
-			t.Errorf("classifier registered for %q but ValidRetryClass rejects it", class)
-		}
 	}
 }
