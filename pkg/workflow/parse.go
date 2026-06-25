@@ -284,7 +284,7 @@ func Parse(data []byte) (*Workflow, error) {
 		}
 		var deps []TaskID
 		if rt.Workflow != "" {
-			deps, err = buildSubWorkflowDeps(tid, rt.DependsOn, withArgs, ids, paramSet)
+			deps, err = buildSubWorkflowDeps(tid, rt.DependsOn, withArgs, ids, paramSet, asByLoop[lt.loop])
 		} else {
 			deps, err = buildDeps(tid, rt.DependsOn, body, ids, paramSet, asByLoop[lt.loop])
 		}
@@ -1299,8 +1299,11 @@ func decodeWith(tid TaskID, node yaml.Node) ([]WithArg, error) {
 // depends_on), a task-id placeholder in a with-VALUE extends the graph: it adds
 // the edge implicitly, unioned with any explicit depends_on. Param placeholders
 // in with-values are validated against the declared params; an unknown task or
-// param reference is rejected the same way buildDeps rejects them.
-func buildSubWorkflowDeps(tid TaskID, declared []string, withArgs []WithArg, known map[TaskID]struct{}, params map[ParamName]struct{}) ([]TaskID, error) {
+// param reference is rejected the same way buildDeps rejects them. loopVar is
+// the owning for_each's `as` variable ("" outside a for_each body): a with-value
+// may reference it like any body member's prompt, so it is neither an edge nor
+// an unknown ref.
+func buildSubWorkflowDeps(tid TaskID, declared []string, withArgs []WithArg, known map[TaskID]struct{}, params map[ParamName]struct{}, loopVar string) ([]TaskID, error) {
 	deps := make([]TaskID, 0, len(declared))
 	seen := make(map[TaskID]struct{}, len(declared))
 
@@ -1322,6 +1325,9 @@ func buildSubWorkflowDeps(tid TaskID, declared []string, withArgs []WithArg, kno
 	for _, a := range withArgs {
 		taskRefs, paramRefs, _ := scanPlaceholders(a.Value)
 		for _, name := range taskRefs {
+			if name == loopVar {
+				continue
+			}
 			id := TaskID(name)
 			if _, ok := known[id]; !ok {
 				return nil, &UnknownPlaceholderError{Task: tid, Name: name}

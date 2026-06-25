@@ -199,7 +199,7 @@ tasks:
 ```
 
 - **`in`** — either a static YAML sequence (`[a, b, c]`) or a single `{{...}}` placeholder scalar resolved at run time. A `{{taskid}}` source makes that task an entry dependency (the list is resolved once it closes); a `{{params.x}}` or `{{state.x}}` source needs no edge. A dynamic source is parsed as a JSON array of strings, else split on newlines, with blank entries dropped.
-- **`as`** — the loop variable; `[A-Za-z0-9_]+`, and distinct from every task id and param name. Reference it as `{{as}}` in any body member's prompt or command; it is bound per iteration and **exempt from `depends_on`** (it is not a task output).
+- **`as`** — the loop variable; `[A-Za-z0-9_]+`, and distinct from every task id and param name. Reference it as `{{as}}` in any body member's prompt, command, or sub-workflow `with:` value; it is bound per iteration and **exempt from `depends_on`** (it is not a task output).
 - **No `until_*` / `max`** — the list length fixes the iteration count. An **empty list runs zero iterations**: the members never run and the loop closes their gates immediately, so an exit consumer sees empty output (this composes with loop-until-dry: nothing to process reads as drained).
 - **Sequential** — passes run in list order; `{{prev.<member>}}` carries the prior pass's output forward exactly as in a `loop:`. A body member's published output is the **final** iteration's value (loop semantics), not a join across iterations.
 

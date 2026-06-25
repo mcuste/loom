@@ -318,3 +318,42 @@ tasks:
 		t.Fatalf("errors.As UnknownPlaceholderError failed; err = %v", err)
 	}
 }
+
+// TestParseSubWorkflowWithForEachVar pins that a sub-workflow body task inside a
+// for_each may reference the loop's `as` variable in a with-value, exactly as a
+// member prompt may. The loop var is bound per iteration, so it is exempt from
+// the depends_on check and creates no dep edge (mirroring buildDeps for prompt
+// members).
+func TestParseSubWorkflowWithForEachVar(t *testing.T) {
+	src := `
+name: parent
+runtime: test-rt
+model: m1
+tasks:
+  - id: list
+    command: "echo a"
+  - id: fan
+    for_each:
+      in: "{{list}}"
+      as: item
+      tasks:
+        - id: run
+          workflow: release
+          with:
+            target: "{{item}}"
+  - id: done
+    depends_on: [run]
+    prompt: "{{run}}"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	run := wf.ByID("run")
+	if run == nil {
+		t.Fatal("ByID(run) = nil")
+	}
+	if slices.Contains(run.DependsOn, workflow.TaskID("item")) {
+		t.Errorf("loop var leaked into DependsOn = %v; want no `item` edge", run.DependsOn)
+	}
+}
