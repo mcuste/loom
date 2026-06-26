@@ -93,18 +93,16 @@ tasks:
 	if !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("error %q does not name the offending param %q", err.Error(), "ghost")
 	}
-	// Run file should never have been created — bail-out happened before store.Open.
+	// Run file should never have been created, bail-out happened before store.Open.
 	if _, statErr := os.Stat(testRunsDir(t)); !os.IsNotExist(statErr) {
 		t.Errorf("runs directory exists after rejected run; statErr=%v", statErr)
 	}
 }
 
-// TestCheckCommandWarnsOnMissingRequired pins the `loom check` advisory mode:
-// a missing required param prints a warning but exits 0. Supplying the param
-// resolves cleanly with no warning. Other CLI hygiene errors (here:
-// duplicate `-p`) still hard-fail.
-func TestCheckCommandWarnsOnMissingRequired(t *testing.T) {
-	path := writeWorkflow(t, `
+// requiredParamWorkflow is the shared fixture for the `loom check` advisory-mode
+// tests: a workflow with a single required param so each test can drive one
+// resolution outcome (missing, supplied, duplicate) independently.
+const requiredParamWorkflow = `
 name: wf
 runtime: cmd-echo
 model: m1
@@ -114,56 +112,64 @@ params:
 tasks:
   - id: a
     prompt: hello {{params.env}}
-`)
+`
 
-	// No -p — expect warning, exit 0.
-	{
-		var buf bytes.Buffer
-		root := newRootCmd()
-		root.SetOut(&buf)
-		root.SetErr(&buf)
-		root.SetArgs([]string{"run", "check", path})
-		if err := root.Execute(); err != nil {
-			t.Fatalf("check (no -p) returned err = %v; want nil", err)
-		}
-		out := buf.String()
-		if !strings.Contains(out, "warning") || !strings.Contains(out, "env") {
-			t.Errorf("expected warning naming `env`; got:\n%s", out)
-		}
-		if !strings.Contains(out, "MISSING") {
-			t.Errorf("expected MISSING marker in plan; got:\n%s", out)
-		}
+// TestCheckCommandWarnsOnMissingRequired pins that `loom check` with a missing
+// required param prints a warning (and the MISSING plan marker) but exits 0.
+func TestCheckCommandWarnsOnMissingRequired(t *testing.T) {
+	path := writeWorkflow(t, requiredParamWorkflow)
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"run", "check", path})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("check (no -p) returned err = %v; want nil", err)
 	}
-
-	// -p env=prod — clean, no warning.
-	{
-		var buf bytes.Buffer
-		root := newRootCmd()
-		root.SetOut(&buf)
-		root.SetErr(&buf)
-		root.SetArgs([]string{"run", "check", path, "-p", "env=prod"})
-		if err := root.Execute(); err != nil {
-			t.Fatalf("check (-p env=prod) returned err = %v; want nil", err)
-		}
-		out := buf.String()
-		if strings.Contains(out, "warning") {
-			t.Errorf("did not expect warning when env is supplied; got:\n%s", out)
-		}
-		if !strings.Contains(out, "(cli)") {
-			t.Errorf("expected (cli) provenance tag; got:\n%s", out)
-		}
+	out := buf.String()
+	if !strings.Contains(out, "warning") || !strings.Contains(out, "env") {
+		t.Errorf("expected warning naming `env`; got:\n%s", out)
 	}
+	if !strings.Contains(out, "MISSING") {
+		t.Errorf("expected MISSING marker in plan; got:\n%s", out)
+	}
+}
 
-	// Duplicate -p — hard error even on check.
-	{
-		var buf bytes.Buffer
-		root := newRootCmd()
-		root.SetOut(&buf)
-		root.SetErr(&buf)
-		root.SetArgs([]string{"run", "check", path, "-p", "env=a", "-p", "env=b"})
-		if err := root.Execute(); err == nil {
-			t.Fatalf("check with duplicate -p returned nil; want DuplicateCLIParamError")
-		}
+// TestCheckCommandResolvesSuppliedRequired pins that supplying the required
+// param via -p resolves cleanly: no warning, and a (cli) provenance tag.
+func TestCheckCommandResolvesSuppliedRequired(t *testing.T) {
+	path := writeWorkflow(t, requiredParamWorkflow)
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"run", "check", path, "-p", "env=prod"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("check (-p env=prod) returned err = %v; want nil", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "warning") {
+		t.Errorf("did not expect warning when env is supplied; got:\n%s", out)
+	}
+	if !strings.Contains(out, "(cli)") {
+		t.Errorf("expected (cli) provenance tag; got:\n%s", out)
+	}
+}
+
+// TestCheckCommandRejectsDuplicateParam pins that a CLI hygiene error (a
+// duplicate -p) hard-fails even in check's otherwise-advisory mode.
+func TestCheckCommandRejectsDuplicateParam(t *testing.T) {
+	path := writeWorkflow(t, requiredParamWorkflow)
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"run", "check", path, "-p", "env=a", "-p", "env=b"})
+	if err := root.Execute(); err == nil {
+		t.Fatalf("check with duplicate -p returned nil; want DuplicateCLIParamError")
 	}
 }
 
@@ -201,7 +207,7 @@ tasks:
 	if !strings.Contains(out, "deps=none") {
 		t.Errorf("expected deps=none in plan; got:\n%s", out)
 	}
-	// runtime= triple must be absent — shell tasks suppress it.
+	// runtime= triple must be absent, shell tasks suppress it.
 	if strings.Contains(out, "runtime=") {
 		t.Errorf("did not expect runtime= in shell-task plan line; got:\n%s", out)
 	}

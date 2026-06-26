@@ -177,7 +177,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
 		sh,
-	), executor.Options{Params: resolved, Seed: seed, State: state, Subs: wf.Subs})
+	), executor.Options{Params: resolved, Seed: seed, State: state})
 	if rep != nil {
 		// A summary write error does not mask a real run failure: surface it only
 		// when the run itself otherwise succeeded.

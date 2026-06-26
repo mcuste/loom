@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -47,7 +48,7 @@ func (c *countingRuntime) count() int {
 func registerCounter(t *testing.T) (*countingRuntime, runtime.Name) {
 	t.Helper()
 	rt := &countingRuntime{}
-	name := runtime.Name("exec-cache-" + t.Name())
+	name := runtime.Name(fmt.Sprintf("exec-cache-%s-%d", t.Name(), barrierSeq.Add(1)))
 	runtime.Register(name, rt)
 	return rt, name
 }

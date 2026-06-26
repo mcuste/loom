@@ -305,18 +305,23 @@ func subworkflowDescriptor(wf *workflow.Workflow, t *workflow.Task) string {
 // task its linked ref and child-task count, an LLM task its effective
 // runtime/model/effort triple.
 func planTaskCols(wf *workflow.Workflow, t *workflow.Task) string {
-	switch {
-	case t.IsShell():
+	switch t.BodyKind() {
+	case workflow.BodyShell:
 		cmd := t.Command
 		if len(cmd) > 60 {
 			cmd = cmd[:60] + "…"
 		}
 		return fmt.Sprintf("kind=shell  cmd=%q", cmd)
-	case t.IsSubWorkflow():
+	case workflow.BodySubWorkflow:
 		return "kind=subworkflow  " + subworkflowDescriptor(wf, t)
-	default:
+	case workflow.BodyPrompt:
 		rt, m, e := wf.Effective(t)
 		return fmt.Sprintf("runtime=%-12s  model=%-8s  effort=%-7s", orDash(string(rt)), orDash(string(m)), orDash(string(e)))
+	default:
+		// BodyInvalid: a hand-built or corrupted task that set none or more than
+		// one body form. Surface it in the plan rather than silently rendering it
+		// as an LLM task, matching the executor's fail-fast on the same shape.
+		return "kind=INVALID  (exactly one of prompt, command, or workflow must be set)"
 	}
 }
 

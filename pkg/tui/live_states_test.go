@@ -1,4 +1,4 @@
-package tui
+package tui_test
 
 import (
 	"errors"
@@ -9,14 +9,15 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/tui"
 )
 
 // TestRenderBadge_PerStateBadge pins the distinct badge rendered for each task
 // disposition: a cache hit, a when-skip, a resume seed, an in-flight retry, and
 // a failure (whose error is shown inline). Each subtest constructs the realistic
-// signal for its state and asserts the badge surfaces that state.
+// signal for its state and asserts the badge surfaces that state's label.
 func TestRenderBadge_PerStateBadge(t *testing.T) {
-	sym := symbolsFor(termenv.TrueColor)
+	sym := tui.SymbolsFor(termenv.TrueColor)
 	cases := []struct {
 		name     string
 		res      executor.TaskResult
@@ -28,40 +29,39 @@ func TestRenderBadge_PerStateBadge(t *testing.T) {
 		{
 			name: "cache",
 			res:  executor.TaskResult{Status: executor.StatusOK, CacheHit: true},
-			want: sym.cacheHit + " cache",
+			want: "cache",
 		},
 		{
 			name: "skip",
 			res:  executor.TaskResult{Status: executor.StatusSkipped},
-			want: sym.skipped + " skip",
+			want: "skip",
 		},
 		{
 			name:   "seed",
 			res:    executor.TaskResult{Status: executor.StatusOK},
 			seeded: true,
-			want:   sym.seeded + " seed",
+			want:   "seed",
 		},
 		{
 			name:     "retry",
 			res:      executor.TaskResult{},
 			retrying: true,
-			want:     sym.retry + " retry",
+			want:     "retry",
 		},
 		{
 			name: "fail",
 			res:  executor.TaskResult{Status: executor.StatusOK},
 			err:  errors.New("boom"),
-			// Assert the leading failure glyph too, so a right message under
-			// the wrong prefix cannot pass.
-			want: sym.failed + " fail: boom",
+			// The failure badge shows the trimmed message inline.
+			want: "fail: boom",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := renderBadge(badgeState{res: tc.res, err: tc.err, seeded: tc.seeded, retrying: tc.retrying}, sym)
+			got := tui.RenderBadge(tc.res, tc.err, tc.seeded, tc.retrying, sym)
 			if !strings.Contains(got, tc.want) {
-				t.Fatalf("renderBadge %s = %q, want it to contain %q", tc.name, got, tc.want)
+				t.Fatalf("RenderBadge %s = %q, want it to contain %q", tc.name, got, tc.want)
 			}
 		})
 	}
@@ -71,7 +71,7 @@ func TestRenderBadge_PerStateBadge(t *testing.T) {
 // no spend (0%), partial spend (50%), and over the ceiling (200%), so the
 // status bar surfaces how much of the workflow budget is consumed.
 func TestBudgetGauge_ReportsSpendPercentage(t *testing.T) {
-	sym := symbolsFor(termenv.TrueColor)
+	sym := tui.SymbolsFor(termenv.TrueColor)
 	cases := []struct {
 		name  string
 		spent float64
@@ -88,41 +88,64 @@ func TestBudgetGauge_ReportsSpendPercentage(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := budgetGauge(tc.spent, tc.max, sym)
+			got := tui.BudgetGauge(tc.spent, tc.max, sym)
 			if tc.want == "" {
 				if got != "" {
-					t.Fatalf("budgetGauge(%v, %v) = %q, want empty", tc.spent, tc.max, got)
+					t.Fatalf("BudgetGauge(%v, %v) = %q, want empty", tc.spent, tc.max, got)
 				}
 				return
 			}
 			if !strings.Contains(got, tc.want) {
-				t.Fatalf("budgetGauge(%v, %v) = %q, want it to contain %q", tc.spent, tc.max, got, tc.want)
+				t.Fatalf("BudgetGauge(%v, %v) = %q, want it to contain %q", tc.spent, tc.max, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestSymbols_ASCIIFallbackEmitsOnlyASCII pins that the ASCII fallback profile
-// renders every badge and the gauge with ASCII-only runes, so terminals without
-// Unicode still get legible (non-empty) output.
-func TestSymbols_ASCIIFallbackEmitsOnlyASCII(t *testing.T) {
-	sym := symbolsFor(termenv.Ascii)
-
-	var b strings.Builder
-	b.WriteString(renderBadge(badgeState{res: executor.TaskResult{Status: executor.StatusOK, CacheHit: true}}, sym))
-	b.WriteString(renderBadge(badgeState{res: executor.TaskResult{Status: executor.StatusSkipped}}, sym))
-	b.WriteString(renderBadge(badgeState{res: executor.TaskResult{Status: executor.StatusOK}, seeded: true}, sym))
-	b.WriteString(renderBadge(badgeState{retrying: true}, sym))
-	b.WriteString(renderBadge(badgeState{res: executor.TaskResult{Status: executor.StatusOK}, err: errors.New("boom")}, sym))
-	b.WriteString(budgetGauge(0.5, 1, sym))
-	out := b.String()
-
-	if out == "" {
-		t.Fatal("ASCII fallback rendered nothing; expected legible badges and gauge")
+// assertASCIINonEmpty fails when s is empty or carries any non-ASCII rune, the
+// property the ASCII fallback profile must hold so a Unicode-less terminal still
+// gets legible output.
+func assertASCIINonEmpty(t *testing.T, label, s string) {
+	t.Helper()
+	if s == "" {
+		t.Fatalf("%s: ASCII fallback rendered nothing; expected legible output", label)
 	}
-	for i, r := range out {
+	for i, r := range s {
 		if r >= utf8.RuneSelf {
-			t.Fatalf("non-ASCII rune %q at byte %d in ASCII fallback output %q", r, i, out)
+			t.Fatalf("%s: non-ASCII rune %q at byte %d in %q", label, r, i, s)
 		}
 	}
+}
+
+// TestSymbols_ASCIIFallbackEmitsOnlyASCII pins that the ASCII fallback profile
+// renders every badge and the gauge with ASCII-only runes. Each badge and the
+// gauge is asserted in its own subtest so a regression names the exact renderer
+// that emitted a non-ASCII rune rather than a single concatenated blob.
+func TestSymbols_ASCIIFallbackEmitsOnlyASCII(t *testing.T) {
+	sym := tui.SymbolsFor(termenv.Ascii)
+
+	badges := []struct {
+		name     string
+		res      executor.TaskResult
+		err      error
+		seeded   bool
+		retrying bool
+	}{
+		{name: "cache", res: executor.TaskResult{Status: executor.StatusOK, CacheHit: true}},
+		{name: "skip", res: executor.TaskResult{Status: executor.StatusSkipped}},
+		{name: "seed", res: executor.TaskResult{Status: executor.StatusOK}, seeded: true},
+		{name: "retry", retrying: true},
+		{name: "fail", res: executor.TaskResult{Status: executor.StatusOK}, err: errors.New("boom")},
+	}
+	for _, b := range badges {
+		t.Run("badge/"+b.name, func(t *testing.T) {
+			t.Parallel()
+			assertASCIINonEmpty(t, "badge "+b.name, tui.RenderBadge(b.res, b.err, b.seeded, b.retrying, sym))
+		})
+	}
+
+	t.Run("gauge", func(t *testing.T) {
+		t.Parallel()
+		assertASCIINonEmpty(t, "gauge", tui.BudgetGauge(0.5, 1, sym))
+	})
 }

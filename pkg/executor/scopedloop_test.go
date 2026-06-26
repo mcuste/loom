@@ -42,7 +42,7 @@ func newLoopRT(t *testing.T, scripts map[string][]string, usage runtime.Usage) (
 		prompts: map[string][]string{},
 		usage:   usage,
 	}
-	name := runtime.Name("loop-rt-" + t.Name())
+	name := runtime.Name(fmt.Sprintf("loop-rt-%s-%d", t.Name(), barrierSeq.Add(1)))
 	runtime.Register(name, rt)
 	return name, rt
 }
@@ -372,7 +372,7 @@ func (b *blockingRuntime) Run(ctx context.Context, req runtime.Request) (runtime
 func TestRun_ScopedLoop_CancellationPropagatesIntoBody(t *testing.T) {
 	t.Parallel()
 	rt := &blockingRuntime{blockOn: "a", started: make(chan struct{})}
-	name := runtime.Name("loop-block-" + t.Name())
+	name := runtime.Name(fmt.Sprintf("loop-block-%s-%d", t.Name(), barrierSeq.Add(1)))
 	runtime.Register(name, rt)
 
 	src := fmt.Sprintf(`

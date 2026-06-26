@@ -43,7 +43,7 @@ func TestRunSubWorkflowLeaf(t *testing.T) {
 		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
 	}
 
-	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{Subs: parent.Subs})
+	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRunSubWorkflowDefaultSink(t *testing.T) {
 		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
 	}
 
-	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{Subs: parent.Subs})
+	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -93,8 +93,8 @@ func TestRunSubWorkflowDefaultSink(t *testing.T) {
 
 // TestRunSubWorkflowNested pins the multi-level threading path: a grandparent
 // links a mid workflow whose own Subs link the leaf release child. The executor
-// must pass child.Subs down at each level (Options{Subs: child.Subs}) so the
-// deepest leaf still resolves, and usage must propagate up unchanged.
+// reads each level's own wf.Subs, so the deepest leaf still resolves without the
+// caller threading any links through Options, and usage propagates up unchanged.
 func TestRunSubWorkflowNested(t *testing.T) {
 	leaf := releaseChild()
 	mid := &workflow.Workflow{
@@ -118,7 +118,7 @@ func TestRunSubWorkflowNested(t *testing.T) {
 		Subs: map[workflow.TaskID]*workflow.Workflow{"outer": mid},
 	}
 
-	rep, err := executor.Run(context.Background(), top, executor.Hooks{}, executor.Options{Subs: top.Subs})
+	rep, err := executor.Run(context.Background(), top, executor.Hooks{}, executor.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestRunSubWorkflowSchemaWraps(t *testing.T) {
 		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
 	}
 
-	if _, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{Subs: parent.Subs}); err == nil {
+	if _, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{}); err == nil {
 		t.Fatal("Run returned nil error; want schema-validation failure on the sub-workflow result")
 	}
 }
@@ -178,7 +178,7 @@ func TestRunSubWorkflowSubstitutesWithValues(t *testing.T) {
 		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
 	}
 
-	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{Subs: parent.Subs})
+	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestRunSubWorkflowBindsLoopVarInWithValues(t *testing.T) {
 		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
 	}
 
-	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{Subs: parent.Subs})
+	rep, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

@@ -124,12 +124,21 @@ func newBarrier(t *testing.T) (string, *barrierRuntime) {
 	return name, b
 }
 
-var execSysCapture = &systemPromptCaptureRuntime{}
+// newSysCapture registers a fresh systemPromptCaptureRuntime under a name unique
+// to t and returns both, mirroring newBarrier. A per-test instance means no
+// captured field is shared across tests (or across `go test -count=N` reruns),
+// so a test never has to reset a package-level singleton in its Arrange.
+func newSysCapture(t *testing.T) (string, *systemPromptCaptureRuntime) {
+	t.Helper()
+	r := &systemPromptCaptureRuntime{}
+	name := "exec-syscapture-" + t.Name() + "-" + strconv.FormatUint(barrierSeq.Add(1), 10)
+	runtime.Register(runtime.Name(name), r)
+	return name, r
+}
 
 func init() {
 	runtime.Register("exec-echo", echoRuntime{})
 	runtime.Register("exec-err", errRuntime{})
-	runtime.Register("exec-syscapture", execSysCapture)
 }
 
 // TestRunSubstitutesUpstreamOutputs exercises the end-to-end happy path: the
@@ -340,14 +349,11 @@ tasks:
 // {{params.name}} in the workflow-level system_prompt before constructing the
 // runtime.Request, so the runtime sees the final resolved text.
 func TestRunSystemPromptParamSubstitution(t *testing.T) {
-	// Reset the capture from any prior test.
-	execSysCapture.mu.Lock()
-	execSysCapture.captured = ""
-	execSysCapture.mu.Unlock()
+	rt, capture := newSysCapture(t)
 
 	src := `
 name: wf
-runtime: exec-syscapture
+runtime: ` + rt + `
 model: m1
 system_prompt: "ctx={{params.env}}"
 params:
@@ -366,9 +372,9 @@ tasks:
 		t.Fatalf("Run: %v", err)
 	}
 
-	execSysCapture.mu.Lock()
-	got := execSysCapture.captured
-	execSysCapture.mu.Unlock()
+	capture.mu.Lock()
+	got := capture.captured
+	capture.mu.Unlock()
 
 	if got != "ctx=staging" {
 		t.Errorf("SystemPrompt = %q, want %q", got, "ctx=staging")

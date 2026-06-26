@@ -155,11 +155,6 @@ type Options struct {
 	// executor replays a stored output on a hit and records a fresh one on a
 	// miss. nil disables memoization. Shell tasks are never memoized.
 	Cache Cache
-	// Subs maps each sub-workflow task id to its resolved child workflow (the
-	// parent's wf.Subs). The executor recursively runs the child as a leaf and
-	// captures its result. Child recursion reads child.Subs directly, so one
-	// field per level suffices. nil when no sub-workflow tasks are present.
-	Subs map[workflow.TaskID]*workflow.Workflow
 }
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
