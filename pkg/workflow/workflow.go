@@ -243,7 +243,6 @@ type Task struct {
 // WithArg is one `with:` entry on a sub-workflow task: a child param name and
 // the (pre-substitution) value passed for it.
 type WithArg struct {
-	// Name is the child param this value is bound to.
 	Name ParamName
 	// Value is the raw value text, substituted with the parent context before
 	// being passed to the child.
@@ -255,6 +254,48 @@ type WithArg struct {
 // enforces that Workflow is mutually exclusive with every other body form, so
 // this is a reliable discriminator at the executor and CLI layers.
 func (t Task) IsSubWorkflow() bool { return t.Workflow != "" }
+
+// BodyKind names the single body form a Task carries. A valid task sets exactly
+// one of Prompt, Command, or Workflow; BodyKind is the discriminator the
+// executor routes on, replacing an implicit precedence among three optional
+// strings. BodyInvalid marks a task that set none or more than one, an illegal
+// shape the parser rejects: routing on it crashes early instead of silently
+// misdispatching a prompt+command or prompt+workflow task down the wrong path.
+type BodyKind int
+
+const (
+	// BodyInvalid is the zero value: a task with no body, or more than one set.
+	BodyInvalid BodyKind = iota
+	// BodyPrompt is an LLM task carrying a Prompt.
+	BodyPrompt
+	// BodyShell is a shell task carrying a Command.
+	BodyShell
+	// BodySubWorkflow is a task linking and running another Workflow.
+	BodySubWorkflow
+)
+
+// BodyKind reports which body form t carries, returning BodyInvalid when t sets
+// none or more than one of Prompt, Command, and Workflow.
+func (t Task) BodyKind() BodyKind {
+	n := 0
+	kind := BodyInvalid
+	if t.Prompt != "" {
+		n++
+		kind = BodyPrompt
+	}
+	if t.Command != "" {
+		n++
+		kind = BodyShell
+	}
+	if t.Workflow != "" {
+		n++
+		kind = BodySubWorkflow
+	}
+	if n != 1 {
+		return BodyInvalid
+	}
+	return kind
+}
 
 // OutputTask returns the id of the task whose output is the workflow's result
 // string when it is run as a sub-workflow. It returns Output when set (after
@@ -341,9 +382,16 @@ func (t Task) IsShell() bool { return t.Command != "" }
 // Centralizing the body-form discrimination here keeps placeholder scanning
 // from drifting as new body forms are added.
 func (t Task) TextBodies() []string {
-	body := t.Prompt
-	if t.IsShell() {
+	var body string
+	switch t.BodyKind() {
+	case BodyPrompt:
+		body = t.Prompt
+	case BodyShell:
 		body = t.Command
+	case BodySubWorkflow, BodyInvalid:
+		// A sub-workflow carries its refs in the with-values, not a prompt body;
+		// an invalid task has no single body to scan.
+		body = ""
 	}
 	bodies := make([]string, 0, 1+len(t.With))
 	if body != "" {

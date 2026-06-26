@@ -144,7 +144,7 @@ func TestSubstituteAllFourNamespaces(t *testing.T) {
 }
 
 // resolveWF builds a Workflow with the given params (declaration order
-// preserved) without going through Parse — keeps these tests focused on
+// preserved) without going through Parse, keeps these tests focused on
 // resolver behavior.
 func resolveWF(params ...workflow.Param) *workflow.Workflow {
 	return &workflow.Workflow{ID: "wf", Params: params}

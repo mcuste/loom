@@ -203,8 +203,8 @@ func (e *UnknownCLIParamError) Error() string {
 }
 
 // UnknownFileParamError reports a `--params-file` entry whose key is not in
-// the workflow's `params:` block. Reserved for the v2 --params-file feature;
-// ResolveParams emits it today for any caller that supplies a file map.
+// the workflow's `params:` block. ResolveParams emits it today for any caller
+// that supplies a file map.
 type UnknownFileParamError struct{ Name string }
 
 func (e *UnknownFileParamError) Error() string {
