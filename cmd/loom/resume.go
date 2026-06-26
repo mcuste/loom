@@ -148,6 +148,11 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	if err := checkSubWorkflows(wf); err != nil {
 		return err
 	}
+	// Parse no longer touches the registry; validate routing here (recursing
+	// linked children) before the resumed run dispatches any task.
+	if err := wf.ValidateRouting(); err != nil {
+		return err
+	}
 
 	inWorkflow := make(map[workflow.TaskID]bool, len(wf.Tasks))
 	for i := range wf.Tasks {

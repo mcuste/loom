@@ -381,28 +381,44 @@ func Parse(data []byte) (*Workflow, error) {
 	}
 	wf.Budget = budget
 
-	for i := range wf.Tasks {
-		t := &wf.Tasks[i]
+	return wf, nil
+}
+
+// ValidateRouting checks every LLM task's effective runtime/model/effort against
+// the runtime registry, recursing into linked sub-workflows. It is the
+// registry-dependent companion to [Parse]: keeping it separate makes Parse a
+// pure function of its input bytes (identical bytes always parse identically,
+// independent of which runtime init() functions have run), and lets callers run
+// the routing check explicitly once the registry is populated and any
+// sub-workflow children are linked into w.Subs.
+//
+// Shell and sub-workflow tasks bypass the registry entirely (runtime/model/
+// effort have no meaning for them; a sub-workflow's child brings its own), so
+// they are skipped here and reached only through the w.Subs recursion.
+func (w *Workflow) ValidateRouting() error {
+	for i := range w.Tasks {
+		t := &w.Tasks[i]
 		if t.IsShell() || t.IsSubWorkflow() {
-			// Shell and sub-workflow tasks bypass the runtime registry entirely;
-			// runtime/model/effort have no meaning (the child brings its own), and
-			// the task-level reject above guarantees they are unset on t.
 			continue
 		}
-		rt, m, e := wf.Effective(t)
+		rt, m, e := w.Effective(t)
 		req := runtime.Request{
 			TaskID:       string(t.ID),
 			Prompt:       t.Prompt,
 			Model:        m,
 			Effort:       e,
-			SystemPrompt: wf.SystemPrompt,
+			SystemPrompt: w.SystemPrompt,
 		}
 		if err := runtime.Validate(rt, req); err != nil {
-			return nil, fmt.Errorf("task %q: %w", t.ID, err)
+			return fmt.Errorf("task %q: %w", t.ID, err)
 		}
 	}
-
-	return wf, nil
+	for _, child := range w.Subs {
+		if err := child.ValidateRouting(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ParseFile reads path and parses it as a workflow YAML.
@@ -419,6 +435,13 @@ func ParseFile(path string) (*Workflow, error) {
 	}
 	wf, err := Parse(inlined)
 	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	// ParseFile loads a workflow for execution, so it runs the registry-dependent
+	// routing check that Parse deliberately omits. Sub-workflow children are not
+	// linked yet here; the caller re-runs ValidateRouting after linking to cover
+	// them via the w.Subs recursion.
+	if err := wf.ValidateRouting(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return wf, nil

@@ -164,6 +164,11 @@ func doRun(w io.Writer, path string, paramArgs []string) (err error) {
 	if err := checkSubWorkflows(wf); err != nil {
 		return err
 	}
+	// Parse is registry-free; run the routing check now that the registry is
+	// populated and children are linked (ValidateRouting recurses into wf.Subs).
+	if err := wf.ValidateRouting(); err != nil {
+		return err
+	}
 	// One renderer drives both phases (check's plan and runWorkflow's header,
 	// progress, and summary) so a stateful renderer can hold a unified display
 	// across them. Its teardown error surfaces unless a prior error already won.
@@ -202,6 +207,11 @@ func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
 		return err
 	}
 	if err := checkSubWorkflows(wf); err != nil {
+		return err
+	}
+	// ParseFile validated the top-level routing; re-run after linking so any
+	// sub-workflow children are checked too (ValidateRouting recurses wf.Subs).
+	if err := wf.ValidateRouting(); err != nil {
 		return err
 	}
 	r := tui.New(w)

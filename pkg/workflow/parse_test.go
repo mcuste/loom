@@ -134,7 +134,7 @@ tasks:
 
 // TestPlaceholdersMustBeDeclared pins the strict rule that placeholders are
 // validated against depends_on, never used to extend it. A placeholder whose
-// name is not in depends_on is rejected — even if the referenced id is a
+// name is not in depends_on is rejected, even if the referenced id is a
 // real task elsewhere in the workflow.
 func TestPlaceholdersMustBeDeclared(t *testing.T) {
 	src := `
@@ -162,7 +162,7 @@ tasks:
 }
 
 // TestPlaceholdersDoNotExtendDeps verifies that DependsOn reflects only the
-// declared list, in declaration order — placeholders never appear in the
+// declared list, in declaration order, placeholders never appear in the
 // graph implicitly even when they reference declared ids.
 func TestPlaceholdersDoNotExtendDeps(t *testing.T) {
 	src := `
@@ -334,7 +334,13 @@ tasks:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := workflow.Parse([]byte(tc.src))
+			// Parse is registry-free; routing errors (runtime/model/effort/system
+			// prompt) surface from the explicit ValidateRouting step, so the table
+			// runs both and reports the first error either produces.
+			wf, err := workflow.Parse([]byte(tc.src))
+			if err == nil {
+				err = wf.ValidateRouting()
+			}
 			if err == nil {
 				t.Fatalf("Parse returned nil error, want error")
 			}
@@ -651,7 +657,7 @@ tasks:
 }
 
 // TestParseParamDefaultIntegerStringified pins that the raw YAML scalar text
-// is preserved verbatim — `default: 1` keeps "1", not coerced to an int.
+// is preserved verbatim, `default: 1` keeps "1", not coerced to an int.
 func TestParseParamDefaultIntegerStringified(t *testing.T) {
 	src := `
 name: wf
@@ -921,7 +927,7 @@ tasks:
 }
 
 // TestParseParamNameEqualsTaskID pins that a param and a task may share a
-// name without conflict — they live in separate namespaces, distinguished
+// name without conflict, they live in separate namespaces, distinguished
 // by the `params.` prefix on the placeholder.
 func TestParseParamNameEqualsTaskID(t *testing.T) {
 	src := `
