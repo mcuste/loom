@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/task"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -40,10 +41,10 @@ type TaskResult struct {
 	Output  string
 	Usage   runtime.Usage
 	Elapsed time.Duration
-	// Status records the task's terminal disposition. It is StatusSkipped when
-	// the task's `when:` expression evaluated false (Output is empty in that
-	// case) and StatusOK for a task that ran to completion.
-	Status string
+	// Status records the task's terminal disposition. It is task.StatusSkipped
+	// when the task's `when:` expression evaluated false (Output is empty in that
+	// case) and task.StatusOK for a task that ran to completion.
+	Status task.Status
 	// CacheHit is true when Output was replayed from a memoization cache rather
 	// than produced by the runtime this run. A cache hit reports zero Usage.
 	CacheHit bool
@@ -66,13 +67,13 @@ type Cache interface {
 	Save(rt runtime.Name, model runtime.Model, effort runtime.Effort, systemPrompt, prompt, output string) error
 }
 
-// Terminal task statuses surfaced on TaskResult.Status.
+// Terminal task statuses surfaced on TaskResult.Status. These re-export the
+// canonical values from [task] so the string literals live in exactly one
+// place; existing executor.StatusOK / executor.StatusSkipped references resolve
+// unchanged.
 const (
-	// StatusOK marks a task that ran to completion.
-	StatusOK = "ok"
-	// StatusSkipped marks a task whose `when:` expression evaluated false: it
-	// produced no output but still closed its gate so downstream tasks proceed.
-	StatusSkipped = "skipped"
+	StatusOK      = task.StatusOK
+	StatusSkipped = task.StatusSkipped
 )
 
 // ShellError reports a non-zero exit from a shell task. The wrapped command's
@@ -83,8 +84,8 @@ type ShellError struct {
 	Stderr   string
 }
 
-// Error includes the exit code and trimmed stderr so a single line conveys
-// both why the task failed and what the process said.
+// Error conveys both why the task failed and what the process said, so a caller
+// can surface the failure without re-running the command.
 func (e *ShellError) Error() string {
 	s := strings.TrimSpace(e.Stderr)
 	if s == "" {

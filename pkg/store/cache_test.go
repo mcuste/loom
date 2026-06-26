@@ -52,7 +52,7 @@ func TestSaveCache_WritesEntryUnderCacheDir(t *testing.T) {
 }
 
 // TestCacheKey_DiffersWhenAnyInputChanges pins hash sensitivity: changing the
-// prompt — or any other hashed input — must produce a different key, so a
+// prompt, or any other hashed input, must produce a different key, so a
 // modified task never replays a stale output.
 func TestCacheKey_DiffersWhenAnyInputChanges(t *testing.T) {
 	base := store.CacheKey("claude-code", "sonnet", "medium", "be brief", "hello")

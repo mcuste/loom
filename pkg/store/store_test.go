@@ -145,7 +145,7 @@ func TestOnStartOnFinishUpdatesTaskEntry(t *testing.T) {
 }
 
 // TestOnFinishRecordsTaskError pins that a failed task surfaces both
-// status="failed" and the error message in its task entry — needed for
+// status="failed" and the error message in its task entry, needed for
 // post-mortem inspection of partial runs.
 func TestOnFinishRecordsTaskError(t *testing.T) {
 	root := t.TempDir()

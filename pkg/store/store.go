@@ -34,6 +34,7 @@ import (
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/task"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -50,14 +51,16 @@ type Summary struct {
 // UTC and lexicographically sortable.
 const runIDLayout = "20060102T150405Z"
 
-// Status values written to the on-disk run record. Exported so callers (e.g.
-// the resume command) reference the same string the store writes; a rename
-// here is a compile-time signal to every consumer instead of a silent miss.
+// Status values written to the on-disk run record. The store is the
+// serialization boundary for these values, but the definitions are re-exported
+// from [task] so the executor's live result and this on-disk record share one
+// vocabulary; a rename in [task] is a compile-time signal to every consumer.
 const (
-	StatusRunning = "running"
-	StatusStarted = "started"
-	StatusOK      = "ok"
-	StatusFailed  = "failed"
+	StatusRunning = string(task.StatusRunning)
+	StatusStarted = string(task.StatusStarted)
+	StatusOK      = string(task.StatusOK)
+	StatusFailed  = string(task.StatusFailed)
+	StatusSkipped = string(task.StatusSkipped)
 )
 
 // Run is an open, on-disk record of a single workflow execution. Callers
@@ -219,7 +222,14 @@ func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runEr
 		tr.Status = StatusFailed
 		tr.Error = runErr.Error()
 	} else {
-		tr.Status = StatusOK
+		// Preserve the executor's terminal disposition: a skipped task must not be
+		// recorded as "ok", or the persisted run view would disagree with the live
+		// TUI about the same task. Any other nil-error result is a completed task.
+		if res.Status == executor.StatusSkipped {
+			tr.Status = StatusSkipped
+		} else {
+			tr.Status = StatusOK
+		}
 		tr.Error = ""
 	}
 	if err := r.flushLocked(); err != nil {
@@ -344,9 +354,9 @@ func LoadState(root string, wf workflow.WorkflowID) (map[string]string, error) {
 }
 
 // SaveState atomically writes the cross-run state map for wf to
-// <root>/state/<workflow_id>.json. It mirrors [Run.flushLocked]: the bytes go
-// to a .tmp sibling and are renamed into place, so a crash mid-write never
-// leaves a half-written state file. root defaults to ".loom" when empty.
+// <root>/state/<workflow_id>.json. The write is atomic: the bytes go to a .tmp
+// sibling and are renamed into place, so a crash mid-write never leaves a
+// half-written state file. root defaults to ".loom" when empty.
 func SaveState(root string, wf workflow.WorkflowID, state map[string]string) error {
 	if root == "" {
 		root = ".loom"
