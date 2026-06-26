@@ -116,13 +116,12 @@ func Parse(data []byte) (*Workflow, error) {
 		rawLoops = append(rawLoops, rl)
 	}
 
-	// A zero top-level task set is rejected, but the sentinel depends on whether
-	// any loops are declared: an empty workflow gets ErrNoTasks, while a
-	// loops-only workflow gets the clearer ErrLoopsWithoutTopLevelTask.
-	if len(topTasks) == 0 {
-		if len(rawLoops) > 0 {
-			return nil, fmt.Errorf("workflow %q: %w", id, ErrLoopsWithoutTopLevelTask)
-		}
+	// Only a workflow with nothing to run at all is rejected. A loop is an
+	// independently scheduled unit (the executor spawns each loop's driver
+	// directly, with no dependency on a top-level task to seed it), so a
+	// loops-only workflow is valid; it is rejected only when no loops accompany
+	// the empty top-level set.
+	if len(topTasks) == 0 && len(rawLoops) == 0 {
 		return nil, fmt.Errorf("workflow %q: %w", id, ErrNoTasks)
 	}
 
@@ -827,12 +826,9 @@ type rawParam struct {
 // Sentinel parse errors. Typed errors below cover structured failures with
 // fields the caller may want to inspect.
 var (
-	// ErrNoTasks is returned when the workflow YAML declares no tasks.
+	// ErrNoTasks is returned when the workflow YAML declares neither a top-level
+	// task nor any loop, so there is nothing to run.
 	ErrNoTasks = errors.New("workflow has no tasks")
-	// ErrLoopsWithoutTopLevelTask is returned when a workflow declares `loops:`
-	// blocks but no top-level `tasks:`. A scoped loop refines a workflow that
-	// must have at least one top-level task to seed it.
-	ErrLoopsWithoutTopLevelTask = errors.New("loops require at least one top-level task")
 	// ErrMissingParamName is returned when a params entry omits the name field.
 	ErrMissingParamName = errors.New("param has no name")
 

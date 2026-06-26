@@ -158,6 +158,46 @@ func TestRun_ScopedLoop_ConvergesByUntilEmptyInTwoPasses(t *testing.T) {
 	}
 }
 
+// TestRun_LoopOnly_Executes pins that a workflow whose entire body is a scoped
+// loop (zero non-loop top-level tasks) runs: the executor spawns the loop driver
+// directly with no top-level task to seed it, the body iterates to convergence,
+// and the member's final-pass output is published in the report.
+func TestRun_LoopOnly_Executes(t *testing.T) {
+	t.Parallel()
+	rt, _ := newLoopRT(t, map[string][]string{
+		"step": {"working", "done"}, // until '{{step}} == "done"' holds on pass 2
+	}, runtime.Usage{})
+
+	src := fmt.Sprintf(`
+name: wf_loop_only
+runtime: %s
+model: m1
+tasks:
+  - id: refine
+    loop:
+      until: '{{step}} == "done"'
+      max: 5
+      tasks:
+        - id: step
+          prompt: "step {{prev.step}}"
+`, rt)
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got, want := iterationsOf(rep, "step"), []int{1, 2}; !slices.Equal(got, want) {
+		t.Errorf("iterations of step = %v, want %v", got, want)
+	}
+	if got := rep.Outputs["step"]; got != "done" {
+		t.Errorf("final output of step = %q, want \"done\"", got)
+	}
+}
+
 // TestRun_ScopedLoop_ConvergesByUntilExpression pins the until-expression
 // convergence path: the loop ends once the compiled `until:` condition over the
 // body outputs holds (c == "done" on the second pass), exercising the

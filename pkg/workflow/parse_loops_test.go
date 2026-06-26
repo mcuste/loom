@@ -54,6 +54,78 @@ func TestParse_NestedLoop_FlattensTasksInDeclarationOrder(t *testing.T) {
 	}
 }
 
+// loopOnlyForEach is a workflow whose ENTIRE body is a single for_each loop:
+// there is no top-level task at all. A loop is an independently scheduled unit,
+// so it needs no top-level task to seed it and can stand alone as the workflow.
+const loopOnlyForEach = `
+name: wf_loop_only
+runtime: test-rt
+model: m1
+tasks:
+  - id: scan
+    for_each:
+      in: [a, b, c]
+      as: item
+      tasks:
+        - id: probe
+          prompt: "probe {{item}} {{prev.probe}}"
+`
+
+// TestParse_LoopOnly_Accepted pins that a workflow with zero top-level tasks but
+// one loop parses: the loop is registered and its members flatten into wf.Tasks,
+// with no top-level task required.
+func TestParse_LoopOnly_Accepted(t *testing.T) {
+	wf, err := workflow.Parse([]byte(loopOnlyForEach))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if len(wf.Loops) != 1 {
+		t.Fatalf("len(wf.Loops) = %d, want 1", len(wf.Loops))
+	}
+	got := make([]workflow.TaskID, len(wf.Tasks))
+	for i, task := range wf.Tasks {
+		got[i] = task.ID
+	}
+	want := []workflow.TaskID{"probe"}
+	if !slices.Equal(got, want) {
+		t.Errorf("wf.Tasks ids = %v, want %v (only the loop member)", got, want)
+	}
+}
+
+// loopOnlyWhile is a loop-only workflow whose single loop converges via an
+// `until` expression rather than for_each.
+const loopOnlyWhile = `
+name: wf_loop_only_while
+runtime: test-rt
+model: m1
+tasks:
+  - id: refine
+    loop:
+      until: '{{step}} == "done"'
+      max: 3
+      tasks:
+        - id: step
+          prompt: "step {{prev.step}}"
+`
+
+// TestParse_LoopOnly_WhileOutputResolves pins that a loop-only while workflow
+// parses and that OutputTask resolves the loop's lone sink member, so a
+// loop-only workflow can serve as a sub-workflow whose result is that member's
+// final-pass output.
+func TestParse_LoopOnly_WhileOutputResolves(t *testing.T) {
+	wf, err := workflow.Parse([]byte(loopOnlyWhile))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	out, err := wf.OutputTask()
+	if err != nil {
+		t.Fatalf("OutputTask: %v", err)
+	}
+	if out != "step" {
+		t.Errorf("OutputTask = %q, want \"step\" (the lone loop-member sink)", out)
+	}
+}
+
 // validUntilLoop is a workflow whose scoped loop converges via an `until`
 // expression over a member output rather than until_empty.
 const validUntilLoop = `
