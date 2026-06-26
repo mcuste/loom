@@ -381,6 +381,74 @@ tasks:
 	}
 }
 
+// TestRunPerTaskSystemPromptOverride verifies that a task-level system_prompt
+// reaches the runtime in place of the workflow-level default, with param
+// substitution applied to the override text.
+func TestRunPerTaskSystemPromptOverride(t *testing.T) {
+	rt, capture := newSysCapture(t)
+
+	src := `
+name: wf
+runtime: ` + rt + `
+model: m1
+system_prompt: "workflow default"
+params:
+  - name: who
+    default: nobody
+tasks:
+  - id: a
+    system_prompt: "you are {{params.who}}"
+    prompt: "hello"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	opts := executor.Options{Params: workflow.ParamValues{"who": "a terse reviewer"}}
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	capture.mu.Lock()
+	got := capture.captured
+	capture.mu.Unlock()
+
+	if got != "you are a terse reviewer" {
+		t.Errorf("SystemPrompt = %q, want the substituted task override", got)
+	}
+}
+
+// TestRunTaskWithoutSystemPromptUsesWorkflowDefault verifies the fallback: a task
+// that sets no system_prompt sees the workflow-level default at the runtime.
+func TestRunTaskWithoutSystemPromptUsesWorkflowDefault(t *testing.T) {
+	rt, capture := newSysCapture(t)
+
+	src := `
+name: wf
+runtime: ` + rt + `
+model: m1
+system_prompt: "workflow default"
+tasks:
+  - id: a
+    prompt: "hello"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	capture.mu.Lock()
+	got := capture.captured
+	capture.mu.Unlock()
+
+	if got != "workflow default" {
+		t.Errorf("SystemPrompt = %q, want %q", got, "workflow default")
+	}
+}
+
 // TestRunParamsImmutableUnderRace verifies that three independent sibling tasks
 // all reading opts.Params concurrently introduce no data race. Run under
 // `go test -race` to assert the absence of concurrent map read/write.

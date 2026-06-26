@@ -15,8 +15,8 @@ type ParamValues map[ParamName]string
 
 // Effective returns the runtime, model, and effort the registered runtime will
 // see for t. Task-level fields win when non-empty, falling back to the
-// workflow-level defaults. SystemPrompt has no task-level override and is
-// taken from Workflow.SystemPrompt directly.
+// workflow-level defaults. The system prompt follows the same rule via the
+// separate [Workflow.EffectiveSystemPrompt].
 //
 // t must be non-nil.
 func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effort) {
@@ -33,6 +33,21 @@ func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effo
 		e = w.Effort
 	}
 	return r, m, e
+}
+
+// EffectiveSystemPrompt returns the system prompt the runtime will see for t:
+// the task-level SystemPrompt when non-empty, otherwise the workflow-level
+// default. It mirrors [Workflow.Effective]'s task-over-workflow fallback so a
+// task can specialize its system prompt without disturbing the rest of the
+// workflow. The result still carries unresolved `{{params.x}}` / `{{state.k}}`
+// placeholders; the caller substitutes them before dispatch.
+//
+// t must be non-nil.
+func (w *Workflow) EffectiveSystemPrompt(t *Task) string {
+	if t.SystemPrompt != "" {
+		return t.SystemPrompt
+	}
+	return w.SystemPrompt
 }
 
 // CacheEnabled reports whether t opts into output memoization. The task's own

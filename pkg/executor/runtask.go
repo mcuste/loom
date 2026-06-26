@@ -364,7 +364,7 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		if !ok {
 			return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 		}
-		sysPrompt := workflow.Substitute(wf.SystemPrompt, nil, opts.Params, opts.State, nil)
+		sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, opts.Params, opts.State, nil)
 		if hooks.OnStart != nil {
 			hooks.OnStart(*t, st.iteration, rt, model, effort)
 		}

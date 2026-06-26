@@ -33,7 +33,7 @@ description: ...             # optional, plan-output only
 runtime: claude-code         # default for tasks; one of: claude-code | codex
 model: sonnet                # default; one of: haiku | sonnet | opus
 effort: medium               # default; one of: low | medium | high | max  (claude-code)
-system_prompt: ...           # optional, appended to every task
+system_prompt: ...           # optional default system prompt; per-task overridable
 output: <task_id>            # optional; which task is this workflow's result when linked as sub-workflow
 params:                       # optional; see ## Params
   - name: ...                # required, [A-Za-z0-9_]+, unique
@@ -47,6 +47,9 @@ tasks:
     runtime: ...             # optional task-level override
     model: ...               # optional task-level override
     effort: ...              # optional task-level override
+    system_prompt: ...       # optional task-level override of the workflow default
+    # — OR —
+    system_prompt_file: prompts/sys_a.txt  # file-backed override; inlined before validation
     depends_on: [a, b]       # optional; explicit DAG edges
     prompt: |                # exactly one of prompt / prompt_file / command; non-empty
       Text with {{a}} and {{b}} placeholders.
@@ -62,6 +65,8 @@ tasks:
 ```
 
 `prompt_file` is a path to a plain-text file resolved relative to the workflow YAML's directory. The file is read and inlined before validation, so the run record stores the verbatim prompt text (not the path). Use it to keep long or shared prompts out of the YAML.
+
+`system_prompt` is the system prompt sent to the runtime. The workflow-level value is the default for every LLM task; a task-level `system_prompt` (or `system_prompt_file`, the file-backed spelling, inlined like `prompt_file`) overrides it for that one task, falling back to the workflow default when unset. The inline and file spellings are mutually exclusive on the same scope. It carries `{{params.x}}` / `{{state.k}}` placeholders (never task-id placeholders) and is meaningless on command and sub-workflow tasks, which reject it.
 
 A task may instead link another workflow with `workflow:` (a registry name or a path relative to the linking YAML); `with:` binds values to the child's params (substituted against the parent context first, which also creates the dep edge). The child runs as one atomic leaf: its result (the child's top-level `output:` task, or its lone terminal task) becomes this task's output. A top-level `output:` names which task is this workflow's result when it is itself linked. See `docs/workflow-spec.md` → Sub-workflows.
 
@@ -80,7 +85,7 @@ A task with `command:` runs `sh -c <substituted-command>` instead of dispatching
 
 **Discriminator rule** — exactly one of `prompt`, `prompt_file`, `command`, or `workflow` must be set per task (loop/for_each wrappers replace all of them). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
 
-**Rejected fields on command tasks** — `runtime`, `model`, and `effort` at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected.
+**Rejected fields on command tasks** — `runtime`, `model`, `effort`, and `system_prompt` (or `system_prompt_file`) at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected. Sub-workflow (`workflow:`) tasks reject the same fields.
 
 **Placeholders** — `{{task_id}}` and `{{params.x}}` substitute into `command:` bodies identically to `prompt:` bodies; the same `depends_on` rule applies (every `{{id}}` placeholder must also appear in `depends_on`).
 
@@ -277,7 +282,7 @@ Models:
 
 Efforts: `minimal | low | medium | high | xhigh`. Empty effort means "leave runtime default" (same convention as `claude-code`).
 
-**`system_prompt` is not supported** by the `codex` runtime. Codex CLI has no headless system-prompt flag — use an `AGENTS.md` file in the working directory for persistent instructions instead. Setting `system_prompt` with `runtime: codex` is a hard validation error.
+**`system_prompt` is not supported** by the `codex` runtime. Codex CLI has no headless system-prompt flag — use an `AGENTS.md` file in the working directory for persistent instructions instead. Setting `system_prompt` (workflow- or task-level, including a task-level override under `runtime: codex`) is a hard validation error; `loom run check` reports it via the effective runtime per task.
 
 ## Authoring workflow
 

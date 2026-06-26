@@ -188,6 +188,11 @@ type Task struct {
 	Model runtime.Model
 	// Effort overrides Workflow.Effort for this task when non-empty.
 	Effort runtime.Effort
+	// SystemPrompt overrides Workflow.SystemPrompt for this task when non-empty.
+	// Like the workflow-level field it may carry `{{params.x}}` and `{{state.k}}`
+	// placeholders (never task-id placeholders) and is substituted at dispatch.
+	// Meaningless for shell and sub-workflow tasks, which the parser rejects.
+	SystemPrompt string
 	// DependsOn names the tasks this task depends on. Populated from explicit
 	// `depends_on` in YAML; the parser validates that every `{{id}}` placeholder
 	// in the prompt appears here but does not extend this list implicitly.

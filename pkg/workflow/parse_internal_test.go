@@ -44,10 +44,10 @@ func TestRawMirrorsPublic(t *testing.T) {
 			// per-task scoped-block wrappers: parse-only nodes folded into a
 			// LoopGroup that never become a Task, so they have no public counterpart
 			// (rawTask.Loop shares the name with the derived Task.Loop above only by
-			// coincidence). rawTask.PromptFile is parse-only too: InlinePromptFiles
-			// rewrites it to `prompt:` before Parse, so it never reaches a public
-			// Task field.
-			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "ForEachParallel": {}, "PromptFile": {}},
+			// coincidence). rawTask.PromptFile and rawTask.SystemPromptFile are
+			// parse-only too: InlinePromptFiles rewrites them to `prompt:` /
+			// `system_prompt:` before Parse, so neither reaches a public Task field.
+			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "ForEachParallel": {}, "PromptFile": {}, "SystemPromptFile": {}},
 		},
 		{
 			name:   "param",

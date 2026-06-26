@@ -34,6 +34,22 @@ func TestEffectiveTaskOverrides(t *testing.T) {
 	}
 }
 
+func TestEffectiveSystemPromptFallsBackToWorkflow(t *testing.T) {
+	wf := &workflow.Workflow{SystemPrompt: "workflow default"}
+	t1 := workflow.Task{ID: "a"}
+	if got := wf.EffectiveSystemPrompt(&t1); got != "workflow default" {
+		t.Fatalf("EffectiveSystemPrompt = %q, want %q", got, "workflow default")
+	}
+}
+
+func TestEffectiveSystemPromptTaskOverrides(t *testing.T) {
+	wf := &workflow.Workflow{SystemPrompt: "workflow default"}
+	t1 := workflow.Task{ID: "a", SystemPrompt: "task override"}
+	if got := wf.EffectiveSystemPrompt(&t1); got != "task override" {
+		t.Fatalf("EffectiveSystemPrompt = %q, want %q", got, "task override")
+	}
+}
+
 func TestSubstitute(t *testing.T) {
 	outputs := map[workflow.TaskID]string{
 		"a": "Apple",

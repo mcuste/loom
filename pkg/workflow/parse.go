@@ -39,12 +39,14 @@ import (
 //  7. Every {{params.x}} placeholder (in prompt, command, or system_prompt)
 //     references a declared param.
 //  8. The task graph has no cycles.
-//  9. Every prompt, command, and the system_prompt are free of malformed
-//     `{{params.…}}` tokens; system_prompt is free of task-id placeholders.
+//  9. Every prompt, command, and system_prompt (workflow- or task-level) is
+//     free of malformed `{{params.…}}` tokens; a system_prompt is free of
+//     task-id placeholders.
 //  10. Every declared param is referenced by at least one prompt, command, or
-//     system_prompt.
-//  11. The effective runtime/model/effort per LLM task is accepted by the
-//     registered runtime spec. Shell tasks bypass this check.
+//     system_prompt (workflow- or task-level).
+//  11. The effective runtime/model/effort and system prompt per LLM task are
+//     accepted by the registered runtime spec (checked by ValidateRouting).
+//     Shell and sub-workflow tasks bypass this check.
 func Parse(data []byte) (*Workflow, error) {
 	var raw rawWorkflow
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -258,9 +260,15 @@ func Parse(data []byte) (*Workflow, error) {
 			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
 			}
+			if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSystemPrompt)
+			}
 		case rt.Workflow != "":
 			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithRuntime)
+			}
+			if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithSystemPrompt)
 			}
 			wa, werr := decodeWith(tid, rt.With)
 			if werr != nil {
@@ -300,6 +308,19 @@ func Parse(data []byte) (*Workflow, error) {
 		if err := checkMalformedParamPlaceholders(tid, body); err != nil {
 			return nil, err
 		}
+		// A task-level system_prompt_file must be inlined by InlinePromptFiles
+		// before Parse, mirroring prompt_file; one reaching here was not, so reject
+		// it rather than silently dropping the file-backed override.
+		if rt.SystemPromptFile != "" {
+			return nil, fmt.Errorf("task %q: system_prompt_file must be inlined before parsing", tid)
+		}
+		// A task-level system prompt is validated exactly like the workflow-level
+		// one: declared param placeholders only, no task-id placeholders. Shell and
+		// sub-workflow tasks were already rejected above, so rt.SystemPrompt here
+		// belongs to an LLM task.
+		if err := validateSystemPrompt(rt.SystemPrompt, paramSet); err != nil {
+			return nil, fmt.Errorf("task %q: %w", tid, err)
+		}
 		retry, err := parseRetry(tid, rt.Retry)
 		if err != nil {
 			return nil, err
@@ -329,24 +350,25 @@ func Parse(data []byte) (*Workflow, error) {
 		}
 		wf.byID[tid] = len(wf.Tasks)
 		wf.Tasks = append(wf.Tasks, Task{
-			ID:          tid,
-			Prompt:      rt.Prompt,
-			Command:     rt.Command,
-			Description: rt.Description,
-			Runtime:     runtime.Name(rt.Runtime),
-			Model:       runtime.Model(rt.Model),
-			Effort:      runtime.Effort(rt.Effort),
-			DependsOn:   deps,
-			When:        rt.When,
-			Cond:        cond,
-			Retry:       retry,
-			WritesState: rt.WritesState,
-			Budget:      taskBudget,
-			Schema:      schema,
-			Cache:       rt.Cache,
-			Loop:        lt.loop,
-			Workflow:    rt.Workflow,
-			With:        withArgs,
+			ID:           tid,
+			Prompt:       rt.Prompt,
+			Command:      rt.Command,
+			Description:  rt.Description,
+			Runtime:      runtime.Name(rt.Runtime),
+			Model:        runtime.Model(rt.Model),
+			Effort:       runtime.Effort(rt.Effort),
+			SystemPrompt: rt.SystemPrompt,
+			DependsOn:    deps,
+			When:         rt.When,
+			Cond:         cond,
+			Retry:        retry,
+			WritesState:  rt.WritesState,
+			Budget:       taskBudget,
+			Schema:       schema,
+			Cache:        rt.Cache,
+			Loop:         lt.loop,
+			Workflow:     rt.Workflow,
+			With:         withArgs,
 		})
 	}
 
@@ -406,7 +428,7 @@ func (w *Workflow) ValidateRouting() error {
 			Prompt:       t.Prompt,
 			Model:        m,
 			Effort:       e,
-			SystemPrompt: w.SystemPrompt,
+			SystemPrompt: w.EffectiveSystemPrompt(t),
 		}
 		if err := runtime.Validate(rt, req); err != nil {
 			return fmt.Errorf("task %q: %w", t.ID, err)
@@ -449,8 +471,9 @@ func ParseFile(path string) (*Workflow, error) {
 // InlinePromptFiles rewrites file-reference keys into their inline equivalents
 // by reading the referenced files relative to baseDir:
 //
-//   - every task's `prompt_file:` becomes an inline `prompt:`, and
-//   - a top-level `system_prompt_file:` becomes an inline `system_prompt:`.
+//   - every task's `prompt_file:` becomes an inline `prompt:`,
+//   - a top-level `system_prompt_file:` becomes an inline `system_prompt:`, and
+//   - every task's `system_prompt_file:` becomes an inline `system_prompt:`.
 //
 // For task prompts it walks the YAML node tree and, for each mapping node that
 // carries a `prompt_file` key, enforces the 5-way body-form mutual exclusivity
@@ -460,10 +483,11 @@ func ParseFile(path string) (*Workflow, error) {
 // is the file content. The walk covers nested loop bodies, so a `prompt_file`
 // inside a `loop:` or `for_each:` body is inlined the same way.
 //
-// system_prompt is a workflow-level field, so `system_prompt_file` is inlined
-// only on the document's root mapping; one nested in a task is left for Parse's
-// known-fields check to reject. Setting both `system_prompt` and
-// `system_prompt_file` is rejected with ErrSystemPromptAndFileSet.
+// A `system_prompt_file:` is inlined both on the document's root mapping (the
+// workflow-level default, handled by inlineSystemPromptFile) and on any task
+// mapping (a per-task override, handled by the node walk). Setting both the
+// inline and file spellings on the same scope is rejected with
+// ErrSystemPromptAndFileSet (workflow) or ErrTaskSystemPromptAndFileSet (task).
 //
 // The rewritten bytes are self-contained: Parse never sees either *_file key, so
 // KnownFields(true) strictness is preserved. InlinePromptFiles short-circuits
@@ -575,14 +599,19 @@ func inlinePromptFileNodes(n *yaml.Node, baseDir string) error {
 	return nil
 }
 
-// inlinePromptFileMapping inlines a single mapping's `prompt_file` key in place.
-// A mapping without `prompt_file` is left untouched.
+// inlinePromptFileMapping inlines a single task mapping's `prompt_file` and
+// `system_prompt_file` keys in place. The two are independent: a task may carry
+// either, both, or neither (a `prompt_file` body alongside a `system_prompt_file`
+// override is legal), so each is handled on its own rather than short-circuiting
+// when the other is absent. A mapping without an `id` is left untouched.
 func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
 	var (
-		taskID         TaskID
-		keyNode, value *yaml.Node
-		bodyFields     []string
-		hasID          bool
+		taskID          TaskID
+		pfKey, pfVal    *yaml.Node
+		spfKey, spfVal  *yaml.Node
+		bodyFields      []string
+		hasID           bool
+		hasSystemPrompt bool
 	)
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		k, v := m.Content[i], m.Content[i+1]
@@ -594,39 +623,67 @@ func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
 			taskID = TaskID(v.Value)
 			hasID = true
 		case "prompt_file":
-			keyNode, value = k, v
+			pfKey, pfVal = k, v
 			bodyFields = append(bodyFields, k.Value)
 		case "prompt", "command", "loop", "for_each", "workflow":
 			bodyFields = append(bodyFields, k.Value)
+		case "system_prompt_file":
+			spfKey, spfVal = k, v
+		case "system_prompt":
+			hasSystemPrompt = true
 		}
 	}
-	if keyNode == nil {
-		return nil
-	}
-	// Only task mappings legitimately carry `prompt_file`, and every task has an
-	// `id`. A stray `prompt_file` in any other mapping (schema body, loop block,
-	// workflow root) is left untouched for Parse's known-fields check to reject
-	// in context, rather than inlined or reported against an empty task id.
+	// Only task mappings legitimately carry these file refs, and every task has an
+	// `id`. A stray `prompt_file` / `system_prompt_file` in any other mapping
+	// (schema body, loop block) is left untouched for Parse's known-fields check
+	// to reject in context, rather than inlined or reported against an empty task
+	// id. The workflow-root `system_prompt_file` has no id and is handled by
+	// inlineSystemPromptFile, which runs before this walk.
 	if !hasID {
 		return nil
 	}
-	// prompt_file is one of the mutually exclusive body forms: any sibling body
-	// key is a conflict, reported with every offending field in declaration order.
-	if len(bodyFields) > 1 {
-		return &TaskBodyConflictError{Task: taskID, Fields: bodyFields}
+	if pfKey != nil {
+		// prompt_file is one of the mutually exclusive body forms: any sibling body
+		// key is a conflict, reported with every offending field in declaration order.
+		if len(bodyFields) > 1 {
+			return &TaskBodyConflictError{Task: taskID, Fields: bodyFields}
+		}
+		if filepath.IsAbs(pfVal.Value) {
+			return &AbsolutePromptFilePathError{Task: taskID, Path: pfVal.Value}
+		}
+		content, err := os.ReadFile(filepath.Join(baseDir, pfVal.Value))
+		if err != nil {
+			return &PromptFileError{Task: taskID, Path: pfVal.Value, Err: err}
+		}
+		pfKey.Value = "prompt"
+		pfVal.Kind = yaml.ScalarNode
+		pfVal.Tag = "!!str"
+		pfVal.Style = yaml.LiteralStyle
+		pfVal.Value = string(content)
 	}
-	if filepath.IsAbs(value.Value) {
-		return &AbsolutePromptFilePathError{Task: taskID, Path: value.Value}
+	if spfKey != nil {
+		// system_prompt_file is not a body form; it is the file-backed spelling of
+		// system_prompt and mutually exclusive with the inline key, mirroring the
+		// workflow-level rule.
+		if hasSystemPrompt {
+			return fmt.Errorf("task %q: %w", taskID, ErrTaskSystemPromptAndFileSet)
+		}
+		// Wrap with the task id so a multi-task workflow points at the offending
+		// task, matching the prompt_file errors above; the wrapped sentinel types
+		// stay reachable via errors.As / errors.Is.
+		if filepath.IsAbs(spfVal.Value) {
+			return fmt.Errorf("task %q: %w", taskID, &AbsoluteSystemPromptFilePathError{Path: spfVal.Value})
+		}
+		content, err := os.ReadFile(filepath.Join(baseDir, spfVal.Value))
+		if err != nil {
+			return fmt.Errorf("task %q: %w", taskID, &SystemPromptFileError{Path: spfVal.Value, Err: err})
+		}
+		spfKey.Value = "system_prompt"
+		spfVal.Kind = yaml.ScalarNode
+		spfVal.Tag = "!!str"
+		spfVal.Style = yaml.LiteralStyle
+		spfVal.Value = string(content)
 	}
-	content, err := os.ReadFile(filepath.Join(baseDir, value.Value))
-	if err != nil {
-		return &PromptFileError{Task: taskID, Path: value.Value, Err: err}
-	}
-	keyNode.Value = "prompt"
-	value.Kind = yaml.ScalarNode
-	value.Tag = "!!str"
-	value.Style = yaml.LiteralStyle
-	value.Value = string(content)
 	return nil
 }
 
@@ -658,9 +715,9 @@ func (e *PromptFileError) Error() string {
 
 func (e *PromptFileError) Unwrap() error { return e.Err }
 
-// AbsoluteSystemPromptFilePathError reports a top-level `system_prompt_file:`
-// whose value is an absolute path. Only paths relative to the workflow file's
-// own directory are permitted, matching the task-level prompt_file rule.
+// AbsoluteSystemPromptFilePathError reports a `system_prompt_file:` (workflow- or
+// task-level) whose value is an absolute path. Only paths relative to the
+// workflow file's own directory are permitted, matching the prompt_file rule.
 type AbsoluteSystemPromptFilePathError struct {
 	Path string
 }
@@ -669,9 +726,10 @@ func (e *AbsoluteSystemPromptFilePathError) Error() string {
 	return fmt.Sprintf("system_prompt_file %q must be a relative path", e.Path)
 }
 
-// SystemPromptFileError reports a top-level `system_prompt_file:` that could not
-// be read (file missing, permission denied, or any other I/O failure). Err
-// wraps the underlying OS error so errors.Is(err, os.ErrNotExist) works.
+// SystemPromptFileError reports a `system_prompt_file:` (workflow- or task-level)
+// that could not be read (file missing, permission denied, or any other I/O
+// failure). Err wraps the underlying OS error so errors.Is(err, os.ErrNotExist)
+// works.
 type SystemPromptFileError struct {
 	Path string
 	Err  error
@@ -762,6 +820,16 @@ type rawTask struct {
 	Effort      string `yaml:"effort"`
 	Prompt      string `yaml:"prompt"`
 	Command     string `yaml:"command"`
+	// SystemPrompt overrides the workflow-level system_prompt for this task.
+	// Empty inherits the workflow default. Mutually exclusive with
+	// SystemPromptFile, and meaningless on shell, sub-workflow, and loop-wrapper
+	// tasks (the parser rejects it there).
+	SystemPrompt string `yaml:"system_prompt"`
+	// SystemPromptFile is the file-backed spelling of SystemPrompt, present only
+	// when Parse is handed YAML whose `system_prompt_file:` was not inlined by
+	// InlinePromptFiles (e.g. a direct Parse call). The normal ParseFile path
+	// rewrites it to `system_prompt:` before Parse runs.
+	SystemPromptFile string `yaml:"system_prompt_file"`
 	// Workflow is the raw registry-name-or-path reference of a sub-workflow task.
 	// A non-empty value makes this a sub-workflow leaf: the linked child is run
 	// recursively at dispatch. Mutually exclusive with every other body form.
@@ -843,6 +911,17 @@ var (
 	// `system_prompt:` and `system_prompt_file:`. The two are mutually exclusive:
 	// system_prompt_file is just the file-backed spelling of system_prompt.
 	ErrSystemPromptAndFileSet = errors.New("workflow sets both system_prompt and system_prompt_file")
+	// ErrTaskSystemPromptAndFileSet is the task-level counterpart: a task that
+	// sets both `system_prompt:` and `system_prompt_file:`.
+	ErrTaskSystemPromptAndFileSet = errors.New("task sets both system_prompt and system_prompt_file")
+	// ErrShellTaskWithSystemPrompt reports a shell task (one with `command:`) that
+	// sets a task-level `system_prompt:` or `system_prompt_file:`. A shell task is
+	// not sent to a model, so a system prompt is meaningless for it.
+	ErrShellTaskWithSystemPrompt = errors.New("shell task must not set system_prompt or system_prompt_file")
+	// ErrSubWorkflowWithSystemPrompt reports a sub-workflow task (one with
+	// `workflow:`) that sets a task-level `system_prompt:` or `system_prompt_file:`.
+	// The linked child carries its own system prompt; the wrapper has none.
+	ErrSubWorkflowWithSystemPrompt = errors.New("sub-workflow task must not set system_prompt or system_prompt_file")
 	// ErrShellTaskWithRuntime reports a shell task (one with `command:`) that
 	// also sets task-level `runtime:`, `model:`, or `effort:`. These fields are
 	// meaningless for shell tasks and rejected at the task level; workflow-level
@@ -858,9 +937,9 @@ var (
 	ErrLoopTaskWithRuntime = errors.New("loop task must not set runtime, model, or effort")
 	// ErrLoopTaskWithFields reports a loop-wrapper task that sets a task-only
 	// field (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`,
-	// or `cache`). The wrapper stands only for its loop; entry dependencies and
-	// per-task behavior belong to the body tasks.
-	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, schema, retry, budget, or cache")
+	// `cache`, or `system_prompt`). The wrapper stands only for its loop; entry
+	// dependencies and per-task behavior belong to the body tasks.
+	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, schema, retry, budget, cache, or system_prompt")
 	// ErrLoopAndForEachSet reports a task declaring both a `loop:` and a
 	// `for_each:` block. The two are sibling scoped-block forms; a task is at
 	// most one of them.
@@ -891,7 +970,8 @@ func rejectLoopWrapperFields(tid TaskID, rt rawTask, wrapper string) error {
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithRuntime)
 	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" ||
 		rt.Schema.Kind != 0 || rt.Retry.Kind != 0 ||
-		rt.Budget.Kind != 0 || rt.Cache != nil:
+		rt.Budget.Kind != 0 || rt.Cache != nil ||
+		rt.SystemPrompt != "" || rt.SystemPromptFile != "":
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithFields)
 	}
 	return nil
@@ -1488,6 +1568,9 @@ func checkUnusedParams(wf *Workflow) error {
 		for _, body := range wf.Tasks[i].TextBodies() {
 			scan(body)
 		}
+		// A param referenced only in a task's system_prompt override is still
+		// used; scan it alongside the workflow-level system prompt above.
+		scan(wf.Tasks[i].SystemPrompt)
 	}
 	for _, p := range wf.Params {
 		if _, ok := used[p.Name]; !ok {
