@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -63,24 +64,27 @@ func (w *Workflow) CacheEnabled(t *Task) bool {
 	return w.Cache
 }
 
-// Substitute replaces every `{{id}}`, `{{params.name}}`, `{{state.key}}`, and
-// `{{prev.id}}` placeholder in prompt with outputs[id] / params[name] /
-// state[key] / prev[id] respectively, in a single pass.
+// Substitute replaces every `{{id}}`, `{{params.name}}`, `{{state.key}}`,
+// `{{prev.id}}`, and `{{id.exit}}` placeholder in prompt with outputs[id] /
+// params[name] / state[key] / prev[id] / exitCodes[id] respectively, in a single
+// pass. An `{{id.exit}}` placeholder substitutes the referenced task's process
+// exit code as a decimal integer (0 for any task that is not a script task).
 //
 // The single-pass guarantee matters: substituting one namespace before another
 // would re-expand a value that happened to contain placeholder text. By
-// splicing all four kinds in one scan, a param value of `{{a}}` survives as
-// the literal string `{{a}}` even if task `a` produced an output, and the four
-// namespaces never collide: `{{draft}}`, `{{params.draft}}`, and
-// `{{prev.draft}}` each resolve from their own map.
+// splicing all kinds in one scan, a param value of `{{a}}` survives as the
+// literal string `{{a}}` even if task `a` produced an output, and the namespaces
+// never collide: `{{draft}}`, `{{params.draft}}`, and `{{prev.draft}}` each
+// resolve from their own map.
 //
-// Any map may be nil. An unknown task or param placeholder is left in place
-// verbatim, mirroring the parser-time invariant that every such placeholder in
-// a Workflow returned by Parse is guaranteed to resolve. A missing state key or
-// prev id, by contrast, substitutes to the empty string: both are legitimately
-// empty on the first tick (state across runs, prev on the first loop
-// iteration), so the placeholder must collapse rather than leak braces.
-func Substitute(prompt string, outputs map[TaskID]string, params ParamValues, state map[string]string, prev map[TaskID]string) string {
+// Any map may be nil. An unknown task, exit, or param placeholder is left in
+// place verbatim, mirroring the parser-time invariant that every such
+// placeholder in a Workflow returned by Parse is guaranteed to resolve. A
+// missing state key or prev id, by contrast, substitutes to the empty string:
+// both are legitimately empty on the first tick (state across runs, prev on the
+// first loop iteration), so the placeholder must collapse rather than leak
+// braces.
+func Substitute(prompt string, outputs map[TaskID]string, params ParamValues, state map[string]string, prev map[TaskID]string, exitCodes map[TaskID]int) string {
 	matches := combinedPlaceholderRe.FindAllStringSubmatchIndex(prompt, -1)
 	if len(matches) == 0 {
 		return prompt
@@ -90,7 +94,7 @@ func Substitute(prompt string, outputs map[TaskID]string, params ParamValues, st
 	last := 0
 	for _, m := range matches {
 		// m: [matchStart, matchEnd, paramStart, paramEnd, stateStart, stateEnd,
-		// prevStart, prevEnd, taskStart, taskEnd].
+		// prevStart, prevEnd, taskStart, taskEnd, exitStart, exitEnd].
 		b.WriteString(prompt[last:m[0]])
 		matched := prompt[m[0]:m[1]]
 		switch {
@@ -105,6 +109,13 @@ func Substitute(prompt string, outputs map[TaskID]string, params ParamValues, st
 			b.WriteString(state[prompt[m[4]:m[5]]])
 		case m[6] >= 0: // prev branch: missing id -> empty string.
 			b.WriteString(prev[TaskID(prompt[m[6]:m[7]])])
+		case m[10] >= 0: // exit branch: `{{id.exit}}` -> decimal exit code.
+			id := TaskID(prompt[m[10]:m[11]])
+			if v, ok := exitCodes[id]; ok {
+				b.WriteString(strconv.Itoa(v))
+			} else {
+				b.WriteString(matched)
+			}
 		case m[8] >= 0: // task branch.
 			id := TaskID(prompt[m[8]:m[9]])
 			if v, ok := outputs[id]; ok {

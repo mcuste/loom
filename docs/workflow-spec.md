@@ -104,10 +104,10 @@ prompt or a shell command) or a loop wrapper (a task carrying a `loop:` or
 
 ### LLM tasks vs. command tasks
 
-Every executable task sets **exactly one** of `prompt:`, `prompt_file:`, or
-`command:`. Setting more than one, or none, is a hard validation error.
-`prompt_file:` is a path form of `prompt:` — it is inlined at parse time and
-is otherwise identical to an inline `prompt:` body.
+Every executable task sets **exactly one** of `prompt:`, `prompt_file:`,
+`command:`, `script:`, or `workflow:`. Setting more than one, or none, is a hard
+validation error. `prompt_file:` is a path form of `prompt:` — it is inlined at
+parse time and is otherwise identical to an inline `prompt:` body.
 
 - A **prompt task** dispatches its (substituted) prompt to the effective
   runtime/model/effort. Its output is the model's text response.
@@ -116,12 +116,77 @@ is otherwise identical to an inline `prompt:` body.
   downstream via `{{task_id}}` exactly like model output. Stderr streams live
   and is not captured (it surfaces in the error message on failure). A non-zero
   exit code fails the task and propagates through the DAG like any other error.
+- A **script task** runs an executable file **directly** (honoring its shebang)
+  with optional `args:` as argv. Like a command task, its stdout is the output.
+  Unlike a command task, a non-zero exit is **data, not failure**: the exit code
+  is captured and the task succeeds, so downstream tasks can branch on it via
+  `{{id.exit}}`. See [Script tasks](#script-tasks).
 
-Command tasks have no model, so `runtime:`, `model:`, and `effort:` at the task
-level are **rejected** (workflow-level defaults are tolerated and silently
-ignored). A command task may not set a `schema:` either. Everything else
+Command and script tasks have no model, so `runtime:`, `model:`, and `effort:`
+at the task level are **rejected** (workflow-level defaults are tolerated and
+silently ignored). They may not set a `schema:` either. Everything else
 (`depends_on`, `when`, `retry`, `writes_state`, `budget`, `cache`,
 placeholders) works identically.
+
+A command or LLM task fails on a non-zero exit by default; `ok_exit` opts
+specific codes into success so the exit can be branched on. See
+[Exit codes and ok_exit](#exit-codes-and-ok_exit).
+
+#### Script tasks
+
+A `script:` task execs its file directly rather than via `sh -c`, so the file's
+shebang selects the interpreter (`#!/bin/sh`, `#!/usr/bin/env python3`, …).
+Relative paths resolve against the loom process's working directory at run time
+(like `command:`, unlike `prompt_file:` which resolves against the YAML's dir).
+
+- **`args`** (script, list): argv passed after the path. Each entry is
+  substituted (`{{id}}`, `{{params.x}}`, `{{state.k}}`, `{{id.exit}}`) before
+  execution. Rejected on any non-script task.
+- **Exit code as data.** A non-zero exit does not fail the task; only a launch
+  failure (missing file, not executable) is an error. The code is recorded on
+  the result and exposed two ways:
+  - `{{id.exit}}` substitutes the decimal exit code into any downstream
+    `prompt:`/`command:`/`args:` body (a bare `{{id}}` still yields stdout). It
+    creates a DAG edge like `{{id}}`, so the producer must be in `depends_on`.
+  - In a `when:` guard, `{{id.exit}}` compares against a **bare integer**:
+    `{{id.exit}} == 0`, `!= 0`, `< n`, `> n` (no quotes, unlike the string
+    `==`/`!=` on stdout). See [Conditionals](#conditionals-when).
+  - Without `ok_exit`, a non-script task reports exit code `0` (any non-zero is a
+    failure), so `{{id.exit}}` is meaningful on a script dependency or a task
+    that opts in via `ok_exit`.
+
+#### Exit codes and ok_exit
+
+`ok_exit` is a list of non-zero exit codes a command, LLM, or script task treats
+as **success** rather than failure. It lets a non-script task opt into the
+script-style "exit is data" model and branch on a tool's (or `claude-code`'s)
+exit status:
+
+```yaml
+- id: gen
+  runtime: claude-code
+  prompt: attempt the task
+  ok_exit: [0, 1]            # exit 1 is a tolerated soft-fail, not a workflow abort
+- id: fallback
+  depends_on: [gen]
+  when: "{{gen.exit}} != 0"  # branch on the exit code
+  prompt: gen failed; try a different approach
+```
+
+- Exit `0` is always success. `ok_exit` names **additional** non-zero codes that
+  count as success; every other non-zero code, and a signal kill (reported as
+  `-1`), still fails the task. Each entry must be in the `0`-`255` range.
+- A tolerated exit captures the code into the result for `{{id.exit}}`
+  substitution and `.exit` conditions. A command/script keeps its stdout as the
+  `{{id}}` output; an LLM task that exits non-zero produced no response, so its
+  `{{id}}` output is empty (the exit code is the signal).
+- For a script, the default (no `ok_exit`) tolerates every code; `ok_exit`
+  narrows that to the listed set.
+- `ok_exit` is rejected on sub-workflow and loop-wrapper tasks (no process exit).
+- Even without `ok_exit`, a failing command/LLM/script task records its numeric
+  exit code on the run record (shown by `loom runs show` and the live finish
+  line), so a non-zero `claude-code` exit is visible rather than buried in an
+  error string. A tolerated non-zero LLM exit is never memoized.
 
 > **Security note.** Model output spliced into a `command:` body via
 > `{{task_id}}` is untrusted input. If an upstream task is fed user-supplied
@@ -145,6 +210,14 @@ placeholders) works identically.
   `prompt_file: prompts/step.md`.
 - **`command`** (shell, string): body run via `sh -c`. Non-empty. Mutually
   exclusive with `prompt` and `prompt_file`.
+- **`script`** (script, string): path to an executable run directly (shebang
+  honored). Non-empty. Mutually exclusive with every other body form. See
+  [Script tasks](#script-tasks).
+- **`args`** (script, list): optional argv for a `script:` task, each
+  substituted. Rejected on non-script tasks.
+- **`ok_exit`** (command/LLM/script, list of int): non-zero exit codes treated
+  as success rather than failure. Each must be 0-255. Rejected on sub-workflow
+  and loop-wrapper tasks. See [Exit codes and ok_exit](#exit-codes-and-ok_exit).
 - **`description`** (all tasks, string): plan output only; never sent to a model.
 - **`runtime`** (LLM, enum): task-level override. Rejected on command tasks.
 - **`model`** (LLM, enum): task-level override. Rejected on command tasks.
@@ -345,6 +418,9 @@ The grammar is deliberately tiny. An expression is exactly one of:
 - **`{{id}} != "literal"`**: true when the output of `id` differs from the string.
 - **`{{id}} < n`**: true when `id`'s output parses as an integer less than `n`.
 - **`{{id}} > n`**: true when `id`'s output parses as an integer greater than `n`.
+- **`{{id.exit}} <op> n`**: compares a script task's exit code (an integer)
+  against the bare integer `n`, for `<op>` in `==`, `!=`, `<`, `>`. Unlike the
+  stdout forms, `==`/`!=` here take a bare integer, not a quoted string.
 - **`contains({{id}}, "substr")`**: true when `id`'s output contains the substring.
 - **`succeeded(id)`**: true when `id` ran to completion successfully.
 - **`failed(id)`**: true when `id` ran and did **not** succeed (a *skipped*
@@ -352,7 +428,8 @@ The grammar is deliberately tiny. An expression is exactly one of:
 
 `==`/`!=`/`contains` take a double-quoted string (escapes `\"` and `\\` are
 honored); `<`/`>` take an integer and error at run time if the referenced
-output is not an integer.
+output is not an integer. An `{{id.exit}}` reference takes a bare integer for
+every operator and never parses the output.
 
 ```yaml
 tasks:

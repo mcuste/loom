@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -16,6 +17,10 @@ type ExecError struct {
 	Name   Name
 	Err    error
 	Stderr string
+	// ExitCode is the binary's process exit code, or -1 when it was killed by a
+	// signal or never started. Carried so the executor can record it on the task
+	// result (and honor an ok_exit tolerance) without re-parsing the message.
+	ExitCode int
 }
 
 // Error renders "<name>: <err>" or "<name>: <err>: <trimmed stderr>".
@@ -79,8 +84,14 @@ func (s Spec) Validate(req Request) error {
 func (s Spec) Binary() string { return s.BinaryName }
 
 // Run execs the binary with Args(req), captures stdout/stderr, wraps a failed
-// run in *ExecError, and hands stdout to Decode on success. A Decode failure
-// surfaces as a name-prefixed error (not an *ExecError).
+// run in *ExecError (carrying the process exit code), and hands stdout to Decode
+// on success. A Decode failure surfaces as a name-prefixed error (not an
+// *ExecError).
+//
+// On a non-zero exit the *ExecError carries the process exit code (or -1 when
+// the binary was killed by a signal or never started); Decode is not run on the
+// failure path, so a tolerated non-zero exit surfaces an empty output. The
+// returned Response always carries ExitCode.
 func (s Spec) Run(ctx context.Context, req Request) (Response, error) {
 	if s.Args == nil || s.Decode == nil {
 		return Response{}, fmt.Errorf("%s: incomplete Spec: Args and Decode must be non-nil", s.Name)
@@ -90,12 +101,18 @@ func (s Spec) Run(ctx context.Context, req Request) (Response, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return Response{}, &ExecError{Name: s.Name, Err: err, Stderr: stderr.String()}
+		code := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		}
+		return Response{ExitCode: code}, &ExecError{Name: s.Name, Err: err, Stderr: stderr.String(), ExitCode: code}
 	}
 
 	resp, err := s.Decode(stdout.Bytes())
 	if err != nil {
 		return Response{}, fmt.Errorf("%s: %w", s.Name, err)
 	}
+	resp.ExitCode = 0
 	return resp, nil
 }

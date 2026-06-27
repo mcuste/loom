@@ -52,8 +52,13 @@ type runState struct {
 	// terminal disposition (it failed), which lets failed()/succeeded()/skipped()
 	// in `when:` expressions tell a skip apart from a failure.
 	skipped map[workflow.TaskID]bool
-	gates   map[workflow.TaskID]chan struct{}
-	mu      *sync.Mutex
+	// exitCodes records, per completed task, its process exit code (0 for every
+	// non-script task), consulted for `{{id.exit}}` substitution and `.exit`
+	// conditions. Shares the aliasing/cloning rules of outputs: aliased for
+	// sequential and while loops, snapshotted per parallel for_each pass.
+	exitCodes map[workflow.TaskID]int
+	gates     map[workflow.TaskID]chan struct{}
+	mu        *sync.Mutex
 	// budgetInFlight is a pointer so a scoped-loop iteration's derived runState
 	// (fresh gates, but the same report, mutex, and budget slot) serializes
 	// budget-gated dispatch against the outer schedule rather than against a
@@ -111,6 +116,7 @@ func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}
 	inner.outputs = maps.Clone(st.outputs)
 	inner.succeeded = maps.Clone(st.succeeded)
 	inner.skipped = maps.Clone(st.skipped)
+	inner.exitCodes = maps.Clone(st.exitCodes)
 	st.mu.Unlock()
 	return &inner
 }
@@ -214,6 +220,7 @@ func (st *runState) evalWhen(t *workflow.Task) (bool, error) {
 		Outputs:   maps.Clone(st.outputs),
 		Succeeded: maps.Clone(st.succeeded),
 		Skipped:   maps.Clone(st.skipped),
+		ExitCodes: maps.Clone(st.exitCodes),
 	}
 	st.mu.Unlock()
 	return t.Cond.Eval(env)
@@ -267,6 +274,7 @@ func (st *runState) recordSkip(t *workflow.Task, hooks Hooks) {
 	st.mu.Lock()
 	st.outputs[t.ID] = ""
 	st.skipped[t.ID] = true
+	st.exitCodes[t.ID] = 0
 	st.rep.Tasks = append(st.rep.Tasks, res)
 	st.mu.Unlock()
 	close(st.gates[t.ID])
@@ -280,6 +288,7 @@ func (st *runState) recordResult(t *workflow.Task, res TaskResult) {
 	st.mu.Lock()
 	st.outputs[t.ID] = res.Output
 	st.succeeded[t.ID] = true
+	st.exitCodes[t.ID] = res.ExitCode
 	st.rep.Tasks = append(st.rep.Tasks, res)
 	st.rep.Usage.Add(res.Usage)
 	st.mu.Unlock()
@@ -288,7 +297,8 @@ func (st *runState) recordResult(t *workflow.Task, res TaskResult) {
 
 // dispatch substitutes t's body and runs it against the right backend, selected
 // by t.BodyKind(): a sub-workflow recurses via Run, a shell task forks `sh -c`,
-// an LLM task calls its runtime (with cache and schema validation). It returns
+// a script task execs its file directly (capturing the exit code as data), an
+// LLM task calls its runtime (with cache and schema validation). It returns
 // the result and any dispatch (runErr) outcome; fatal is a non-nil setup error
 // (unknown runtime, unlinked sub-workflow, invalid body) detected before OnStart
 // fires and already wrapped with the task id, which the caller returns as-is.
@@ -316,7 +326,7 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		st.mu.Lock()
 		vals := make(map[string]string, len(t.With))
 		for _, a := range t.With {
-			vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.outputs, opts.Params, opts.State, st.prev)
+			vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
 		}
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
@@ -353,10 +363,24 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 			hooks.OnStart(*t, st.iteration, "", "", "")
 		}
 		st.mu.Lock()
-		body := workflow.Substitute(bindLoopVar(t.Command, st), st.outputs, opts.Params, opts.State, st.prev)
+		body := workflow.Substitute(bindLoopVar(t.Command, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 			return runShell(ctx, t, body)
+		})
+	case workflow.BodyScript:
+		if hooks.OnStart != nil {
+			hooks.OnStart(*t, st.iteration, "", "", "")
+		}
+		st.mu.Lock()
+		path := workflow.Substitute(bindLoopVar(t.Script, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
+		args := make([]string, len(t.Args))
+		for i, a := range t.Args {
+			args[i] = workflow.Substitute(bindLoopVar(a, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
+		}
+		st.mu.Unlock()
+		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+			return runScript(ctx, t, path, args)
 		})
 	case workflow.BodyPrompt:
 		rt, model, effort := wf.Effective(t)
@@ -364,18 +388,24 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		if !ok {
 			return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 		}
-		sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, opts.Params, opts.State, nil)
+		sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, opts.Params, opts.State, nil, nil)
 		if hooks.OnStart != nil {
 			hooks.OnStart(*t, st.iteration, rt, model, effort)
 		}
 		st.mu.Lock()
-		body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.outputs, opts.Params, opts.State, st.prev)
+		body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
 		st.mu.Unlock()
 		send := func() (TaskResult, error) {
 			return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 				r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt)
 				if err != nil {
 					return r, err
+				}
+				// A tolerated non-zero exit (ok_exit) means the runtime did not produce
+				// a real response, so there is no JSON output to validate against a
+				// schema; skip validation and let the empty output flow downstream.
+				if r.ExitCode != 0 {
+					return r, nil
 				}
 				return r, validateSchema(t, r.Output)
 			})
@@ -389,7 +419,7 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		// BodyInvalid: the task set none or more than one body form. The parser
 		// rejects this, so reaching it means a hand-built or corrupted Task; fail
 		// fast rather than silently dispatching down an arbitrary branch.
-		return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, or workflow must be set", t.ID)
+		return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", t.ID)
 	}
 	return res, runErr, nil
 }

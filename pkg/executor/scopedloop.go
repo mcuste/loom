@@ -117,7 +117,7 @@ func forEachList(lg *workflow.LoopGroup, st *runState, opts Options) []string {
 		return lg.List
 	}
 	st.mu.Lock()
-	resolved := workflow.Substitute(lg.ListSource, st.outputs, opts.Params, opts.State, nil)
+	resolved := workflow.Substitute(lg.ListSource, st.outputs, opts.Params, opts.State, nil, st.exitCodes)
 	st.mu.Unlock()
 	return parseList(resolved)
 }
@@ -199,12 +199,14 @@ func runParallelPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.Lo
 			// An element ran the member to completion: publish its output and let
 			// success dominate any prior or concurrent skip mark.
 			st.outputs[m] = inner.outputs[m]
+			st.exitCodes[m] = inner.exitCodes[m]
 			st.succeeded[m] = true
 			st.skipped[m] = false
 		case inner.skipped[m] && !st.succeeded[m]:
 			// This element skipped and no element has succeeded yet: record the
 			// skip without clobbering a real output a later success may still set.
 			st.outputs[m] = inner.outputs[m]
+			st.exitCodes[m] = inner.exitCodes[m]
 			st.skipped[m] = true
 		}
 	}
@@ -261,6 +263,7 @@ func loopConverged(lg *workflow.LoopGroup, st *runState) (bool, error) {
 		Outputs:   maps.Clone(st.outputs),
 		Succeeded: maps.Clone(st.succeeded),
 		Skipped:   maps.Clone(st.skipped),
+		ExitCodes: maps.Clone(st.exitCodes),
 	}
 	return lg.Cond.Eval(env)
 }

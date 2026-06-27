@@ -170,10 +170,11 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 		}
 		plan.seed[tid] = t.Output
 		plan.entries = append(plan.entries, seedEntry{
-			id:      tid,
-			prompt:  t.Prompt,
-			command: t.Command,
-			output:  t.Output,
+			id:       tid,
+			prompt:   t.Prompt,
+			command:  t.Command,
+			output:   t.Output,
+			exitCode: t.ExitCode,
 		})
 	}
 

@@ -29,17 +29,19 @@ type taskStartMsg struct {
 	model    runtime.Model
 	effort   runtime.Effort
 	shell    bool
+	script   bool
 	sub      bool
 	ref      string
 	retrying bool
 }
 
 type taskFinishMsg struct {
-	id    workflow.TaskID
-	iter  int
-	res   executor.TaskResult
-	err   error
-	shell bool
+	id     workflow.TaskID
+	iter   int
+	res    executor.TaskResult
+	err    error
+	shell  bool
+	script bool
 }
 
 // taskState is a task's position in its lifecycle within the live view.
@@ -61,6 +63,7 @@ type liveTask struct {
 	model    runtime.Model
 	effort   runtime.Effort
 	shell    bool
+	script   bool
 	sub      bool
 	ref      string
 	state    taskState
@@ -184,6 +187,7 @@ func (m *runModel) onStart(msg taskStartMsg) {
 		model:    msg.model,
 		effort:   msg.effort,
 		shell:    msg.shell,
+		script:   msg.script,
 		sub:      msg.sub,
 		ref:      msg.ref,
 		state:    stateRunning,
@@ -284,6 +288,8 @@ func descriptor(t *liveTask) string {
 	switch {
 	case t.shell:
 		return "(shell)"
+	case t.script:
+		return "(script)"
 	case t.sub:
 		return fmt.Sprintf("(subworkflow %s)", t.ref)
 	default:
@@ -304,16 +310,17 @@ func finishLine(msg taskFinishMsg, sym symbolSet) string {
 	switch {
 	case msg.err != nil:
 		line = fmt.Sprintf("  %s %s FAIL after %s: %s", sym.failed, id, elapsed, strings.TrimSpace(msg.err.Error()))
-	case msg.shell:
-		line = fmt.Sprintf("  %s %s done %s  exit=0", sym.done, id, elapsed)
+	case msg.shell, msg.script:
+		// Real exit code: a command/script with ok_exit can succeed non-zero.
+		line = fmt.Sprintf("  %s %s done %s  exit=%d", sym.done, id, elapsed, msg.res.ExitCode)
 	case msg.res.Status == executor.StatusSkipped:
 		line = fmt.Sprintf("  %s %s %s", renderBadge(badgeState{res: msg.res}, sym), id, elapsed)
 	case msg.res.CacheHit:
 		line = fmt.Sprintf("  %s %s %s  $%.6f", renderBadge(badgeState{res: msg.res}, sym), id, elapsed, msg.res.Usage.TotalCostUSD)
 	default:
 		u := msg.res.Usage
-		line = fmt.Sprintf("  %s %s done %s  in=%d out=%d cache=%d  $%.6f",
-			sym.done, id, elapsed, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.TotalCostUSD)
+		line = fmt.Sprintf("  %s %s done %s  in=%d out=%d cache=%d  $%.6f%s",
+			sym.done, id, elapsed, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.TotalCostUSD, exitNote(msg.res.ExitCode))
 	}
 	return line + iterSuffix(msg.iter)
 }
@@ -433,10 +440,10 @@ func (t *ttyRenderer) Hooks() executor.Hooks {
 		// looped task's running and finish lines with its pass number; iter is
 		// 0 for a non-looped task, where the badge is empty.
 		OnStart: func(task workflow.Task, iter int, rt runtime.Name, m runtime.Model, e runtime.Effort) {
-			send(taskStartMsg{id: task.ID, iter: iter, rt: rt, model: m, effort: e, shell: task.IsShell(), sub: task.IsSubWorkflow(), ref: task.Workflow})
+			send(taskStartMsg{id: task.ID, iter: iter, rt: rt, model: m, effort: e, shell: task.IsShell(), script: task.IsScript(), sub: task.IsSubWorkflow(), ref: task.Workflow})
 		},
 		OnFinish: func(task workflow.Task, iter int, res executor.TaskResult, err error) {
-			send(taskFinishMsg{id: task.ID, iter: iter, res: res, err: err, shell: task.IsShell()})
+			send(taskFinishMsg{id: task.ID, iter: iter, res: res, err: err, shell: task.IsShell(), script: task.IsScript()})
 		},
 	}
 }

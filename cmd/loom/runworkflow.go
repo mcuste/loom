@@ -31,10 +31,11 @@ type seedPlan struct {
 // unexported: the type is package-internal and only assembled by callers in
 // this package.
 type seedEntry struct {
-	id      workflow.TaskID
-	prompt  string
-	command string
-	output  string
+	id       workflow.TaskID
+	prompt   string
+	command  string
+	output   string
+	exitCode int
 }
 
 // resolveSeed reduces a seedPlan to the set and per-task entries the run will
@@ -156,28 +157,43 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 			if t == nil {
 				continue
 			}
-			if t.IsShell() || t.IsSubWorkflow() {
-				// Sub-workflow tasks have no runtime of their own (the child brings
-				// its own), so they seed with empty runtime metadata, matching the
-				// ("", "", "") OnStart that runTask fires for them.
+			if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
+				// Shell, script, and sub-workflow tasks have no runtime of their own
+				// (a sub-workflow's child brings its own), so they seed with empty
+				// runtime metadata, matching the ("", "", "") OnStart that runTask
+				// fires for them.
 				sh.OnStart(*t, 0, "", "", "")
 			} else {
 				rt, m, e := wf.Effective(t)
 				sh.OnStart(*t, 0, rt, m, e)
 			}
 			sh.OnFinish(*t, 0, executor.TaskResult{
-				TaskID:  id,
-				Prompt:  s.prompt,
-				Command: s.command,
-				Output:  s.output,
+				TaskID:   id,
+				Prompt:   s.prompt,
+				Command:  s.command,
+				Output:   s.output,
+				ExitCode: s.exitCode,
 			}, nil)
+		}
+	}
+
+	// Carry seeded exit codes into the run so a resumed downstream task's
+	// `{{id.exit}}` resolves to the recorded code. Every seeded task is recorded
+	// (not just non-zero ones), mirroring a fresh run where recordResult stores an
+	// exit code for every completed task: a seeded clean-exit script must resolve
+	// to "0", not be left verbatim as an unknown reference.
+	var seedExit map[workflow.TaskID]int
+	if len(seededEntries) > 0 {
+		seedExit = make(map[workflow.TaskID]int, len(seededEntries))
+		for id, s := range seededEntries {
+			seedExit[id] = s.exitCode
 		}
 	}
 
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
 		sh,
-	), executor.Options{Params: resolved, Seed: seed, State: state})
+	), executor.Options{Params: resolved, Seed: seed, SeedExitCodes: seedExit, State: state})
 	if rep != nil {
 		// A summary write error does not mask a real run failure: surface it only
 		// when the run itself otherwise succeeded.

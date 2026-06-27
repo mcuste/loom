@@ -9,6 +9,7 @@ package workflow
 import (
 	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/mcuste/loom/pkg/runtime"
 )
@@ -45,13 +46,19 @@ var (
 	paramPlaceholderRe = regexp.MustCompile(`\{\{params\.(` + identifierClass + `)\}\}`)
 
 	// combinedPlaceholderRe matches `{{params.name}}`, `{{state.key}}`,
-	// `{{prev.id}}`, and `{{id}}` in a single pass. Capture group 1 is the param
-	// name (non-empty for a param match); group 2 is the state key (non-empty for
-	// a state match); group 3 is the prev id (non-empty for a prev match); group 4
-	// is the task id (non-empty for a task match). Used by Substitute to splice
-	// all four kinds of placeholder in one pass so a substituted value containing
+	// `{{prev.id}}`, `{{id}}`, and `{{id.exit}}` in a single pass. Capture group 1
+	// is the param name (non-empty for a param match); group 2 is the state key;
+	// group 3 is the prev id; group 4 is the bare task id; group 5 is the task id
+	// of an `{{id.exit}}` exit-code reference. Used by Substitute to splice every
+	// kind of placeholder in one pass so a substituted value containing
 	// `{{taskid}}` text is never re-expanded.
-	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|state\.(` + identifierClass + `)|prev\.(` + identifierClass + `)|(` + identifierClass + `))\}\}`)
+	//
+	// The bare-id alternative is listed before the exit alternative, but a bare
+	// `(id)` can never satisfy the full pattern for `{{id.exit}}` text (the `.`
+	// stops the identifier class and no `}}` follows), so the engine falls through
+	// to the exit alternative. Keeping exit last preserves groups 1-4's indices,
+	// so Substitute and scanPlaceholders need no reindexing.
+	combinedPlaceholderRe = regexp.MustCompile(`\{\{(?:params\.(` + identifierClass + `)|state\.(` + identifierClass + `)|prev\.(` + identifierClass + `)|(` + identifierClass + `)|(` + identifierClass + `)\.exit)\}\}`)
 
 	// prevPlaceholderRe matches `{{prev.id}}` placeholders, which reference the
 	// prior iteration's output of a member task inside a scoped loop. The
@@ -243,6 +250,26 @@ type Task struct {
 	// with the parent context before it is handed to the child as a CLI-tier
 	// param value. Empty unless Workflow is set.
 	With []WithArg
+	// Script is the path to an executable script run directly (honoring its
+	// shebang) at dispatch. Mutually exclusive with Prompt, Command, and Workflow.
+	// The path and every Args entry carry `{{id}}` / `{{params.x}}` / `{{state.k}}`
+	// placeholders substituted before execution. Unlike a shell task, a non-zero
+	// exit is captured as data (TaskResult.ExitCode, readable downstream via
+	// `{{id.exit}}`) rather than failing the task; only a launch failure (missing
+	// file, not executable) is an error. Like a shell task it takes no runtime,
+	// model, effort, system prompt, or schema.
+	Script string
+	// Args is the optional argv passed after Script, each substituted like the
+	// path. Empty unless Script is set.
+	Args []string
+	// OkExit lists non-zero process exit codes that count as success rather than
+	// failure for a command, LLM, or script task. Exit 0 is always success; a
+	// code in OkExit makes the task succeed with its ExitCode captured (readable
+	// downstream via `{{id.exit}}`); any other non-zero code fails the task. When
+	// OkExit is nil (unset) the defaults apply: a script task tolerates every exit
+	// code (its exit is data), while a command or LLM task tolerates only 0.
+	// Rejected on sub-workflow and loop-wrapper tasks, which have no process exit.
+	OkExit []int
 }
 
 // WithArg is one `with:` entry on a sub-workflow task: a child param name and
@@ -261,8 +288,8 @@ type WithArg struct {
 func (t Task) IsSubWorkflow() bool { return t.Workflow != "" }
 
 // BodyKind names the single body form a Task carries. A valid task sets exactly
-// one of Prompt, Command, or Workflow; BodyKind is the discriminator the
-// executor routes on, replacing an implicit precedence among three optional
+// one of Prompt, Command, Workflow, or Script; BodyKind is the discriminator the
+// executor routes on, replacing an implicit precedence among the optional body
 // strings. BodyInvalid marks a task that set none or more than one, an illegal
 // shape the parser rejects: routing on it crashes early instead of silently
 // misdispatching a prompt+command or prompt+workflow task down the wrong path.
@@ -277,10 +304,12 @@ const (
 	BodyShell
 	// BodySubWorkflow is a task linking and running another Workflow.
 	BodySubWorkflow
+	// BodyScript is a task running an executable Script file directly.
+	BodyScript
 )
 
 // BodyKind reports which body form t carries, returning BodyInvalid when t sets
-// none or more than one of Prompt, Command, and Workflow.
+// none or more than one of Prompt, Command, Workflow, and Script.
 func (t Task) BodyKind() BodyKind {
 	n := 0
 	kind := BodyInvalid
@@ -295,6 +324,10 @@ func (t Task) BodyKind() BodyKind {
 	if t.Workflow != "" {
 		n++
 		kind = BodySubWorkflow
+	}
+	if t.Script != "" {
+		n++
+		kind = BodyScript
 	}
 	if n != 1 {
 		return BodyInvalid
@@ -380,12 +413,43 @@ func (r Retry) Enabled() bool {
 // reliable discriminator at the executor, CLI, and store layers.
 func (t Task) IsShell() bool { return t.Command != "" }
 
+// IsScript reports whether t is a script task (has Script set) that runs an
+// executable file directly. The parser enforces Script is mutually exclusive
+// with every other body form, so this is a reliable discriminator at the
+// executor, CLI, and TUI layers.
+func (t Task) IsScript() bool { return t.Script != "" }
+
+// ExitTolerated reports whether process exit code is a success for t rather than
+// a failure. Exit 0 is always success. When OkExit is set, exactly the listed
+// codes (plus 0) are success and every other code fails. When OkExit is unset, a
+// script task tolerates every code (its exit is data) while every other task
+// tolerates only 0. A negative code (a signal kill, which exec reports as -1)
+// can never appear in OkExit (the parser bounds entries to 0-255), so a killed
+// process always fails.
+func (t Task) ExitTolerated(code int) bool {
+	if code == 0 {
+		return true
+	}
+	if code < 0 {
+		// A negative code means the process was killed by a signal (exec reports
+		// -1) or never produced an exit status. That is never a tolerated outcome,
+		// not even under a script task's tolerate-everything default, so a
+		// cancelled or signal-killed task always fails.
+		return false
+	}
+	if t.OkExit != nil {
+		return slices.Contains(t.OkExit, code)
+	}
+	return t.BodyKind() == BodyScript
+}
+
 // TextBodies returns every substitutable text fragment a task carries: its
 // prompt or command body, followed by each with-value. A shell task keeps its
-// body in Command; a sub-workflow task has no prompt body for this form (prompt
-// is empty), so its prev and placeholder refs live in the with-values instead.
-// Centralizing the body-form discrimination here keeps placeholder scanning
-// from drifting as new body forms are added.
+// body in Command; a script task carries its substitutable text in Script and
+// Args; a sub-workflow task has no prompt body for this form (prompt is empty),
+// so its prev and placeholder refs live in the with-values instead. Centralizing
+// the body-form discrimination here keeps placeholder scanning from drifting as
+// new body forms are added.
 func (t Task) TextBodies() []string {
 	var body string
 	switch t.BodyKind() {
@@ -393,15 +457,20 @@ func (t Task) TextBodies() []string {
 		body = t.Prompt
 	case BodyShell:
 		body = t.Command
+	case BodyScript:
+		body = t.Script
 	case BodySubWorkflow, BodyInvalid:
 		// A sub-workflow carries its refs in the with-values, not a prompt body;
 		// an invalid task has no single body to scan.
 		body = ""
 	}
-	bodies := make([]string, 0, 1+len(t.With))
+	bodies := make([]string, 0, 1+len(t.Args)+len(t.With))
 	if body != "" {
 		bodies = append(bodies, body)
 	}
+	// A script task's argv entries carry placeholders too, so they must be scanned
+	// alongside the path.
+	bodies = append(bodies, t.Args...)
 	for _, a := range t.With {
 		bodies = append(bodies, a.Value)
 	}

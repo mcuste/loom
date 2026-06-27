@@ -300,6 +300,17 @@ func subworkflowDescriptor(wf *workflow.Workflow, t *workflow.Task) string {
 	return fmt.Sprintf("workflow=%s", t.Workflow)
 }
 
+// exitNote renders a trailing "  exit=N" annotation for a non-zero exit code,
+// and "" for the common zero case. An LLM task only carries a non-zero code when
+// its ok_exit tolerated a runtime failure, so the note surfaces that without
+// cluttering the normal success line.
+func exitNote(code int) string {
+	if code == 0 {
+		return ""
+	}
+	return fmt.Sprintf("  exit=%d", code)
+}
+
 // planTaskCols renders the kind-specific middle columns of a plan row (between
 // the id and the trailing deps): a shell task shows its command, a sub-workflow
 // task its linked ref and child-task count, an LLM task its effective
@@ -312,6 +323,15 @@ func planTaskCols(wf *workflow.Workflow, t *workflow.Task) string {
 			cmd = cmd[:60] + "…"
 		}
 		return fmt.Sprintf("kind=shell  cmd=%q", cmd)
+	case workflow.BodyScript:
+		script := t.Script
+		if len(t.Args) > 0 {
+			script += " " + strings.Join(t.Args, " ")
+		}
+		if len(script) > 60 {
+			script = script[:60] + "…"
+		}
+		return fmt.Sprintf("kind=script  exec=%q", script)
 	case workflow.BodySubWorkflow:
 		return "kind=subworkflow  " + subworkflowDescriptor(wf, t)
 	case workflow.BodyPrompt:
@@ -321,7 +341,7 @@ func planTaskCols(wf *workflow.Workflow, t *workflow.Task) string {
 		// BodyInvalid: a hand-built or corrupted task that set none or more than
 		// one body form. Surface it in the plan rather than silently rendering it
 		// as an LLM task, matching the executor's fail-fast on the same shape.
-		return "kind=INVALID  (exactly one of prompt, command, or workflow must be set)"
+		return "kind=INVALID  (exactly one of prompt, command, workflow, or script must be set)"
 	}
 }
 
@@ -361,6 +381,8 @@ func (p *plainRenderer) Hooks() executor.Hooks {
 			switch {
 			case t.IsShell():
 				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (shell)%s\n", n, p.total, t.ID, iterSuffix(iter))
+			case t.IsScript():
+				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (script)%s\n", n, p.total, t.ID, iterSuffix(iter))
 			case t.IsSubWorkflow():
 				_, _ = fmt.Fprintf(p.w, "[%d/%d] %s (subworkflow %s)%s\n", n, p.total, t.ID, t.Workflow, iterSuffix(iter))
 			default:
@@ -370,21 +392,20 @@ func (p *plainRenderer) Hooks() executor.Hooks {
 		OnFinish: func(t workflow.Task, iter int, res executor.TaskResult, err error) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			if t.IsShell() {
-				if err != nil {
-					_, _ = fmt.Fprintf(p.w, "  %s FAIL after %s: %v\n", t.ID, res.Elapsed.Round(time.Millisecond), err)
-					return
-				}
-				_, _ = fmt.Fprintf(p.w, "  %s done %s  exit=0\n", t.ID, res.Elapsed.Round(time.Millisecond))
-				return
-			}
 			if err != nil {
 				_, _ = fmt.Fprintf(p.w, "  %s FAIL after %s: %v\n", t.ID, res.Elapsed.Round(time.Millisecond), err)
 				return
 			}
-			_, _ = fmt.Fprintf(p.w, "  %s done %s  in=%d out=%d cache=%d  $%.6f\n",
+			if t.IsShell() || t.IsScript() {
+				// Show the real exit code: a command/script with ok_exit can succeed
+				// with a non-zero code.
+				_, _ = fmt.Fprintf(p.w, "  %s done %s  exit=%d\n", t.ID, res.Elapsed.Round(time.Millisecond), res.ExitCode)
+				return
+			}
+			_, _ = fmt.Fprintf(p.w, "  %s done %s  in=%d out=%d cache=%d  $%.6f%s\n",
 				t.ID, res.Elapsed.Round(time.Millisecond),
-				res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CacheReadTokens, res.Usage.TotalCostUSD)
+				res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CacheReadTokens, res.Usage.TotalCostUSD,
+				exitNote(res.ExitCode))
 		},
 	}
 }

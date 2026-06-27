@@ -92,8 +92,13 @@ func shortID(runID string) string {
 // record alone does not carry.
 func taskRouting(wf *workflow.Workflow, tr store.TaskRecord) string {
 	if wf != nil {
-		if t := wf.ByID(workflow.TaskID(tr.ID)); t != nil && t.IsSubWorkflow() {
-			return "(subworkflow " + t.Workflow + ")"
+		if t := wf.ByID(workflow.TaskID(tr.ID)); t != nil {
+			switch {
+			case t.IsSubWorkflow():
+				return "(subworkflow " + t.Workflow + ")"
+			case t.IsScript():
+				return "(script)"
+			}
 		}
 	}
 	if tr.Command != "" {
@@ -179,6 +184,9 @@ func ShowRun(w io.Writer, rec *store.RunRecord, full bool) error {
 		if note != "" {
 			note = "  needs=" + note
 		}
+		if tr.ExitCode != 0 {
+			note += fmt.Sprintf("  exit=%d", tr.ExitCode)
+		}
 		if tr.Error != "" {
 			note += "  " + strings.TrimSpace(tr.Error)
 		}
@@ -232,6 +240,9 @@ func writeTaskBody(ew *errWriter, tr *store.TaskRecord) {
 		ew.printf("── prompt ───────────────────────────────\n%s\n", tr.Prompt)
 	}
 	ew.printf("\n── output ───────────────────────────────\n%s\n", tr.Output)
+	if tr.ExitCode != 0 {
+		ew.printf("\n── exit ─────────────────────────────────\n%d\n", tr.ExitCode)
+	}
 	if tr.Error != "" {
 		ew.printf("\n── error ────────────────────────────────\n%s\n", tr.Error)
 	}

@@ -18,6 +18,9 @@ import (
 //   - a scalar comparison of a task-output placeholder against a literal:
 //     `{{id}} == "x"`, `{{id}} != "x"`, or a numeric `{{id}} < n` / `{{id}} > n`
 //     where the referenced task's output parses as an integer;
+//   - a scalar comparison of a task's exit code against an integer:
+//     `{{id.exit}} == n`, `!= n`, `< n`, or `> n` (the exit code is always an
+//     integer, so even `==`/`!=` take a bare integer, not a quoted string);
 //   - a `contains({{id}}, "substr")` substring test;
 //   - a `succeeded(id)` / `failed(id)` status helper.
 type Condition struct {
@@ -30,8 +33,12 @@ type Condition struct {
 	ref TaskID
 	// literal holds the right-hand string for "==", "!=", and "contains".
 	literal string
-	// num holds the right-hand integer for "<" and ">".
+	// num holds the right-hand integer for "<" and ">", and for every operator
+	// when exitRef is set.
 	num int
+	// exitRef is true for an `{{id.exit}}` comparison: Eval reads Env.ExitCodes[ref]
+	// as an integer and compares it against num for every operator.
+	exitRef bool
 }
 
 // Env supplies the runtime values a Condition is evaluated against. Outputs
@@ -46,13 +53,19 @@ type Env struct {
 	Outputs   map[TaskID]string
 	Succeeded map[TaskID]bool
 	Skipped   map[TaskID]bool
+	// ExitCodes maps each task id to its process exit code, consulted for an
+	// `{{id.exit}}` comparison. A task with no recorded code (not a script task,
+	// or skipped) reads 0 via the map's zero value.
+	ExitCodes map[TaskID]int
 }
 
 var (
-	// comparisonRe matches `{{id}} <op> <rhs>` for op in ==, !=, <, >. The rhs
-	// is captured verbatim and validated per-operator (quoted string for ==/!=,
-	// integer for </>).
-	comparisonRe = regexp.MustCompile(`^\{\{(` + identifierClass + `)\}\}\s*(==|!=|<|>)\s*(.+)$`)
+	// comparisonRe matches `{{id}} <op> <rhs>` or `{{id.exit}} <op> <rhs>` for op
+	// in ==, !=, <, >. Group 1 is the task id; group 2 is the optional `.exit`
+	// suffix (present for an exit-code comparison); group 3 is the operator; group
+	// 4 is the rhs, captured verbatim and validated per-operator (quoted string
+	// for ==/!= on an output, integer for </> and for every op on an exit ref).
+	comparisonRe = regexp.MustCompile(`^\{\{(` + identifierClass + `)(\.exit)?\}\}\s*(==|!=|<|>)\s*(.+)$`)
 	// containsRe matches `contains({{id}}, "substr")`.
 	containsRe = regexp.MustCompile(`^contains\(\s*\{\{(` + identifierClass + `)\}\}\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)$`)
 	// helperRe matches `succeeded(id)` / `failed(id)`.
@@ -94,9 +107,21 @@ func ParseCondition(expr string, known map[TaskID]bool) (*Condition, error) {
 	}
 
 	if m := comparisonRe.FindStringSubmatch(expr); m != nil {
-		ref, op, rhs := TaskID(m[1]), m[2], strings.TrimSpace(m[3])
+		ref, exitRef, op, rhs := TaskID(m[1]), m[2] != "", m[3], strings.TrimSpace(m[4])
 		if !known[ref] {
 			return nil, &UnknownConditionRefError{Expr: raw, Ref: string(ref)}
+		}
+		if exitRef {
+			// An exit code is always an integer, so every operator (including ==/!=)
+			// takes a bare integer rhs rather than a quoted string.
+			if !intLitRe.MatchString(rhs) {
+				return nil, &MalformedConditionError{Expr: raw, Reason: fmt.Sprintf("operator %q on an .exit reference expects an integer", op)}
+			}
+			n, err := strconv.Atoi(rhs)
+			if err != nil {
+				return nil, &MalformedConditionError{Expr: raw, Reason: fmt.Sprintf("invalid integer %q", rhs)}
+			}
+			return &Condition{raw: raw, op: op, ref: ref, num: n, exitRef: true}, nil
 		}
 		switch op {
 		case "==", "!=":
@@ -124,6 +149,23 @@ func ParseCondition(expr string, known map[TaskID]bool) (*Condition, error) {
 // should run. It returns an error when a numeric comparison targets a
 // non-integer output.
 func (c *Condition) Eval(env Env) (bool, error) {
+	// An `{{id.exit}}` comparison reads the integer exit code directly, so it
+	// shares the four comparison operators with the output forms but never touches
+	// Outputs or needs a string parse.
+	if c.exitRef {
+		got := env.ExitCodes[c.ref]
+		switch c.op {
+		case "==":
+			return got == c.num, nil
+		case "!=":
+			return got != c.num, nil
+		case "<":
+			return got < c.num, nil
+		case ">":
+			return got > c.num, nil
+		}
+		return false, fmt.Errorf("%q: unsupported operator %q", c.raw, c.op)
+	}
 	switch c.op {
 	case "succeeded":
 		return env.Succeeded[c.ref], nil

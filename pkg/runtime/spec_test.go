@@ -171,6 +171,27 @@ func TestSpecRun_WrapsExecErrorOnFailure(t *testing.T) {
 	if !strings.Contains(ee.Stderr, "boom") {
 		t.Fatalf("ExecError.Stderr = %q, want it to contain %q", ee.Stderr, "boom")
 	}
+	if ee.ExitCode != 7 {
+		t.Fatalf("ExecError.ExitCode = %d, want 7", ee.ExitCode)
+	}
+}
+
+// TestSpecRun_ExitCodeZeroOnSuccess pins that a clean run reports ExitCode 0 on
+// the Response, the success-side counterpart to ExecError.ExitCode.
+func TestSpecRun_ExitCodeZeroOnSuccess(t *testing.T) {
+	s := runtime.Spec{
+		Name:       "fake",
+		BinaryName: "sh",
+		Args:       func(runtime.Request) []string { return []string{"-c", "echo ok"} },
+		Decode:     func(b []byte) (runtime.Response, error) { return runtime.Response{Output: string(b)}, nil },
+	}
+	resp, err := s.Run(context.Background(), runtime.Request{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("Response.ExitCode = %d, want 0", resp.ExitCode)
+	}
 }
 
 // TestSpecRun_PropagatesDecodeError proves a Decode failure surfaces as a

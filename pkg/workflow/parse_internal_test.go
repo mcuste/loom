@@ -127,18 +127,22 @@ func TestPlaceholderRegexMatchesIdentifierAlphabet(t *testing.T) {
 		}
 		// combinedPlaceholderRe distinguishes branches via capture groups: group
 		// 1 is the param name, group 2 is the state key, group 3 is the prev id,
-		// group 4 is the task id.
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 5 || m[1] != s || m[2] != "" || m[3] != "" || m[4] != "" {
+		// group 4 is the bare task id, group 5 is the task id of an `{{id.exit}}`
+		// reference.
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{params." + s + "}}"); len(m) != 6 || m[1] != s || m[2] != "" || m[3] != "" || m[4] != "" || m[5] != "" {
 			t.Errorf("combinedPlaceholderRe param branch dropped %q from {{params.%s}}; got %v — regex drift", s, s, m)
 		}
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{state." + s + "}}"); len(m) != 5 || m[2] != s || m[1] != "" || m[3] != "" || m[4] != "" {
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{state." + s + "}}"); len(m) != 6 || m[2] != s || m[1] != "" || m[3] != "" || m[4] != "" || m[5] != "" {
 			t.Errorf("combinedPlaceholderRe state branch dropped %q from {{state.%s}}; got %v — regex drift", s, s, m)
 		}
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{prev." + s + "}}"); len(m) != 5 || m[3] != s || m[1] != "" || m[2] != "" || m[4] != "" {
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{prev." + s + "}}"); len(m) != 6 || m[3] != s || m[1] != "" || m[2] != "" || m[4] != "" || m[5] != "" {
 			t.Errorf("combinedPlaceholderRe prev branch dropped %q from {{prev.%s}}; got %v — regex drift", s, s, m)
 		}
-		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 5 || m[4] != s || m[1] != "" || m[2] != "" || m[3] != "" {
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + "}}"); len(m) != 6 || m[4] != s || m[1] != "" || m[2] != "" || m[3] != "" || m[5] != "" {
 			t.Errorf("combinedPlaceholderRe task branch dropped %q from {{%s}}; got %v — regex drift", s, s, m)
+		}
+		if m := combinedPlaceholderRe.FindStringSubmatch("{{" + s + ".exit}}"); len(m) != 6 || m[5] != s || m[1] != "" || m[2] != "" || m[3] != "" || m[4] != "" {
+			t.Errorf("combinedPlaceholderRe exit branch dropped %q from {{%s.exit}}; got %v — regex drift", s, s, m)
 		}
 	}
 	for _, s := range reject {

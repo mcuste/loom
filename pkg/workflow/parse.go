@@ -223,7 +223,7 @@ func Parse(data []byte) (*Workflow, error) {
 
 		// Exactly one body form. loop/for_each wrappers were split out above, so
 		// the only forms that can appear here are prompt, prompt_file, command,
-		// and workflow; `workflow:` conflicts with each of the others.
+		// workflow, and script; each conflicts with all the others.
 		var bodyForms []string
 		if rt.Prompt != "" {
 			bodyForms = append(bodyForms, "prompt")
@@ -237,6 +237,9 @@ func Parse(data []byte) (*Workflow, error) {
 		if rt.Workflow != "" {
 			bodyForms = append(bodyForms, "workflow")
 		}
+		if rt.Script != "" {
+			bodyForms = append(bodyForms, "script")
+		}
 		switch {
 		case len(bodyForms) > 1:
 			return nil, &TaskBodyConflictError{Task: tid, Fields: bodyForms}
@@ -246,6 +249,24 @@ func Parse(data []byte) (*Workflow, error) {
 		// `with:` is only meaningful alongside `workflow:`.
 		if rt.With.Kind != 0 && rt.Workflow == "" {
 			return nil, fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
+		}
+		// `args:` is only meaningful alongside `script:`.
+		if len(rt.Args) > 0 && rt.Script == "" {
+			return nil, fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
+		}
+		// `ok_exit` applies to tasks that run a process (prompt/command/script); a
+		// sub-workflow has no process exit code. Each entry must be a valid Unix
+		// exit code (0-255); a negative or out-of-range value can never match a real
+		// exit and is almost certainly a mistake.
+		if len(rt.OkExit) > 0 {
+			if rt.Workflow != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrOkExitOnSubWorkflow)
+			}
+			for _, code := range rt.OkExit {
+				if code < 0 || code > 255 {
+					return nil, fmt.Errorf("task %q: %w: %d", tid, ErrOkExitOutOfRange, code)
+				}
+			}
 		}
 
 		// body is the text that placeholder validation runs against;
@@ -283,6 +304,22 @@ func Parse(data []byte) (*Workflow, error) {
 				sb.WriteByte('\n')
 			}
 			body = sb.String()
+		case rt.Script != "":
+			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithRuntime)
+			}
+			if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+				return nil, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSystemPrompt)
+			}
+			// The script path and its argv carry placeholders, so scan all of them:
+			// each `{{id}}` / `{{id.exit}}` ref must resolve to a dependency.
+			var sb strings.Builder
+			sb.WriteString(rt.Script)
+			for _, a := range rt.Args {
+				sb.WriteByte('\n')
+				sb.WriteString(a)
+			}
+			body = sb.String()
 		case rt.PromptFile != "":
 			// A prompt_file must be inlined by InlinePromptFiles before Parse; one
 			// reaching here was not, so there is no body to build a task from.
@@ -294,6 +331,9 @@ func Parse(data []byte) (*Workflow, error) {
 		}
 		if schema != nil && rt.Command != "" {
 			return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
+		}
+		if schema != nil && rt.Script != "" {
+			return nil, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSchema)
 		}
 		dc := depsCtx{tid: tid, known: ids, params: paramSet, loopVar: asByLoop[lt.loop]}
 		var deps []TaskID
@@ -369,6 +409,9 @@ func Parse(data []byte) (*Workflow, error) {
 			Loop:         lt.loop,
 			Workflow:     rt.Workflow,
 			With:         withArgs,
+			Script:       rt.Script,
+			Args:         rt.Args,
+			OkExit:       rt.OkExit,
 		})
 	}
 
@@ -413,13 +456,14 @@ func Parse(data []byte) (*Workflow, error) {
 // the routing check explicitly once the registry is populated and any
 // sub-workflow children are linked into w.Subs.
 //
-// Shell and sub-workflow tasks bypass the registry entirely (runtime/model/
-// effort have no meaning for them; a sub-workflow's child brings its own), so
-// they are skipped here and reached only through the w.Subs recursion.
+// Shell, script, and sub-workflow tasks bypass the registry entirely
+// (runtime/model/effort have no meaning for them; a sub-workflow's child brings
+// its own), so they are skipped here and reached only through the w.Subs
+// recursion.
 func (w *Workflow) ValidateRouting() error {
 	for i := range w.Tasks {
 		t := &w.Tasks[i]
-		if t.IsShell() || t.IsSubWorkflow() {
+		if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
 			continue
 		}
 		rt, m, e := w.Effective(t)
@@ -625,7 +669,7 @@ func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
 		case "prompt_file":
 			pfKey, pfVal = k, v
 			bodyFields = append(bodyFields, k.Value)
-		case "prompt", "command", "loop", "for_each", "workflow":
+		case "prompt", "command", "loop", "for_each", "workflow", "script":
 			bodyFields = append(bodyFields, k.Value)
 		case "system_prompt_file":
 			spfKey, spfVal = k, v
@@ -834,6 +878,16 @@ type rawTask struct {
 	// A non-empty value makes this a sub-workflow leaf: the linked child is run
 	// recursively at dispatch. Mutually exclusive with every other body form.
 	Workflow string `yaml:"workflow"`
+	// Script is the path to an executable run directly at dispatch (honoring its
+	// shebang). A non-empty value makes this a script task. Mutually exclusive
+	// with every other body form.
+	Script string `yaml:"script"`
+	// Args is the optional argv passed after Script. Only meaningful on a script
+	// task; the parser rejects it elsewhere.
+	Args []string `yaml:"args"`
+	// OkExit lists non-zero exit codes a command, LLM, or script task treats as
+	// success. Rejected on sub-workflow and loop-wrapper tasks.
+	OkExit []int `yaml:"ok_exit"`
 	// PromptFile is only present when Parse is handed YAML whose `prompt_file:`
 	// was not inlined by InlinePromptFiles (e.g. a direct Parse call). It exists
 	// so the body-form conflict check can see a `prompt_file` sibling; the normal
@@ -901,9 +955,9 @@ var (
 	ErrMissingParamName = errors.New("param has no name")
 
 	// ErrMissingPromptOrCommand reports a task that sets none of the body forms
-	// (`prompt:`, `prompt_file:`, `command:`, `loop:`, `for_each:`,
+	// (`prompt:`, `prompt_file:`, `command:`, `script:`, `loop:`, `for_each:`,
 	// `for_each_parallel:`, or `workflow:`). Exactly one must be present.
-	ErrMissingPromptOrCommand = errors.New("task has no prompt, prompt_file, command, loop, for_each, for_each_parallel, or workflow")
+	ErrMissingPromptOrCommand = errors.New("task has no prompt, prompt_file, command, script, loop, for_each, for_each_parallel, or workflow")
 	// ErrPromptAndCommandSet reports a task that sets both `prompt:` and
 	// `command:`. The two are mutually exclusive.
 	ErrPromptAndCommandSet = errors.New("task sets both prompt and command")
@@ -937,9 +991,9 @@ var (
 	ErrLoopTaskWithRuntime = errors.New("loop task must not set runtime, model, or effort")
 	// ErrLoopTaskWithFields reports a loop-wrapper task that sets a task-only
 	// field (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`,
-	// `cache`, or `system_prompt`). The wrapper stands only for its loop; entry
-	// dependencies and per-task behavior belong to the body tasks.
-	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, schema, retry, budget, cache, or system_prompt")
+	// `cache`, `ok_exit`, or `system_prompt`). The wrapper stands only for its
+	// loop; entry dependencies and per-task behavior belong to the body tasks.
+	ErrLoopTaskWithFields = errors.New("loop task must not set depends_on, when, writes_state, schema, retry, budget, cache, ok_exit, or system_prompt")
 	// ErrLoopAndForEachSet reports a task declaring both a `loop:` and a
 	// `for_each:` block. The two are sibling scoped-block forms; a task is at
 	// most one of them.
@@ -949,6 +1003,28 @@ var (
 	// child brings its own runtime; these knobs are meaningless on the wrapper,
 	// exactly as for a shell task.
 	ErrSubWorkflowWithRuntime = errors.New("sub-workflow task must not set runtime, model, or effort")
+	// ErrScriptTaskWithRuntime reports a script task (one with `script:`) that
+	// also sets task-level `runtime:`, `model:`, or `effort:`. A script runs a
+	// file directly and is not sent to a model, exactly like a shell task.
+	ErrScriptTaskWithRuntime = errors.New("script task must not set runtime, model, or effort")
+	// ErrScriptTaskWithSystemPrompt reports a script task (one with `script:`) that
+	// sets a task-level `system_prompt:` or `system_prompt_file:`. A script is not
+	// sent to a model, so a system prompt is meaningless for it.
+	ErrScriptTaskWithSystemPrompt = errors.New("script task must not set system_prompt or system_prompt_file")
+	// ErrScriptTaskWithSchema reports a script task (one with `script:`) that sets
+	// a `schema:` block. Schema validation parses the output as JSON against the
+	// model's structured response; a script's output is raw stdout, not validated.
+	ErrScriptTaskWithSchema = errors.New("script task must not set schema")
+	// ErrArgsWithoutScript reports a task that sets `args:` without a `script:`
+	// body. argv is only meaningful for a script task.
+	ErrArgsWithoutScript = errors.New("args is only valid on a script task")
+	// ErrOkExitOnSubWorkflow reports a sub-workflow task (one with `workflow:`) that
+	// sets `ok_exit`. A sub-workflow runs a child DAG, not a process, so it has no
+	// exit code to tolerate.
+	ErrOkExitOnSubWorkflow = errors.New("ok_exit is not valid on a sub-workflow task")
+	// ErrOkExitOutOfRange reports an `ok_exit` entry outside the 0-255 Unix exit
+	// code range. A negative or >255 value can never match a real process exit.
+	ErrOkExitOutOfRange = errors.New("ok_exit code out of range (must be 0-255)")
 )
 
 // rejectLoopWrapperFields enforces that a `loop:` task carries nothing but its
@@ -957,13 +1033,15 @@ var (
 // load time rather than silently ignored.
 func rejectLoopWrapperFields(tid TaskID, rt rawTask, wrapper string) error {
 	switch {
-	case rt.Prompt != "" || rt.Command != "" || rt.Workflow != "":
+	case rt.Prompt != "" || rt.Command != "" || rt.Workflow != "" || rt.Script != "":
 		body := "prompt"
 		switch {
 		case rt.Command != "":
 			body = "command"
 		case rt.Workflow != "":
 			body = "workflow"
+		case rt.Script != "":
+			body = "script"
 		}
 		return &TaskBodyConflictError{Task: tid, Fields: []string{wrapper, body}}
 	case rt.Runtime != "" || rt.Model != "" || rt.Effort != "":
@@ -971,7 +1049,7 @@ func rejectLoopWrapperFields(tid TaskID, rt rawTask, wrapper string) error {
 	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" ||
 		rt.Schema.Kind != 0 || rt.Retry.Kind != 0 ||
 		rt.Budget.Kind != 0 || rt.Cache != nil ||
-		rt.SystemPrompt != "" || rt.SystemPromptFile != "":
+		rt.SystemPrompt != "" || rt.SystemPromptFile != "" || len(rt.OkExit) > 0:
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithFields)
 	}
 	return nil
@@ -1483,7 +1561,7 @@ func scanPlaceholders(text string) (taskRefs, paramRefs, stateRefs []string) {
 	for _, m := range combinedPlaceholderRe.FindAllStringSubmatch(text, -1) {
 		// Exactly one capture group is non-empty per match: group 1 is the param
 		// name, group 2 is the state key, group 3 is the prev id, group 4 is the
-		// bare task id.
+		// bare task id, group 5 is the task id of an `{{id.exit}}` reference.
 		switch {
 		case m[1] != "":
 			paramRefs = append(paramRefs, m[1])
@@ -1491,6 +1569,10 @@ func scanPlaceholders(text string) (taskRefs, paramRefs, stateRefs []string) {
 			stateRefs = append(stateRefs, m[2])
 		case m[3] != "":
 			// prev ref: neither a task edge nor a param reference.
+		case m[5] != "":
+			// An `{{id.exit}}` reference reads a task's exit code, so it creates the
+			// same DAG edge as a bare `{{id}}` reference: the producer must run first.
+			taskRefs = append(taskRefs, m[5])
 		default:
 			taskRefs = append(taskRefs, m[4])
 		}

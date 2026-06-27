@@ -215,6 +215,7 @@ func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runEr
 	tr.Prompt = res.Prompt
 	tr.Command = res.Command
 	tr.Output = res.Output
+	tr.ExitCode = res.ExitCode
 	tr.Usage = usageDTO(res.Usage)
 	tr.ElapsedMs = res.Elapsed.Milliseconds()
 	tr.FinishedAt = r.now()
@@ -440,6 +441,9 @@ type TaskRecord struct {
 	Prompt     string    `json:"prompt,omitempty"`
 	Command    string    `json:"command,omitempty"`
 	Output     string    `json:"output,omitempty"`
+	// ExitCode is a script task's process exit code. Omitted (and zero) for every
+	// other task form and for a script task that exited cleanly.
+	ExitCode int `json:"exit_code,omitempty"`
 }
 
 // usageJSON is unexported; external callers read accounting via the embedded

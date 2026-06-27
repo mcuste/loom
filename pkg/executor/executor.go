@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -52,6 +53,12 @@ type TaskResult struct {
 	// that is a member of a scoped loop, and 0 for a non-looped task. It lets
 	// callers attribute a result to the pass that generated it.
 	Iteration int
+	// ExitCode is the process exit code of a script task (Command holds the
+	// resolved path in that case). It is 0 for every other task form, and for a
+	// script task that exited cleanly. Unlike a shell task, a script task's
+	// non-zero exit is data rather than a failure: it is recorded here and
+	// readable downstream via `{{id.exit}}`, and the task still succeeds.
+	ExitCode int
 }
 
 // Cache memoizes LLM task outputs across runs. The executor consults it before
@@ -146,6 +153,11 @@ type Options struct {
 	// {{id}} substitution. Seeded tasks fire no hooks and do not appear in
 	// Report.Tasks. Entries naming an id not in the workflow are ignored.
 	Seed map[workflow.TaskID]string
+	// SeedExitCodes supplies the process exit code for seeded script tasks so a
+	// resumed run's downstream `{{id.exit}}` references resolve to the recorded
+	// code rather than 0. Keyed like Seed; a missing entry defaults to 0. May be
+	// nil.
+	SeedExitCodes map[workflow.TaskID]int
 	// RetryBaseDelay is the base backoff delay between retry attempts. When
 	// zero, defaultRetryBaseDelay (1s) applies. Carried per-call rather than as
 	// package state so concurrent Run calls (and parallel tests) never share a
@@ -186,6 +198,10 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	// Both are read under mu like rep.Outputs.
 	succeeded := make(map[workflow.TaskID]bool, len(order))
 	skipped := make(map[workflow.TaskID]bool, len(order))
+	// exitCodes records, per completed task, its process exit code (0 for every
+	// non-script task), consulted for `{{id.exit}}` substitution and `.exit`
+	// conditions. Read under mu like the other state maps.
+	exitCodes := make(map[workflow.TaskID]int, len(order))
 
 	// Close seeded gates and stamp their outputs before spawning any
 	// goroutine. Downstream waiters see the seed via {{id}} substitution
@@ -194,6 +210,9 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		if v, ok := opts.Seed[tid]; ok {
 			rep.Outputs[tid] = v
 			succeeded[tid] = true
+			if code, ok := opts.SeedExitCodes[tid]; ok {
+				exitCodes[tid] = code
+			}
 			close(gates[tid])
 		}
 	}
@@ -214,6 +233,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		outputs:        rep.Outputs,
 		succeeded:      succeeded,
 		skipped:        skipped,
+		exitCodes:      exitCodes,
 		gates:          gates,
 		mu:             &mu,
 		budgetInFlight: new(bool),
@@ -274,10 +294,15 @@ func runCached(cache Cache, t *workflow.Task, rt runtime.Name, model runtime.Mod
 	if err != nil {
 		return res, err
 	}
-	// Cache persistence is best-effort: a successful LLM call must not be turned
-	// into a task failure by a transient write error (disk full, permissions).
-	// The next run simply re-computes on the resulting miss.
-	_ = cache.Save(rt, model, effort, sysPrompt, prompt, res.Output)
+	// Only memoize a clean (exit 0) run. A tolerated non-zero exit returns nil
+	// error but its output is from a failed invocation (often empty); caching it
+	// would replay that failure as a "hit" on the next run.
+	if res.ExitCode == 0 {
+		// Cache persistence is best-effort: a successful LLM call must not be turned
+		// into a task failure by a transient write error (disk full, permissions).
+		// The next run simply re-computes on the resulting miss.
+		_ = cache.Save(rt, model, effort, sysPrompt, prompt, res.Output)
+	}
 	return res, nil
 }
 
@@ -296,19 +321,43 @@ func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime
 	start := time.Now()
 	resp, runErr := runner.Run(ctx, req)
 	res := TaskResult{
-		TaskID:  t.ID,
-		Prompt:  prompt,
-		Output:  resp.Output,
-		Usage:   resp.Usage,
-		Elapsed: time.Since(start),
+		TaskID:   t.ID,
+		Prompt:   prompt,
+		Output:   resp.Output,
+		Usage:    resp.Usage,
+		Elapsed:  time.Since(start),
+		ExitCode: resp.ExitCode,
 	}
-	return res, runErr
+	if runErr != nil {
+		// Record the binary's exit code on the result even on failure (so the store
+		// and TUI can show why claude-code exited non-zero), and, when the task's
+		// ok_exit tolerates that code, convert the failure into a success whose code
+		// branches downstream via `{{id.exit}}`. A launch failure or signal kill
+		// (ExitCode -1, never tolerated) and any non-ExecError always fail.
+		var ee *runtime.ExecError
+		if errors.As(runErr, &ee) {
+			res.ExitCode = ee.ExitCode
+			// Only a real non-zero exit code can be tolerated. A code of 0 on an
+			// error means "no exit status captured" (a non-exit failure, or a
+			// hand-built ExecError), and -1 is a signal kill; neither is a branchable
+			// outcome, so both fall through to a genuine failure (and retry).
+			if ee.ExitCode > 0 && t.ExitTolerated(ee.ExitCode) {
+				return res, nil
+			}
+		}
+		return res, runErr
+	}
+	return res, nil
 }
 
 // runShell executes one shell task as `sh -c <line>`. The provided ctx cancels
 // the child process on Run-level cancellation or sibling failure. Stdout is
-// captured and trimmed of trailing newlines; stderr is captured verbatim and
-// surfaced on non-zero exit via [ShellError].
+// captured and trimmed of trailing newlines; stderr is captured verbatim.
+//
+// A non-zero exit fails the task via [ShellError] unless the task's ok_exit
+// tolerates that code, in which case the task succeeds with its stdout output
+// and the code captured for `{{id.exit}}`. The exit code is recorded on the
+// result either way, so a failure still surfaces it to the store and TUI.
 func runShell(ctx context.Context, t *workflow.Task, line string) (TaskResult, error) {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", "-c", line)
@@ -324,8 +373,62 @@ func runShell(ctx context.Context, t *workflow.Task, line string) (TaskResult, e
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return res, &ShellError{ExitCode: exitErr.ExitCode(), Stderr: stderr.String()}
+			code := exitErr.ExitCode()
+			res.ExitCode = code
+			if t.ExitTolerated(code) {
+				return res, nil
+			}
+			return res, &ShellError{ExitCode: code, Stderr: stderr.String()}
 		}
+		return res, err
+	}
+	return res, nil
+}
+
+// runScript executes one script task by running path directly (honoring the
+// file's shebang) with args as its argv. The provided ctx cancels the child on
+// Run-level cancellation or sibling failure. Stdout is captured and trimmed of
+// trailing newlines into Output.
+//
+// By default (no ok_exit) a script tolerates every exit code: the code is
+// captured into TaskResult.ExitCode and returned with a nil error so the task
+// succeeds and downstream tasks can branch on `{{id.exit}}`. An ok_exit list
+// narrows that to the listed codes (plus 0); an untolerated code fails the task
+// via [ShellError] with the code recorded. A launch failure (the file is
+// missing, not executable, or not found on PATH) and a run cancellation are
+// returned as errors, since neither yields a real script exit code. stderr is
+// written through to the parent so a script's diagnostics remain visible.
+func runScript(ctx context.Context, t *workflow.Task, path string, args []string) (TaskResult, error) {
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	res := TaskResult{
+		TaskID:  t.ID,
+		Command: path,
+		Output:  strings.TrimRight(string(out), "\n"),
+		Elapsed: time.Since(start),
+	}
+	if err != nil {
+		// A cancelled run (sibling failure or caller cancel) kills the child, which
+		// surfaces as an ExitError with code -1. That is not a real script outcome:
+		// fail the task so it is not recorded as a success with a bogus exit code
+		// (and so a resume re-runs it) rather than treating -1 as branchable data.
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code := exitErr.ExitCode()
+			res.ExitCode = code
+			if t.ExitTolerated(code) {
+				return res, nil
+			}
+			// An ok_exit list that excludes this code makes it a real failure.
+			return res, &ShellError{ExitCode: code}
+		}
+		// A launch failure (missing file, not executable) genuinely fails the task;
+		// there is no exit code to record.
 		return res, err
 	}
 	return res, nil

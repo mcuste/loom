@@ -59,6 +59,9 @@ tasks:
     command: |               # runs sh -c instead of dispatching to a runtime
       echo "{{a}}" | wc -l
     # — OR —
+    script: ./scripts/x.sh   # runs the file directly (shebang honored); exit code is data
+    args: ["{{a}}", "prod"]  # optional argv, each substituted like the path
+    # — OR —
     workflow: release        # run another workflow (registry name or ./path) as a leaf
     with:                    # values bound to the child's params; substituted with parent ctx
       version: "{{a}}"
@@ -83,7 +86,7 @@ Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(
 
 A task with `command:` runs `sh -c <substituted-command>` instead of dispatching to a runtime.
 
-**Discriminator rule** — exactly one of `prompt`, `prompt_file`, `command`, or `workflow` must be set per task (loop/for_each wrappers replace all of them). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
+**Discriminator rule** — exactly one of `prompt`, `prompt_file`, `command`, `script`, or `workflow` must be set per task (loop/for_each wrappers replace all of them). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
 
 **Rejected fields on command tasks** — `runtime`, `model`, `effort`, and `system_prompt` (or `system_prompt_file`) at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected. Sub-workflow (`workflow:`) tasks reject the same fields.
 
@@ -93,9 +96,61 @@ A task with `command:` runs `sh -c <substituted-command>` instead of dispatching
 
 **Stderr streams live** — stderr is not captured; it surfaces on failure via the task's error message.
 
-**Non-zero exit fails the task** — a non-zero exit code is treated as a task failure and propagates through the DAG exactly like a runtime error.
+**Non-zero exit fails the task** — by default a non-zero exit code is a task failure and propagates through the DAG exactly like a runtime error, *unless* `ok_exit` tolerates it (see [Exit codes and ok_exit](#exit-codes-and-ok_exit)). (A `script:` task is the opposite: see below.)
 
 **Security caveat** — LLM output substituted via `{{task_id}}` into a `command:` body is untrusted input. If upstream tasks are prompted with user-supplied data, shell-injection is possible. Sanitise or quote values before splicing them into commands.
+
+## Script tasks
+
+A task with `script:` runs an executable file **directly** (its shebang is honored, e.g. `#!/usr/bin/env python3`) rather than through `sh -c`. Optional `args:` is the argv passed after the path. Both the path and each arg carry `{{id}}` / `{{params.x}}` / `{{state.k}}` / `{{id.exit}}` placeholders, substituted before execution.
+
+**Rejected fields** — like a command task, a script task rejects task-level `runtime`, `model`, `effort`, `system_prompt`/`system_prompt_file`, and `schema`. `args:` is only valid on a script task.
+
+**Exit code is data, not failure** — unlike a command task, a non-zero exit does **not** fail a script task. The process exit code is captured and the task succeeds, so the DAG keeps going. Only a launch failure (file missing, not executable) is a real error. This lets a script act as a branch signal:
+
+- `{{id.exit}}` substitutes the decimal exit code into any downstream `prompt:`, `command:`, or `args:` body (a bare `{{id}}` still gives stdout). It creates a dependency edge just like `{{id}}`, so the producer must be in `depends_on`.
+- In a `when:` guard, `{{id.exit}}` compares numerically against a bare integer: `when: "{{check.exit}} != 0"`, `== 0`, `< 2`, `> 0`. (Note: no quotes around the integer, unlike the string `==`/`!=` on stdout.)
+
+Without `ok_exit`, a command or LLM task always reports exit code `0` (any non-zero is a failure), so `{{id.exit}}` is only meaningful on a script dependency or on a task that opts in with `ok_exit`.
+
+```yaml
+tasks:
+  - id: check
+    script: ./scripts/healthcheck.sh
+    args: ["{{params.env}}"]
+  - id: alert
+    depends_on: [check]
+    when: "{{check.exit}} != 0"
+    command: echo "health check failed with code {{check.exit}}: {{check}}"
+```
+
+**Path resolution** — relative `script:` paths resolve against the loom process's working directory at run time (like `command:`), not the YAML's directory (unlike `prompt_file:`).
+
+**ok_exit on a script** — a script tolerates *every* exit code by default; adding `ok_exit` narrows that to the listed codes (plus 0), so an unlisted code becomes a real failure.
+
+## Exit codes and ok_exit
+
+`ok_exit` is a list of non-zero exit codes a **command, LLM, or script** task should treat as **success** instead of failure. It is how a non-script task opts into the script-style "exit is data" model so you can branch on a tool's (or `claude-code`'s) exit status:
+
+```yaml
+tasks:
+  - id: gen
+    runtime: claude-code
+    prompt: attempt the task
+    ok_exit: [0, 1]            # exit 1 is a tolerated soft-fail, not a workflow abort
+  - id: fallback
+    depends_on: [gen]
+    when: "{{gen.exit}} != 0"  # branch on the exit code
+    prompt: gen failed; try a different approach
+```
+
+Rules:
+
+- Exit `0` is always success. `ok_exit` lists **additional** non-zero codes that count as success; every other non-zero code (and a signal kill, reported as `-1`) still fails the task.
+- A tolerated exit captures the code into the result: `{{id.exit}}` (placeholder, in any downstream body) and `{{id.exit}} <op> n` (a `when:` guard, bare integer) both read it. The task's stdout is still its `{{id}}` output for a command/script; an LLM task that exits non-zero produced no response, so its `{{id}}` output is empty (only the exit code is meaningful).
+- Each code must be in the `0`-`255` range. `ok_exit` is rejected on sub-workflow and loop-wrapper tasks (no process exit).
+- Even without `ok_exit`, a **failing** command/LLM/script task now records its numeric exit code on the run record, shown by `loom runs show` and the live finish line — so a `claude-code` exit `1` is visible as `exit=1` rather than only an opaque error string.
+- A tolerated non-zero LLM exit is never memoized (its empty output must not be replayed as a cache hit).
 
 ## Params
 

@@ -121,6 +121,12 @@ func (u *Usage) Add(other Usage) {
 type Response struct {
 	Output string
 	Usage  Usage
+	// ExitCode is the runtime binary's process exit code: 0 on a clean run, the
+	// child's code on a non-zero exit, and -1 when the process was killed by a
+	// signal or never started. The executor records it on the task result and, for
+	// a task whose ok_exit tolerates the code, treats the run as a success whose
+	// code is readable downstream via `{{id.exit}}`.
+	ExitCode int
 }
 
 // Subprocess is implemented by runtimes that shell out to a local binary
