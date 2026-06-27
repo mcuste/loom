@@ -3,7 +3,12 @@ BIN := loom
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install build clean test test-race fmt vet tidy lint lint-test check run check-all
+SKILL_SRC := .claude/skills/loom
+SKILL_DST := /Users/mcuste/scripts/stow/.claude/skills/loom
+WF_SRC := .loom/workflows
+WF_DST := $(HOME)/.loom/workflows
+
+.PHONY: help install build clean test test-race fmt vet tidy lint lint-test check run check-all sync-skill sync-workflows
 
 help: ## list available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,3 +53,14 @@ check-all: ## check every workflow YAML under workflows/
 		echo "=== $$f ==="; \
 		go run $(PKG) check "$$f"; \
 	done
+
+sync-skill: ## sync the loom skill to the global stow .claude skills dir
+	rm -rf $(SKILL_DST)
+	mkdir -p $(SKILL_DST)
+	cp -R $(SKILL_SRC)/ $(SKILL_DST)/
+	@echo "synced $(SKILL_SRC) -> $(SKILL_DST)"
+
+sync-workflows: ## sync this project's .loom/workflows into ~/.loom/workflows
+	mkdir -p $(WF_DST)
+	cp -R $(WF_SRC)/ $(WF_DST)/
+	@echo "synced $(WF_SRC) -> $(WF_DST)"
