@@ -4,366 +4,143 @@ description: Author and run loom workflows — YAML DAGs of LLM tasks executed b
 allowed-tools: Bash(loom *), Read, Write, Edit, Glob, Grep
 ---
 
-Author and execute loom workflows. Loom parses a YAML workflow, builds a DAG over `{{id}}` placeholders + `depends_on`, and dispatches each task to a registered runtime (`claude-code`, which shells out to the `claude` CLI, or `codex`, which shells out to the `codex` CLI).
+Loom parses a YAML workflow into a DAG (edges from `depends_on` + `{{id}}` placeholders) and dispatches each task to a runtime (`claude-code` shells out to `claude`; `codex` shells out to `codex`). Independent tasks run concurrently.
 
 ## CLI
 
 ```bash
-loom run check <workflow>                      # parse + validate + print execution order, no execution
-loom run       <workflow>                      # check + execute every task (independent tasks run concurrently)
-loom run       <workflow> --resume-latest      # resume the last run of this workflow: skip ok tasks, re-run the rest
-loom resume    <run-id>                        # resume a specific run; "latest" follows latest.json
-loom runs                                      # browse past runs (TUI); `ls` lists, `show <id>` prints one inline
-loom workflows ls                              # list registry workflows runnable by name
+loom run check <wf> [-p k=v]   # parse + validate + print plan; no execution. ALWAYS run first.
+loom run       <wf> [-p k=v]   # check + execute
+loom run       <wf> --resume-latest   # skip ok tasks from last run, re-run the rest
+loom resume    <run-id|latest>        # resume a specific run
+loom runs                      # browse past runs (TUI); `ls`, `show <id>`
+loom workflows ls              # list registry workflows runnable by name
 ```
 
-`<workflow>` is a YAML path **or a registry name**. A name has no path separator and either contains `:` (hierarchy separator, e.g. `deploy:prod`) or lacks a `.yaml`/`.yml` extension. Names are resolved by searching registry roots in order: project-local `.loom/workflows/` dirs walking up from cwd to the git repo root (stop at `.git`), then global `$LOOM_HOME/workflows/` — nearest root wins (shadows global). `loom workflows ls` lists the merged registry. A nested path maps to a `:`-joined name (`ci/test.yaml` → `ci:test`), except the eponymous-dir form `<name>/<name>.yaml` collapses to just `<name>` — put a workflow in its own dir so its `prompt_file:` text sits beside it (a flat `<name>.yaml` wins if both exist). Name resolution is exact-only; the workflow argument tab-completes against the registry (`loom completion <shell>`), so a typed prefix like `tui<TAB>` expands to `tui_demo` at the shell. See `docs/cli.md` for the full classification rule and search-order details.
-
-Always run `loom run check <file>` first when authoring — it surfaces every validation error (cycles, unknown deps, unknown placeholders, bad model/effort) without burning tokens on `claude`.
-
-`loom run` prints the plan, per-task progress (id, runtime/model/effort, tokens, cost), the run-file path, and a final summary. Independent tasks (no edge between them in the DAG) are dispatched concurrently — fan-out is free, you don't need to wait for siblings.
+`<wf>` is a YAML path **or registry name** (no path sep; has `:` or no `.yaml`). Names resolve through `.loom/workflows/` dirs walking cwd→repo root, then global `$LOOM_HOME/workflows/`; nearest wins. `ci/test.yaml`→`ci:test`; eponymous dir `<name>/<name>.yaml`→`<name>`.
 
 ## YAML schema
 
-Top level:
+Unknown keys are **rejected** (`KnownFields(true)`). No `inputs:`/`uses:`.
 
 ```yaml
-name: my_workflow            # required, [A-Za-z0-9_]+
-description: ...             # optional, plan-output only
-runtime: claude-code         # default for tasks; one of: claude-code | codex
-model: sonnet                # default; one of: haiku | sonnet | opus
-effort: medium               # default; one of: low | medium | high | max  (claude-code)
-system_prompt: ...           # optional default system prompt; per-task overridable
-output: <task_id>            # optional; which task is this workflow's result when linked as sub-workflow
-params:                       # optional; see ## Params
-  - name: ...                # required, [A-Za-z0-9_]+, unique
-    description: ...         # optional
-    default: ...             # optional; string-only, no {{}} expansion
-    required: false          # optional; true if no default
+name: my_workflow          # required, [A-Za-z0-9_]+
+description: ...           # optional, plan-output only
+runtime: claude-code       # default for tasks: claude-code | codex
+model: sonnet              # default: haiku | sonnet | opus
+effort: medium             # default: low | medium | high | max (claude-code)
+system_prompt: ...         # optional default; per-task overridable
+output: <task_id>          # which task is the result when this wf is linked as a sub-workflow
+params:                    # optional; see Params
+  - {name: env, description: ..., default: "1", required: false}
 
 tasks:
-  - id: <task_id>            # required, [A-Za-z0-9_]+, unique
-    description: ...         # optional
-    runtime: ...             # optional task-level override
-    model: ...               # optional task-level override
-    effort: ...              # optional task-level override
-    system_prompt: ...       # optional task-level override of the workflow default
-    # — OR —
-    system_prompt_file: prompts/sys_a.txt  # file-backed override; inlined before validation
-    depends_on: [a, b]       # optional; explicit DAG edges
-    prompt: |                # exactly one of prompt / prompt_file / command; non-empty
-      Text with {{a}} and {{b}} placeholders.
-    # — OR —
-    prompt_file: prompts/step_a.txt   # relative path; inlined before validation
-    # — OR —
-    command: |               # runs sh -c instead of dispatching to a runtime
-      echo "{{a}}" | wc -l
-    # — OR —
-    script: ./scripts/x.sh   # runs the file directly (shebang honored); exit code is data
-    args: ["{{a}}", "prod"]  # optional argv, each substituted like the path
-    # — OR —
-    workflow: release        # run another workflow (registry name or ./path) as a leaf
-    with:                    # values bound to the child's params; substituted with parent ctx
-      version: "{{a}}"
+  - id: <task_id>          # required, [A-Za-z0-9_]+, unique
+    description: ...        # optional
+    runtime/model/effort: ...        # optional task-level overrides (LLM tasks only)
+    system_prompt: ... | system_prompt_file: prompts/s.txt   # task override (mutually exclusive)
+    depends_on: [a, b]     # explicit DAG edges
+    when: '{{a}} == "x"'   # optional guard; skip task if false
+    # exactly ONE body kind (discriminator):
+    prompt: "use {{a}} and {{params.env}}"   # — or — prompt_file: prompts/a.txt
+    command: 'echo {{a}} | wc -l'            # sh -c; stdout = output; non-zero fails (unless ok_exit)
+    script: ./x.sh                           # runs file directly (shebang honored); exit is data
+    args: ["{{a}}", "prod"]                  #   optional argv, script-only, substituted
+    workflow: release                        # link another wf as one atomic leaf
+    with: {version: "{{a}}"}                 #   bind parent ctx → child params (creates dep edge)
+    loop: {...} | for_each: {...} | for_each_parallel: {...}   # scoped subgraphs (below)
+    ok_exit: [1]           # extra non-zero exit codes to treat as success
 ```
 
-`prompt_file` is a path to a plain-text file resolved relative to the workflow YAML's directory. The file is read and inlined before validation, so the run record stores the verbatim prompt text (not the path). Use it to keep long or shared prompts out of the YAML.
+- `prompt_file` resolves relative to the **YAML dir**, inlined before validation. `script` path resolves relative to **loom's cwd**.
+- `system_prompt` carries `{{params.x}}`/`{{state.k}}` only (no task refs). Rejected on `command`/`script`/`workflow` tasks and on `codex` runtime (Codex has no headless flag — use `AGENTS.md`).
 
-`system_prompt` is the system prompt sent to the runtime. The workflow-level value is the default for every LLM task; a task-level `system_prompt` (or `system_prompt_file`, the file-backed spelling, inlined like `prompt_file`) overrides it for that one task, falling back to the workflow default when unset. The inline and file spellings are mutually exclusive on the same scope. It carries `{{params.x}}` / `{{state.k}}` placeholders (never task-id placeholders) and is meaningless on command and sub-workflow tasks, which reject it.
+## Placeholders & dependencies
 
-A task may instead link another workflow with `workflow:` (a registry name or a path relative to the linking YAML); `with:` binds values to the child's params (substituted against the parent context first, which also creates the dep edge). The child runs as one atomic leaf: its result (the child's top-level `output:` task, or its lone terminal task) becomes this task's output. A top-level `output:` names which task is this workflow's result when it is itself linked. See `docs/workflow-spec.md` → Sub-workflows.
+- `{{id}}` injects that upstream task's **entire** string output. Every `{{id}}` **must also appear in `depends_on`** — placeholders never implicitly add edges.
+- Exempt from the depends_on rule (do NOT list them): `{{params.x}}`, `{{state.x}}`, `{{prev.<member>}}`, loop var `{{as}}`.
+- `{{id.exit}}` = upstream decimal exit code; also creates a dep edge. In `when:`, compares to a bare int (`{{c.exit}} != 0`); string ops quote (`{{a}} == "done"`).
+- `depends_on` without a placeholder = pure ordering. Cycles, unknown deps/placeholders, dup deps fail `loom run check`.
 
-Unknown top-level or task-level keys are **rejected** (parser uses `KnownFields(true)`). No `inputs:` or `uses:` key.
+## Body kinds
 
-## Placeholders and dependencies
-
-- `{{task_id}}` in a prompt is substituted with that upstream task's full string output at runtime.
-- Every `{{id}}` placeholder **must also appear in `depends_on`**. Placeholders never implicitly extend the DAG. Repeating a placeholder is fine; it's templating, not declaration. The one exception is the `{{prev.<id>}}` loop placeholder, which is explicitly exempt (see [Scoped loops](#scoped-loops)).
-- `depends_on` may list a task with no placeholder (pure ordering constraint).
-- Cycles, unknown deps, duplicate deps, and unknown placeholders fail `loom run check`.
-
-## Command tasks
-
-A task with `command:` runs `sh -c <substituted-command>` instead of dispatching to a runtime.
-
-**Discriminator rule** — exactly one of `prompt`, `prompt_file`, `command`, `script`, or `workflow` must be set per task (loop/for_each wrappers replace all of them). Setting more than one, or none, is rejected by the parser (`loom run check` surfaces the error before execution).
-
-**Rejected fields on command tasks** — `runtime`, `model`, `effort`, and `system_prompt` (or `system_prompt_file`) at the task level are hard validation errors. Workflow-level defaults are tolerated (a shell task silently ignores them), but task-level overrides are rejected. Sub-workflow (`workflow:`) tasks reject the same fields.
-
-**Placeholders** — `{{task_id}}` and `{{params.x}}` substitute into `command:` bodies identically to `prompt:` bodies; the same `depends_on` rule applies (every `{{id}}` placeholder must also appear in `depends_on`).
-
-**Stdout is the output** — captured stdout becomes the task's full string output, consumable downstream via `{{task_id}}` exactly like LLM output.
-
-**Stderr streams live** — stderr is not captured; it surfaces on failure via the task's error message.
-
-**Non-zero exit fails the task** — by default a non-zero exit code is a task failure and propagates through the DAG exactly like a runtime error, *unless* `ok_exit` tolerates it (see [Exit codes and ok_exit](#exit-codes-and-ok_exit)). (A `script:` task is the opposite: see below.)
-
-**Security caveat** — LLM output substituted via `{{task_id}}` into a `command:` body is untrusted input. If upstream tasks are prompted with user-supplied data, shell-injection is possible. Sanitise or quote values before splicing them into commands.
-
-## Script tasks
-
-A task with `script:` runs an executable file **directly** (its shebang is honored, e.g. `#!/usr/bin/env python3`) rather than through `sh -c`. Optional `args:` is the argv passed after the path. Both the path and each arg carry `{{id}}` / `{{params.x}}` / `{{state.k}}` / `{{id.exit}}` placeholders, substituted before execution.
-
-**Rejected fields** — like a command task, a script task rejects task-level `runtime`, `model`, `effort`, `system_prompt`/`system_prompt_file`, and `schema`. `args:` is only valid on a script task.
-
-**Exit code is data, not failure** — unlike a command task, a non-zero exit does **not** fail a script task. The process exit code is captured and the task succeeds, so the DAG keeps going. Only a launch failure (file missing, not executable) is a real error. This lets a script act as a branch signal:
-
-- `{{id.exit}}` substitutes the decimal exit code into any downstream `prompt:`, `command:`, or `args:` body (a bare `{{id}}` still gives stdout). It creates a dependency edge just like `{{id}}`, so the producer must be in `depends_on`.
-- In a `when:` guard, `{{id.exit}}` compares numerically against a bare integer: `when: "{{check.exit}} != 0"`, `== 0`, `< 2`, `> 0`. (Note: no quotes around the integer, unlike the string `==`/`!=` on stdout.)
-
-Without `ok_exit`, a command or LLM task always reports exit code `0` (any non-zero is a failure), so `{{id.exit}}` is only meaningful on a script dependency or on a task that opts in with `ok_exit`.
+- **prompt / prompt_file** — dispatched to the runtime.
+- **command** — `sh -c`; stdout is the output; non-zero exit **fails** the task unless tolerated by `ok_exit`. Untrusted `{{id}}` splices are a shell-injection risk — quote/sanitize.
+- **script** — runs the file directly; **non-zero exit does NOT fail** (exit is data). Only launch failure (missing/not executable) errors. `ok_exit` *narrows* tolerance to listed codes. Rejects `runtime`/`model`/`effort`/`system_prompt`/`schema`.
+- **workflow** — runs another workflow as one leaf; child's `output:` (or lone terminal) task is this task's result.
 
 ```yaml
-tasks:
-  - id: check
-    script: ./scripts/healthcheck.sh
-    args: ["{{params.env}}"]
-  - id: alert
-    depends_on: [check]
-    when: "{{check.exit}} != 0"
-    command: echo "health check failed with code {{check.exit}}: {{check}}"
+- id: check
+  script: ./scripts/healthcheck.sh
+  args: ["{{params.env}}"]
+- id: alert
+  depends_on: [check]
+  when: "{{check.exit}} != 0"
+  command: echo "failed {{check.exit}}: {{check}}"
 ```
 
-**Path resolution** — relative `script:` paths resolve against the loom process's working directory at run time (like `command:`), not the YAML's directory (unlike `prompt_file:`).
-
-**ok_exit on a script** — a script tolerates *every* exit code by default; adding `ok_exit` narrows that to the listed codes (plus 0), so an unlisted code becomes a real failure.
-
-## Exit codes and ok_exit
-
-`ok_exit` is a list of non-zero exit codes a **command, LLM, or script** task should treat as **success** instead of failure. It is how a non-script task opts into the script-style "exit is data" model so you can branch on a tool's (or `claude-code`'s) exit status:
-
-```yaml
-tasks:
-  - id: gen
-    runtime: claude-code
-    prompt: attempt the task
-    ok_exit: [0, 1]            # exit 1 is a tolerated soft-fail, not a workflow abort
-  - id: fallback
-    depends_on: [gen]
-    when: "{{gen.exit}} != 0"  # branch on the exit code
-    prompt: gen failed; try a different approach
-```
-
-Rules:
-
-- Exit `0` is always success. `ok_exit` lists **additional** non-zero codes that count as success; every other non-zero code (and a signal kill, reported as `-1`) still fails the task.
-- A tolerated exit captures the code into the result: `{{id.exit}}` (placeholder, in any downstream body) and `{{id.exit}} <op> n` (a `when:` guard, bare integer) both read it. The task's stdout is still its `{{id}}` output for a command/script; an LLM task that exits non-zero produced no response, so its `{{id}}` output is empty (only the exit code is meaningful).
-- Each code must be in the `0`-`255` range. `ok_exit` is rejected on sub-workflow and loop-wrapper tasks (no process exit).
-- Even without `ok_exit`, a **failing** command/LLM/script task now records its numeric exit code on the run record, shown by `loom runs show` and the live finish line — so a `claude-code` exit `1` is visible as `exit=1` rather than only an opaque error string.
-- A tolerated non-zero LLM exit is never memoized (its empty output must not be replayed as a cache hit).
+**ok_exit** — non-zero codes counted as success (0 always succeeds). Lets `command`/LLM tasks opt into exit-is-data so you can branch on `{{id.exit}}`. Rejected on `workflow`/loop-wrapper tasks. A tolerated non-zero LLM task has empty `{{id}}` output (no response) and is never memoized. Even without `ok_exit`, a failing task records its exit code (shown as `exit=N`).
 
 ## Params
 
-Workflows can accept parameters passed at runtime via the `-p` CLI flag. Params are declared at the top level, reference-able via `{{params.name}}` syntax in task prompts and `system_prompt`, and do not create DAG dependencies.
-
-Declare params as a list of objects with:
-- `name` (required, `[A-Za-z0-9_]+`): the identifier.
-- `description` (optional): documented in the plan output.
-- `default` (optional): string value used if not provided via CLI; if `default` is absent and `required: false` (or omitted), the param is optional with no default.
-- `required` (optional, default `false`): if `true`, the param **must** be provided via `-p`; cannot set both `required: true` and `default`.
-
-String values only — `default: 1` and `default: true` are stringified (`"1"`, `"true"`).
-
-Substitute params in prompts with `{{params.foo}}` (separate namespace from task ids; `{{foo}}` is a task ref, never a param):
-
-```yaml
-name: deploy
-description: Deploy service to an env
-runtime: claude-code
-model: sonnet
-effort: low
-params:
-  - name: env
-    description: Target environment
-    required: true
-  - name: replicas
-    default: "1"
-  - name: tag
-    default: latest
-tasks:
-  - id: plan
-    prompt: |
-      Plan deploy of image {{params.tag}} to {{params.env}} ({{params.replicas}}x).
-  - id: apply
-    depends_on: [plan]
-    prompt: |
-      Apply plan for {{params.env}}:
-      {{plan}}
-```
-
-Provide values on the CLI with repeatable `-p key=val`:
-
-```bash
-loom run workflows/deploy.yaml -p env=prod -p replicas=3
-loom run check workflows/deploy.yaml -p env=prod
-```
-
-Resolution order (right-to-left wins): declared defaults → `-p` values. Unknown keys or missing required params are hard errors.
+Top-level declarations, referenced as `{{params.name}}` in prompts/`command`/`system_prompt`/`with`. Separate namespace from task ids; no DAG edges. String values only (`default: 1`→`"1"`). `required: true` forbids `default`. Pass with repeatable `-p key=val`; `-p` overrides declared default; unknown/missing-required keys are hard errors.
 
 ## Scoped loops
 
-A **scoped loop** is a named subgraph that the run pipeline re-executes until a convergence target is reached; only the loop's own body tasks re-run, the rest of the DAG runs once. A loop is declared **inline as a task** carrying a `loop:` block instead of a `prompt:`/`command:`. The wrapper task's `id` is the loop id, and the loop renders in the execution flow at its position (not a separate section).
+A task carrying `loop:`/`for_each:`/`for_each_parallel:` (instead of a body) wraps a subgraph that re-runs; the rest of the DAG runs once. The wrapper id is the loop id. Wrapper must NOT set a body, runtime knobs, or task fields (`depends_on`/`when`/`schema`/`retry`/`budget`/`cache`/`writes_state`) — those go on body tasks. No top-level `loops:` block.
 
-There is **no top-level `loops:` block** — a stray top-level `loops:` is rejected as an unknown field. Loops live in `tasks:`:
+**Edge kinds** (by where `depends_on` points): *entry* (member→non-member, satisfied once before loop), *internal* (member→member, orders within a pass), *exit* (non-member→member, runs once after convergence, sees final pass).
 
-```yaml
-tasks:
-  - id: seed
-    prompt: seed it
-  - id: work                   # the loop id (a task carrying loop:, not prompt/command)
-    description: ...            # optional; becomes the loop's description in plan output
-    loop:
-      until_empty: <member>    # converge when this member's trimmed output is empty
-      # — OR —
-      until: '{{member}} == "done"'  # converge when this when-style expression is true
-      max: 4                   # required, >= 1; hard cap on iterations
-      tasks:                   # required, non-empty; same task schema as top-level
-        - id: drain
-          depends_on: [seed]
-          prompt: drain {{seed}} {{prev.refine}}
-        - id: refine
-          depends_on: [drain]
-          prompt: refine {{drain}}
-  - id: report                 # exit consumer: depends on a body MEMBER
-    depends_on: [drain]
-    prompt: summarize {{drain}}
-```
-
-Rules (all surfaced by `loom run check`):
-
-- **Discriminator** — a task sets exactly one of `prompt`, `command`, `loop`, `for_each`, or `for_each_parallel` (`loop:`, `for_each:`, and `for_each_parallel:` are sibling scoped-block forms; a task setting more than one is rejected). A loop-wrapper task must not also set `prompt`/`command`, runtime knobs (`runtime`/`model`/`effort`), or task-only fields (`depends_on`, `when`, `writes_state`, `schema`, `retry`, `budget`, `cache`) — those belong to the body tasks. Inside the `loop:` block only `until_empty`/`until`, `max`, and `tasks` are allowed; `id` and `description` come from the wrapper task.
-- **Loop id** — the wrapper task id; `[A-Za-z0-9_]+`, unique, and distinct from every other task id and param name.
-- **Convergence** — exactly one of `until_empty` or `until` per loop. `until_empty` names a body member whose empty trimmed output ends the loop; `until` is a `when`-style expression that may reference **only** members of the same loop.
-- **`max`** — required and `>= 1`; bounds iterations even if the target never converges.
-- **Body** — `tasks:` is non-empty and uses the identical task schema (prompt/command, model/effort, etc.). Each body task carries its loop id; a task belongs to at most one loop.
-- **DAG body** — the body is an ordinary DAG; members need not be connected to one another. Members with no `depends_on` between them run **in parallel within a pass**, exactly like independent top-level tasks. `depends_on` edges between members order them within a pass.
-
-### `for_each:` block — iterate a finite list
-
-A `for_each:` block is the loop's sibling: instead of converging, it runs its body **once per element** of a finite list, sequentially (iteration count = `len(list)`). It is declared inline as a task carrying `for_each:` (not `prompt`/`command`/`loop`), with the same wrapper rules as `loop:`.
+**`loop:`** — converge on `until_empty: <member>` (empty trimmed output) **or** `until: '<when-expr over members>'`; `max: N` (≥1, required cap). Body `tasks:` is a normal DAG (independent members run parallel within a pass). `{{prev.<member>}}` = prior iteration's output (empty pass 1); exempt from depends_on (listing it would cycle).
 
 ```yaml
-tasks:
-  - id: discover
-    command: "ls cmd"          # produces a newline list (or a JSON array of strings)
-  - id: process                # the loop id (a task carrying for_each:)
-    for_each:
-      in: [redis, postgres]    # static list — OR — a single placeholder: in: '{{discover}}'
-      as: backend              # the loop variable, bound to each element in turn
-      tasks:                   # required, non-empty; same task schema as top-level
-        - id: probe
-          prompt: probe {{backend}} building on {{prev.probe}}
-  - id: report                 # exit consumer: depends on a body MEMBER
-    depends_on: [probe]
-    prompt: summarize {{probe}}
+- id: work
+  loop:
+    until_empty: drain
+    max: 4
+    tasks:
+      - id: drain
+        depends_on: [seed]
+        prompt: drain {{seed}} {{prev.refine}}
+      - id: refine
+        depends_on: [drain]
+        prompt: refine {{drain}}
+- id: report          # exit consumer
+  depends_on: [drain]
+  prompt: summarize {{drain}}
 ```
 
-- **`in`** — either a static YAML sequence (`[a, b, c]`) or a single `{{...}}` placeholder scalar resolved at run time. A `{{taskid}}` source makes that task an entry dependency (the list is resolved once it closes); a `{{params.x}}` or `{{state.x}}` source needs no edge. A dynamic source is parsed as a JSON array of strings, else split on newlines, with blank entries dropped.
-- **`as`** — the loop variable; `[A-Za-z0-9_]+`, and distinct from every task id and param name. Reference it as `{{as}}` in any body member's prompt, command, or sub-workflow `with:` value; it is bound per iteration and **exempt from `depends_on`** (it is not a task output).
-- **No `until_*` / `max`** — the list length fixes the iteration count. An **empty list runs zero iterations**: the members never run and the loop closes their gates immediately, so an exit consumer sees empty output (this composes with loop-until-dry: nothing to process reads as drained).
-- **Sequential** — passes run in list order; `{{prev.<member>}}` carries the prior pass's output forward exactly as in a `loop:`. A body member's published output is the **final** iteration's value (loop semantics), not a join across iterations.
+**`for_each:`** — runs body once per list element, **sequentially**. `in:` = static seq `[a,b]` or a single `{{placeholder}}` (a `{{taskid}}` source adds an entry dep; parsed as JSON array, else newline-split, blanks dropped). `as:` = loop var, referenced `{{as}}`, exempt from depends_on. No `until`/`max`. Empty list = 0 iterations (exit consumer sees empty). `{{prev.<member>}}` works; a member's published output is the **final** iteration's.
 
-### `for_each_parallel:` block — iterate concurrently
-
-`for_each_parallel:` is the concurrent spelling of `for_each:`: an identical `in`/`as`/`tasks` block, but every element's pass runs **at the same time** instead of in list order. Reach for it to fan a body out over independent items (probe N services, fix N bugs) where the passes do not depend on each other.
-
-```yaml
-tasks:
-  - id: fan
-    for_each_parallel:
-      in: '{{discover}}'
-      as: item
-      tasks:
-        - id: handle
-          prompt: process {{item}}
-```
-
-It shares every `for_each:` rule (static/dynamic `in`, the `as` variable, required non-empty `tasks`, empty-list-runs-nothing, the entry/internal/exit edges) with two differences:
-
-- **Isolated passes** — each pass runs over its own copy of the member outputs, so one item never observes another's results; a multi-member body whose tasks reference each other (`b` reads `{{a}}`) resolves those references within the same pass.
-- **No `{{prev.<id>}}`** — the passes have no ordering, so there is no prior iteration to read; a `prev` reference inside a parallel body fails `loom run check`.
-
-Because the passes race, **which pass's value an exit consumer reads for a member is unspecified** — a downstream task needing a specific element must reference that element, not the loop member. Budget and usage stay global across all passes.
-
-### Edge semantics
-
-A loop body has three edge kinds, distinguished by where each `depends_on` endpoint lives:
-
-- **Entry edge** — a body task depends on a non-member (e.g. `drain` depends on the top-level `seed`). Entry edges are satisfied once, before the loop starts; the upstream output is the same for every iteration.
-- **Internal edge** — a body task depends on another member of the same loop (e.g. `refine` depends on `drain`). Internal edges order the tasks *within* each iteration.
-- **Exit edge** — a non-member depends on a body member. The downstream task runs once, after the loop converges, seeing the final iteration's output.
-
-### `prev.<id>` placeholder
-
-Inside a loop body, `{{prev.<member>}}` injects the **prior iteration's** output of a sibling member (empty on the first iteration). It lets an iteration build on the last one without forming a cycle — `drain` above reads `{{prev.refine}}` to carry state forward. A `prev` reference is valid only inside a loop body and may only name a member of that same loop; using it elsewhere or across loops fails `loom run check`.
-
-Unlike a plain `{{id}}` placeholder, a `{{prev.<member>}}` reference is **exempt from the `depends_on` rule** and must *not* be listed in `depends_on`: it reads across iterations, not within one, so adding the edge would form a cycle. In the example above `drain` reads `{{prev.refine}}` yet only declares `depends_on: [seed]`.
-
-`loom run check` renders each loop as a labeled group showing its id, a kind-specific summary (a `loop:` shows its convergence target `until_empty=`/`until=` and `max`; a `for_each:` shows `as=` and its list source, `static[n]` or `dynamic<-{{src}}`), and every body task with its deps, so the loop's execution shape is visible without running it.
+**`for_each_parallel:`** — same as `for_each:` but passes run **concurrently** with isolated outputs (one pass can't see another). **No `{{prev}}`** (fails check). Which pass's value an exit consumer reads is unspecified — reference the element, not the member.
 
 ## Runtime / model / effort
 
-These fields are LLM-only and are ignored by command tasks; task-level overrides of `runtime`, `model`, or `effort` on a command task are a hard validation error.
+LLM-only; resolution is task field → workflow default (no default + no task value = validation error). Ignored by command/script tasks (task-level overrides there are hard errors).
 
-Resolution per task: task field → workflow default. A task with no runtime and a workflow with no default fails validation.
+- **claude-code** models: `haiku` (mechanical), `sonnet` (spec-following impl), `opus` (architecture, hard debugging, design/review). Efforts: `low` (one-shot) / `medium` (default) / `high` (multi-step) / `max` (hardest synthesis). Override only where escalation matters; wide fan-out of haiku/low costs ~one task's wall time.
+- **codex** models: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` (reasoning), `gpt-5.3-codex-spark` (non-reasoning). Efforts: `minimal|low|medium|high|xhigh`. Needs `OPENAI_API_KEY`/`CODEX_API_KEY` or `codex login`. No `system_prompt`.
 
-`claude-code` runtime (see `pkg/runtime/claudecode/claudecode.go`):
+## Output & resume
 
-Models — pick by task difficulty:
-
-- `haiku` — very simple, mechanical tasks: rename a file, format JSON, run a fixed shell command, summarize a short input.
-- `sonnet` — standard, not-so-challenging work: implement code from an already-architected plan, write tests against a defined contract, follow a clear spec.
-- `opus` — the most challenging work: architecture decisions, ambiguous requirements, design synthesis, hard debugging, adversarial review.
-
-Efforts — pick by how much thinking the task warrants:
-
-- `low` — one-shot, no real deliberation needed (the task is mostly typing).
-- `medium` — default; some reasoning, weighing a couple of options before acting.
-- `high` — extended thinking: multi-step reasoning, exploring alternatives, careful verification.
-- `max` — burn maximum compute: only for the hardest synthesis / critique / design steps where getting it right dwarfs cost.
-
-Resolve per task. The workflow-level `model` / `effort` covers the majority; override only on tasks that need to step up or down. Independent tasks run in parallel, so a wide fan-out of haiku/low drafts costs ~one task's wall time, not N.
-
-`codex` runtime (see `pkg/runtime/codex/codex.go`):
-
-Requires `OPENAI_API_KEY` (or `CODEX_API_KEY`) in the environment, or run `codex login` before `loom run`.
-
-Models:
-
-- `gpt-5.5` — reasoning; accepts effort.
-- `gpt-5.4` — reasoning; accepts effort.
-- `gpt-5.4-mini` — reasoning; smaller / faster; accepts effort.
-- `gpt-5.3-codex-spark` — non-reasoning, text-only; effort is forwarded but may be ignored by the backend.
-
-Efforts: `minimal | low | medium | high | xhigh`. Empty effort means "leave runtime default" (same convention as `claude-code`).
-
-**`system_prompt` is not supported** by the `codex` runtime. Codex CLI has no headless system-prompt flag — use an `AGENTS.md` file in the working directory for persistent instructions instead. Setting `system_prompt` (workflow- or task-level, including a task-level override under `runtime: codex`) is a hard validation error; `loom run check` reports it via the effective runtime per task.
-
-## Authoring workflow
-
-1. Decide the DAG shape first (fan-out, chain, diamond). Sketch task ids and edges.
-2. Pick workflow-level defaults to cover the majority of tasks; override only where escalation matters.
-3. Keep prompts tight — each `{{id}}` placeholder injects the *entire* upstream output verbatim.
-4. Run `loom run check` until it's clean, then `loom run`. When params are declared, `loom run check -p key=val` resolves `{{params.X}}` placeholders before printing the plan, so you can preview the actual prompts the model will see.
-
-## Output
-
-`loom run` writes plan + per-task progress + summary (tokens, cost, completion) to stdout. In parallel, it persists a self-contained JSON record of the run on disk:
+`loom run` prints plan + per-task progress (id, runtime/model/effort, tokens, cost) + summary, and persists a self-contained JSON record (atomic rewrite per task event, so crashes leave a parseable file):
 
 ```
-.loom/runs/<workflow_id>/<run_id>.json     # full record, atomic rewrite per task event
-.loom/runs/<workflow_id>/latest.json       # symlink to the most recent run
+.loom/runs/<wf_id>/<run_id>.json    # run_id = YYYYMMDDTHHMMSSZ-<6hex>, sortable
+.loom/runs/<wf_id>/latest.json      # most recent
 ```
 
-`<run_id>` is `YYYYMMDDTHHMMSSZ-<6 hex>` (UTC, sortable). The file embeds the verbatim manifest, per-task `prompt` (with placeholders already substituted), full `output`, `usage` (in / out / cache-read tokens, cost USD), timing, and status — plus a top-level `usage` total and `task_count`. It is rewritten on every `OnStart` / `OnFinish` via tmp+rename, so a crash mid-run still leaves a parseable file.
-
-Failed or interrupted runs can be resumed: `loom resume <run-id>` (or `loom resume latest`) loads the record, seeds every task whose `status` is `ok` with its stored `output`, and only dispatches the remaining tasks. The original params block is reused, so no `-p` flags are required on the resume invocation. `loom run wf.yaml --resume-latest` is the same operation keyed off the workflow path instead of a run id.
-
-Use it to inspect what the model actually saw and produced, or to compare runs:
+Record holds the manifest, per-task substituted `prompt`, full `output`, `usage` (in/out/cache tokens, cost USD), timing, status, plus totals. Resume (`loom resume <id|latest>`, or `loom run wf.yaml --resume-latest`) seeds `ok` tasks from stored output and re-dispatches the rest; original params are reused.
 
 ```bash
-jq '.usage,.task_count' .loom/runs/<workflow_id>/latest.json
-jq '.tasks[] | {id, model, effort, usage, elapsed_ms}' .loom/runs/<workflow_id>/latest.json
+jq '.tasks[] | {id, model, usage, elapsed_ms}' .loom/runs/<wf_id>/latest.json
 ```
 
-Stdout is the only progress channel; task outputs do not leak to stdout beyond the summary line. They live in memory for `{{id}}` substitution downstream and on disk in the run record.
+## Authoring
+
+1. Sketch the DAG (fan-out / chain / diamond): task ids + edges.
+2. Set workflow defaults for the majority; override per task only to escalate.
+3. Keep prompts tight — each `{{id}}` injects the entire upstream output.
+4. `loom run check` until clean (use `-p k=v` to preview substituted prompts), then `loom run`.
+
+Full detail: `docs/cli.md`, `docs/workflow-spec.md`, `pkg/runtime/{claudecode,codex}/`.
