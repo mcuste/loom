@@ -164,6 +164,11 @@ type Workflow struct {
 	// when the workflow links no children. Populated by the CLI link step
 	// (linkSubWorkflows), never by Parse, which stays filesystem-free.
 	Subs map[TaskID]*Workflow
+	// Schedule, when non-nil, declares an inline recurring cron schedule that
+	// `loom schedule sync` reconciles into the schedule store. Parse captures it
+	// structurally; the cron expression's validity is checked by the scheduler,
+	// keeping this package free of a cron dependency.
+	Schedule *Schedule
 
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
 	// nil for hand-constructed Workflow values, in which case ByID falls back
@@ -173,6 +178,14 @@ type Workflow struct {
 	// by Parse; nil for hand-constructed Workflow values, in which case Param
 	// falls back to a linear scan.
 	paramByName map[ParamName]int
+}
+
+// Schedule is an inline recurring cron schedule declared in a workflow's
+// `schedule:` block. Cron is a cron expression; TZ is the optional IANA
+// timezone it is evaluated in (empty means the daemon's local time).
+type Schedule struct {
+	Cron string
+	TZ   string
 }
 
 // Task is a single executable unit within a Workflow.

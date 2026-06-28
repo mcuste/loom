@@ -15,6 +15,12 @@ loom run       <wf> --resume-latest   # skip ok tasks from last run, re-run the 
 loom resume    <run-id|latest>        # resume a specific run
 loom runs                      # browse past runs (TUI); `ls`, `show <id>`
 loom workflows ls              # list registry workflows runnable by name
+
+loom schedule cron <wf> --expr "0 15 * * *" [--tz Area/City] [--overlap skip|queue|allow] [--catchup] [-p k=v]
+loom schedule at   <wf> --time 15:00 [--date YYYY-MM-DD] [--tz Area/City] [-p k=v]   # one-off
+loom schedule ls | rm <id> | enable <id> | disable <id>
+loom schedule sync [wf]        # reconcile inline `schedule:` blocks into the store
+loom daemon [install]          # foreground loop that fires due schedules; `install` writes a launchd/systemd unit
 ```
 
 `<wf>` is a YAML path **or registry name** (no path sep; has `:` or no `.yaml`). Names resolve through `.loom/workflows/` dirs walking cwd→repo root, then global `$LOOM_HOME/workflows/`; nearest wins. `ci/test.yaml`→`ci:test`; eponymous dir `<name>/<name>.yaml`→`<name>`.
@@ -31,6 +37,9 @@ model: sonnet              # default: haiku | sonnet | opus
 effort: medium             # default: low | medium | high | max (claude-code)
 system_prompt: ...         # optional default; per-task overridable
 output: <task_id>          # which task is the result when this wf is linked as a sub-workflow
+schedule:                  # optional inline cron; `loom schedule sync` reconciles it into the store
+  cron: "0 2 * * *"        #   required when schedule: is present
+  tz: UTC                  #   optional IANA timezone (default: daemon local time)
 params:                    # optional; see Params
   - {name: env, description: ..., default: "1", required: false}
 
@@ -135,6 +144,14 @@ Record holds the manifest, per-task substituted `prompt`, full `output`, `usage`
 ```bash
 jq '.tasks[] | {id, model, usage, elapsed_ms}' .loom/runs/<wf_id>/latest.json
 ```
+
+## Scheduling
+
+`loom daemon` is a foreground loop that fires due schedules in process (each becomes a normal run record, tagged `triggered_by: schedule`). Keep it alive with `loom daemon install` (launchd on macOS, systemd user unit on Linux). Schedules live under `$LOOM_HOME/schedules/<id>.json`; per-fire logs under `$LOOM_HOME/schedules/logs/<id>/`.
+
+- Recurring: `loom schedule cron <wf> --expr "0 15 * * *" [--tz Area/City]`, or declare an inline `schedule:` block and run `loom schedule sync`.
+- One-off: `loom schedule at <wf> --time 15:00` (rolls to tomorrow if the time already passed today; `--date` pins an explicit day). Removed after it fires.
+- `--overlap skip|queue|allow` (default `skip`) governs a fire that lands while the prior run is still going. `--catchup` fires once on daemon startup for a tick missed while it was down; without it, missed ticks are skipped.
 
 ## Authoring
 

@@ -445,6 +445,13 @@ func Parse(data []byte) (*Workflow, error) {
 	}
 	wf.Budget = budget
 
+	if raw.Schedule != nil {
+		if raw.Schedule.Cron == "" {
+			return nil, fmt.Errorf("schedule: cron is required")
+		}
+		wf.Schedule = &Schedule{Cron: raw.Schedule.Cron, TZ: raw.Schedule.TZ}
+	}
+
 	return wf, nil
 }
 
@@ -850,6 +857,16 @@ type rawWorkflow struct {
 	// is run as a sub-workflow. Empty selects the lone sink by default; see
 	// Workflow.OutputTask. Validated to name a known task.
 	Output string `yaml:"output"`
+	// Schedule is an optional inline cron schedule reconciled into the schedule
+	// store by `loom schedule sync`. A pointer distinguishes an absent block from
+	// a present one; both fields are plain strings.
+	Schedule *rawSchedule `yaml:"schedule"`
+}
+
+// rawSchedule mirrors a workflow's inline `schedule:` block.
+type rawSchedule struct {
+	Cron string `yaml:"cron"`
+	TZ   string `yaml:"tz"`
 }
 
 // rawTask mirrors the per-task YAML schema. It exists so the parser can apply

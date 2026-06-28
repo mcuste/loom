@@ -133,6 +133,48 @@ func TestParseAtTimeHonorsExplicitDate(t *testing.T) {
 	}
 }
 
+const inlineScheduleWorkflow = `
+name: shellwf
+schedule:
+  cron: "0 2 * * *"
+  tz: UTC
+tasks:
+  - id: a
+    command: echo hi
+`
+
+func TestScheduleSyncUpsertsAndRemoves(t *testing.T) {
+	home := loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+	path := writeWorkflow(t, inlineScheduleWorkflow)
+
+	// First sync adds the inline schedule.
+	if _, err := runCLI(t, "schedule", "sync", path); err != nil {
+		t.Fatalf("sync add: %v", err)
+	}
+	recs, _ := schedule.List(home, "")
+	if len(recs) != 1 || recs[0].ID != "shellwf_inline" {
+		t.Fatalf("after sync got %+v, want one shellwf_inline", recs)
+	}
+
+	// Re-sync is an idempotent update, not a duplicate.
+	if _, err := runCLI(t, "schedule", "sync", path); err != nil {
+		t.Fatalf("sync update: %v", err)
+	}
+	if recs, _ := schedule.List(home, ""); len(recs) != 1 {
+		t.Fatalf("re-sync produced %d records, want 1", len(recs))
+	}
+
+	// Dropping the block and re-syncing removes the synced record.
+	noSchedule := writeWorkflow(t, shellWorkflow) // same workflow id, no schedule block
+	if _, err := runCLI(t, "schedule", "sync", noSchedule); err != nil {
+		t.Fatalf("sync remove: %v", err)
+	}
+	if recs, _ := schedule.List(home, ""); len(recs) != 0 {
+		t.Fatalf("after dropping block got %d records, want 0", len(recs))
+	}
+}
+
 func mustOneID(t *testing.T, home string) string {
 	t.Helper()
 	recs, err := schedule.List(home, "")

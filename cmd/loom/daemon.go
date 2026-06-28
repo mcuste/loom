@@ -47,7 +47,29 @@ func newDaemonCmd() *cobra.Command {
 			return d.run(ctx)
 		},
 	}
+	cmd.AddCommand(newDaemonInstallCmd())
 	return cmd
+}
+
+// newDaemonInstallCmd writes a platform supervisor unit (launchd on macOS,
+// systemd on Linux) that keeps `loom daemon` running across logout and reboot.
+func newDaemonInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install a launchd/systemd unit that keeps `loom daemon` running",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			exec, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve loom binary path: %w", err)
+			}
+			home, err := loomHome()
+			if err != nil {
+				return err
+			}
+			return installDaemon(cmd.OutOrStdout(), exec, home)
+		},
+	}
 }
 
 // daemon owns the scheduler loop. now is injectable so tests drive the firing

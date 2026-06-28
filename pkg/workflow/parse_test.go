@@ -87,6 +87,46 @@ func TestParseMinimal(t *testing.T) {
 	}
 }
 
+func TestParseInlineSchedule(t *testing.T) {
+	src := `
+name: wf1
+runtime: ` + string(testRuntime) + `
+model: m1
+schedule:
+  cron: "0 15 * * *"
+  tz: UTC
+tasks:
+  - id: a
+    command: echo hi
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if wf.Schedule == nil {
+		t.Fatal("Schedule is nil, want parsed block")
+	}
+	if wf.Schedule.Cron != "0 15 * * *" || wf.Schedule.TZ != "UTC" {
+		t.Fatalf("Schedule = %+v, want cron=\"0 15 * * *\" tz=UTC", wf.Schedule)
+	}
+}
+
+func TestParseInlineScheduleRequiresCron(t *testing.T) {
+	src := `
+name: wf1
+runtime: ` + string(testRuntime) + `
+model: m1
+schedule:
+  tz: UTC
+tasks:
+  - id: a
+    command: echo hi
+`
+	if _, err := workflow.Parse([]byte(src)); err == nil {
+		t.Fatal("Parse accepted a schedule block without cron, want error")
+	}
+}
+
 func TestParseFullSchema(t *testing.T) {
 	src := `
 name: wf_full
