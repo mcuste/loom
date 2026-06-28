@@ -1,0 +1,381 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/tui"
+	"github.com/mcuste/loom/pkg/workflow"
+)
+
+// pollCap bounds how long the daemon sleeps between scans even when the next
+// fire is far off, so a schedule added while the daemon runs is picked up
+// promptly without a restart.
+const pollCap = 60 * time.Second
+
+// minWait floors a computed sleep so a due-but-blocked schedule (waiting on a
+// queued run) does not spin the loop.
+const minWait = time.Second
+
+func newDaemonCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "daemon",
+		Short: "Run the scheduler loop that fires scheduled workflows",
+		Long: "Run the scheduler loop in the foreground. It reads schedules from " +
+			"$LOOM_HOME/schedules and fires each workflow at its cron time or one-off " +
+			"instant, recording every run in the normal run store. Use a process " +
+			"supervisor (launchd/systemd) to keep it alive across reboots.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			home, err := loomHome()
+			if err != nil {
+				return err
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			d := newDaemon(home, cmd.OutOrStdout())
+			return d.run(ctx)
+		},
+	}
+	return cmd
+}
+
+// daemon owns the scheduler loop. now is injectable so tests drive the firing
+// decision deterministically; running tracks in-flight fires per schedule id so
+// the overlap policy can skip or serialize them.
+type daemon struct {
+	home string
+	out  io.Writer
+	now  func() time.Time
+
+	mu      sync.Mutex
+	running map[string]bool
+}
+
+func newDaemon(home string, out io.Writer) *daemon {
+	return &daemon{
+		home:    home,
+		out:     out,
+		now:     time.Now,
+		running: map[string]bool{},
+	}
+}
+
+// run drives the scan/sleep loop until ctx is cancelled. The first scan applies
+// catch-up handling for ticks missed while the daemon was down. results carries
+// completions back so the loop can clear the running flag and persist
+// LastFire/LastRunID without racing the scan's NextFire writes.
+func (d *daemon) run(ctx context.Context) error {
+	d.logf("loom daemon started; schedules under %s", filepath.Join(d.home, "schedules"))
+	results := make(chan fireResult, 16)
+	firstScan := true
+	for {
+		soonest := d.scan(firstScan, results)
+		firstScan = false
+
+		wait := pollCap
+		if !soonest.IsZero() {
+			if w := soonest.Sub(d.now()); w < wait {
+				wait = w
+			}
+		}
+		if wait < minWait {
+			wait = minWait
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			d.logf("loom daemon stopping")
+			return nil
+		case <-timer.C:
+		case res := <-results:
+			timer.Stop()
+			d.complete(res)
+		}
+	}
+}
+
+// fireResult reports a finished fire back to the loop.
+type fireResult struct {
+	scheduleID string
+	oneOff     bool
+	fireTime   time.Time
+	runID      string
+	err        error
+}
+
+// scan evaluates every enabled schedule once and fires those that are due,
+// returning the soonest future NextFire so the caller knows how long to sleep.
+// It owns all NextFire writes; LastFire/LastRunID writes happen in complete.
+func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
+	recs, err := schedule.List(d.home, "")
+	if err != nil {
+		d.logf("scan: %v", err)
+		return time.Time{}
+	}
+	now := d.now()
+	var soonest time.Time
+	for _, rec := range recs {
+		if !rec.Enabled {
+			continue
+		}
+		fire, remove, next, err := decideFire(rec, now, firstScan)
+		if err != nil {
+			d.logf("schedule %s: %v", rec.ID, err)
+			continue
+		}
+		if remove && !fire {
+			// A one-off whose instant was missed while the daemon was down and
+			// that opted out of catch-up: drop it without running.
+			d.logf("schedule %s: one-off time passed while daemon was down, dropping", rec.ID)
+			d.removeRecord(rec.ID)
+			continue
+		}
+		if fire {
+			if !d.startFire(rec, now, remove, next, results) {
+				// Blocked by the overlap policy (queue): leave NextFire untouched so
+				// the next scan retries once the in-flight run completes.
+				soonest = earliest(soonest, now.Add(minWait))
+				continue
+			}
+		} else {
+			// Not due yet: persist the (possibly freshly computed) NextFire so the
+			// table and the next scan agree.
+			if !next.Equal(rec.NextFire) {
+				rec.NextFire = next
+				d.updateRecord(rec)
+			}
+		}
+		soonest = earliest(soonest, next)
+	}
+	return soonest
+}
+
+// decideFire is the pure firing decision for one record at instant now. It
+// returns whether to fire, whether to remove the record, and the NextFire to
+// persist. firstScan distinguishes a tick that is due now from one that was
+// missed while the daemon was down (only honored for catch-up).
+func decideFire(rec schedule.Record, now time.Time, firstScan bool) (fire, remove bool, next time.Time, err error) {
+	if rec.Trigger.IsCron() {
+		nf := rec.NextFire
+		if nf.IsZero() {
+			if nf, err = rec.NextFireAfter(now); err != nil {
+				return false, false, time.Time{}, err
+			}
+		}
+		if now.Before(nf) {
+			return false, false, nf, nil // not due
+		}
+		advanced, err := rec.NextFireAfter(now)
+		if err != nil {
+			return false, false, time.Time{}, err
+		}
+		if firstScan && !rec.Catchup {
+			// Missed tick(s) while down; skip without firing.
+			return false, false, advanced, nil
+		}
+		return true, false, advanced, nil
+	}
+
+	// One-off.
+	at := rec.Trigger.At
+	if now.Before(at) {
+		return false, false, at, nil // not due
+	}
+	if firstScan && !rec.Catchup {
+		return false, true, time.Time{}, nil // missed while down, drop
+	}
+	return true, true, time.Time{}, nil // fire then remove
+}
+
+// startFire applies the overlap policy and, if clear to run, marks the schedule
+// running, persists the post-fire record state, and launches the run. It
+// returns false when the queue policy must hold the fire for a later scan.
+func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next time.Time, results chan<- fireResult) bool {
+	switch rec.EffectiveOverlap() {
+	case schedule.OverlapSkip:
+		if d.isRunning(rec.ID) {
+			d.logf("schedule %s: previous run still in flight, skipping this fire", rec.ID)
+			// Advance past this tick so skip means skip, not retry.
+			if rec.Trigger.IsCron() {
+				rec.NextFire = next
+				d.updateRecord(rec)
+			}
+			return true
+		}
+	case schedule.OverlapQueue:
+		if d.isRunning(rec.ID) {
+			return false // hold; retry on next scan after the run completes
+		}
+	case schedule.OverlapAllow:
+		// fall through: fire regardless of any in-flight run
+	}
+
+	d.setRunning(rec.ID, true)
+	if rec.Trigger.IsCron() {
+		rec.NextFire = next
+		d.updateRecord(rec)
+	} else if remove {
+		d.removeRecord(rec.ID)
+	}
+	go d.execute(rec, now, results)
+	d.logf("schedule %s: firing %s", rec.ID, rec.WorkflowID)
+	return true
+}
+
+// execute reloads the workflow fresh, resolves its params against the current
+// definition, and runs it, streaming output to a per-fire log file. The run is
+// recorded in the normal run store; the captured run id flows back via results.
+func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<- fireResult) {
+	res := fireResult{scheduleID: rec.ID, oneOff: !rec.Trigger.IsCron(), fireTime: fireTime}
+	defer func() { results <- res }()
+
+	wf, manifest, _, err := loadWorkflow(rec.Path)
+	if err != nil {
+		res.err = fmt.Errorf("load %s: %w", rec.Path, err)
+		d.logf("schedule %s: %v", rec.ID, res.err)
+		return
+	}
+	resolved, err := workflow.ResolveParams(wf, rec.Params, nil)
+	if err != nil {
+		res.err = fmt.Errorf("resolve params: %w", err)
+		d.logf("schedule %s: %v", rec.ID, res.err)
+		return
+	}
+
+	logPath, lf, err := d.openLog(rec.ID, fireTime)
+	if err != nil {
+		res.err = err
+		d.logf("schedule %s: %v", rec.ID, err)
+		return
+	}
+	defer lf.Close()
+
+	cr := &captureRenderer{Renderer: tui.New(lf)}
+	defer func() { _ = cr.Close() }()
+	prov := provenance{scheduleID: rec.ID, triggeredBy: "schedule"}
+	runErr := runWorkflow(cr, lf, d.home, manifest, wf, resolved, seedPlan{}, prov)
+	res.runID = runIDFromPath(cr.runFile)
+	res.err = runErr
+	if runErr != nil {
+		d.logf("schedule %s: run failed (see %s): %v", rec.ID, logPath, runErr)
+	} else {
+		d.logf("schedule %s: run %s complete (log %s)", rec.ID, res.runID, logPath)
+	}
+}
+
+// complete clears the running flag and folds the run id back into the schedule
+// record (for a surviving cron schedule). One-offs were already removed in
+// startFire, so a missing record here is expected and ignored.
+func (d *daemon) complete(res fireResult) {
+	d.setRunning(res.scheduleID, false)
+	if res.oneOff {
+		return
+	}
+	rec, err := schedule.Get(d.home, res.scheduleID)
+	if err != nil {
+		return // schedule removed meanwhile; nothing to update
+	}
+	rec.LastFire = res.fireTime.UTC()
+	if res.runID != "" {
+		rec.LastRunID = res.runID
+	}
+	d.updateRecord(rec)
+}
+
+// openLog creates (and returns) the per-fire log file under
+// <home>/schedules/logs/<id>/<fire-timestamp>.log.
+func (d *daemon) openLog(id string, fireTime time.Time) (string, *os.File, error) {
+	dir := filepath.Join(d.home, "schedules", "logs", id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create log dir: %w", err)
+	}
+	path := filepath.Join(dir, fireTime.UTC().Format("20060102T150405Z")+".log")
+	f, err := os.Create(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("create log file: %w", err)
+	}
+	return path, f, nil
+}
+
+func (d *daemon) isRunning(id string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.running[id]
+}
+
+func (d *daemon) setRunning(id string, v bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if v {
+		d.running[id] = true
+	} else {
+		delete(d.running, id)
+	}
+}
+
+func (d *daemon) updateRecord(rec schedule.Record) {
+	if err := schedule.Update(d.home, rec); err != nil {
+		d.logf("schedule %s: update: %v", rec.ID, err)
+	}
+}
+
+func (d *daemon) removeRecord(id string) {
+	if err := schedule.Remove(d.home, id); err != nil {
+		d.logf("schedule %s: remove: %v", id, err)
+	}
+}
+
+func (d *daemon) logf(format string, a ...any) {
+	ts := d.now().UTC().Format("2006-01-02 15:04:05")
+	_, _ = fmt.Fprintf(d.out, "%s  %s\n", ts, fmt.Sprintf(format, a...))
+}
+
+// captureRenderer wraps a renderer to record the run-file path the pipeline
+// reports in its header, so the daemon can recover the run id without the
+// pipeline returning it.
+type captureRenderer struct {
+	tui.Renderer
+	runFile string
+}
+
+func (c *captureRenderer) Header(meta tui.RunMeta) error {
+	c.runFile = meta.RunFile
+	return c.Renderer.Header(meta)
+}
+
+// runIDFromPath extracts the run id from a run-record path (its basename minus
+// the .json extension). Returns "" for an empty path.
+func runIDFromPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	base := filepath.Base(p)
+	return base[:len(base)-len(filepath.Ext(base))]
+}
+
+// earliest returns the earlier of two instants, treating the zero time as
+// "unset" (so a real instant always wins over zero).
+func earliest(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero():
+		return a
+	case b.Before(a):
+		return b
+	default:
+		return a
+	}
+}

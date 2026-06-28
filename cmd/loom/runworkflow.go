@@ -67,7 +67,16 @@ func resolveSeed(wf *workflow.Workflow, plan seedPlan) (map[workflow.TaskID]bool
 // already-ok and tells the executor to skip them. The store's Close error is
 // reported independently so a write failure after a successful run does not
 // mask the nil return value.
-func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan) error {
+// provenance records what initiated a run so the store can distinguish a
+// scheduled run from a direct CLI invocation. It is threaded into the unified
+// pipeline as an optional trailing argument so the many existing runWorkflow
+// callers (and tests) stay unchanged; only the daemon supplies one.
+type provenance struct {
+	scheduleID  string
+	triggeredBy string
+}
+
+func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan, prov ...provenance) error {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
 	// only need the seeded set the executor will actually honor.
@@ -94,7 +103,11 @@ func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *
 		return err
 	}
 
-	_, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries)
+	var p provenance
+	if len(prov) > 0 {
+		p = prov[0]
+	}
+	_, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries, p)
 	return runErr
 }
 
@@ -103,12 +116,14 @@ func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *
 // `writes_state` outputs into state. state is read for substitution and
 // written back in place.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry) (rep *executor.Report, runErr error) {
+func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry, prov provenance) (rep *executor.Report, runErr error) {
 	run, err := store.Open(wf.ID, manifest, store.Config{
-		Root:    home,
-		Cwd:     cwd,
-		OnError: func(e error) { _, _ = fmt.Fprintf(w, "  store: %v\n", e) },
-		Params:  stringifyParams(resolved),
+		Root:        home,
+		Cwd:         cwd,
+		OnError:     func(e error) { _, _ = fmt.Fprintf(w, "  store: %v\n", e) },
+		Params:      stringifyParams(resolved),
+		ScheduleID:  prov.scheduleID,
+		TriggeredBy: prov.triggeredBy,
 	})
 	if err != nil {
 		return nil, err

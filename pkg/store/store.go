@@ -108,6 +108,12 @@ type Config struct {
 	// later resume can restore it before re-running shell tasks and relative
 	// paths. Empty means it is not recorded.
 	Cwd string
+	// ScheduleID links a run to the schedule that fired it; empty for a run
+	// launched directly from the CLI.
+	ScheduleID string
+	// TriggeredBy records what initiated the run ("cli" or "schedule"). Empty
+	// means it is not recorded.
+	TriggeredBy string
 }
 
 // Open creates a new run JSON file for workflowID under cfg.Root, seeded
@@ -148,13 +154,15 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 		clock:        now,
 		errorHandler: cfg.OnError,
 		state: RunRecord{
-			RunID:      id,
-			WorkflowID: string(workflowID),
-			StartedAt:  started,
-			Status:     StatusRunning,
-			Manifest:   string(manifest),
-			Params:     cfg.Params,
-			Cwd:        cfg.Cwd,
+			RunID:       id,
+			WorkflowID:  string(workflowID),
+			StartedAt:   started,
+			Status:      StatusRunning,
+			Manifest:    string(manifest),
+			Params:      cfg.Params,
+			Cwd:         cfg.Cwd,
+			ScheduleID:  cfg.ScheduleID,
+			TriggeredBy: cfg.TriggeredBy,
 		},
 		tasks: map[taskKey]int{},
 	}
@@ -408,19 +416,21 @@ func Load(path string) (*RunRecord, error) {
 // the store writes; a field rename here is a compile-time error at the call
 // site instead of a silent JSON decode miss.
 type RunRecord struct {
-	RunID      string            `json:"run_id"`
-	WorkflowID string            `json:"workflow_id"`
-	Cwd        string            `json:"cwd,omitempty"`
-	StartedAt  time.Time         `json:"started_at"`
-	FinishedAt time.Time         `json:"finished_at,omitzero"`
-	ElapsedMs  int64             `json:"elapsed_ms,omitempty"`
-	Status     string            `json:"status"`
-	Error      string            `json:"error,omitempty"`
-	TaskCount  int               `json:"task_count,omitempty"`
-	Usage      usageJSON         `json:"usage,omitzero"`
-	Manifest   string            `json:"manifest"`
-	Params     map[string]string `json:"params,omitempty"`
-	Tasks      []TaskRecord      `json:"tasks"`
+	RunID       string            `json:"run_id"`
+	WorkflowID  string            `json:"workflow_id"`
+	ScheduleID  string            `json:"schedule_id,omitempty"`
+	TriggeredBy string            `json:"triggered_by,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	StartedAt   time.Time         `json:"started_at"`
+	FinishedAt  time.Time         `json:"finished_at,omitzero"`
+	ElapsedMs   int64             `json:"elapsed_ms,omitempty"`
+	Status      string            `json:"status"`
+	Error       string            `json:"error,omitempty"`
+	TaskCount   int               `json:"task_count,omitempty"`
+	Usage       usageJSON         `json:"usage,omitzero"`
+	Manifest    string            `json:"manifest"`
+	Params      map[string]string `json:"params,omitempty"`
+	Tasks       []TaskRecord      `json:"tasks"`
 }
 
 // TaskRecord is the per-task entry within a [RunRecord]. Iteration is the
