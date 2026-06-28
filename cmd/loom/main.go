@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -44,7 +43,7 @@ func newRootCmd() *cobra.Command {
 		Short:        "Validate and run workflow YAML files",
 		SilenceUsage: true,
 	}
-	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd(), newWorkflowsCmd())
+	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd(), newWorkflowsCmd(), newScheduleCmd())
 	return root
 }
 
@@ -137,36 +136,8 @@ func check(r tui.Renderer, wf *workflow.Workflow, paramArgs []string, file map[s
 // doRun runs the shared check phase (validate + print the plan) and then, only
 // if it passes, executes the whole workflow fresh.
 func doRun(w io.Writer, path string, paramArgs []string) (err error) {
-	path, err = resolveWorkflowRef(path)
+	wf, manifest, _, err := loadWorkflow(path)
 	if err != nil {
-		return err
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	// Inline `prompt_file:` references relative to the workflow's directory, then
-	// parse the inlined bytes. The inlined manifest is what gets stored, so the
-	// run record stays self-contained even if the referenced files later change.
-	manifest, err := workflow.InlinePromptFiles(raw, filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	wf, err := workflow.Parse(manifest)
-	if err != nil {
-		return err
-	}
-	// Resolve and link any `workflow:` children from disk, then statically
-	// validate them, so a bad sub-workflow ref fails before any model call.
-	if err := linkSubWorkflows(wf, path, nil); err != nil {
-		return err
-	}
-	if err := checkSubWorkflows(wf); err != nil {
-		return err
-	}
-	// Parse is registry-free; run the routing check now that the registry is
-	// populated and children are linked (ValidateRouting recurses into wf.Subs).
-	if err := wf.ValidateRouting(); err != nil {
 		return err
 	}
 	// One renderer drives both phases (check's plan and runWorkflow's header,
