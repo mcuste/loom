@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/pkg/store"
-	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -137,20 +136,12 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	if err != nil {
 		return err
 	}
-	// Re-resolve and link sub-workflow children from disk at resume time, just as
-	// a fresh run does. selfPath is the parent's on-disk path when known
-	// (--resume-latest reads it from disk); for a stored-manifest resume it is
-	// empty, so path refs resolve relative to the (restored) working directory and
-	// registry-name refs through the cwd-based registry roots.
-	if err := linkSubWorkflows(wf, selfPath, nil); err != nil {
-		return err
-	}
-	if err := checkSubWorkflows(wf); err != nil {
-		return err
-	}
-	// Parse no longer touches the registry; validate routing here (recursing
-	// linked children) before the resumed run dispatches any task.
-	if err := wf.ValidateRouting(); err != nil {
+	// Re-resolve, link, and validate sub-workflow children from disk at resume
+	// time, just as a fresh run does. selfPath is the parent's on-disk path when
+	// known (--resume-latest reads it from disk); for a stored-manifest resume it
+	// is empty, so path refs resolve relative to the (restored) working directory
+	// and registry-name refs through the cwd-based registry roots.
+	if err := linkAndValidate(wf, selfPath); err != nil {
 		return err
 	}
 
@@ -181,17 +172,10 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// Run the shared check phase, annotating the plan with the seeded tasks,
 	// then execute. The record's params are the lower-precedence tier under any
 	// CLI overrides.
-	seeded, _ := resolveSeed(wf, plan)
-	// One renderer drives the resume's check phase and the run that follows, so a
-	// stateful renderer keeps a unified display across both. Its teardown error
-	// surfaces unless a prior error already won.
-	r := tui.New(w)
-	defer func() {
-		if cerr := r.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}()
-	resolved, _, err := check(r, wf, paramArgs, rec.Params, false, seeded)
+	seeded := resolveSeed(wf, plan).set
+	r, finish := newRenderer(w)
+	defer finish(&err)
+	resolved, err := check(r, wf, paramArgs, rec.Params, false, seeded)
 	if err != nil {
 		return err
 	}

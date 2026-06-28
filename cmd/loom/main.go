@@ -97,6 +97,24 @@ func addParamFlags(cmd *cobra.Command, params *[]string) {
 		"set a workflow parameter (repeatable), e.g. -p env=prod")
 }
 
+// newRenderer creates a renderer over w and returns it alongside a closer to
+// defer. The closer surfaces the renderer's teardown error through errp unless a
+// prior error already won, so a caller with a named return writes:
+//
+//	r, finish := newRenderer(w)
+//	defer finish(&err)
+//
+// One renderer drives a command's check phase and the run that follows, so a
+// stateful renderer can hold a unified display across both.
+func newRenderer(w io.Writer) (tui.Renderer, func(*error)) {
+	r := tui.New(w)
+	return r, func(errp *error) {
+		if cerr := r.Close(); cerr != nil && *errp == nil {
+			*errp = cerr
+		}
+	}
+}
+
 // check is the validation phase shared by `loom check` and `loom run`: it
 // parses the CLI params, resolves them against wf, and prints the execution
 // plan. Routing `run` through it is what makes "run does a check first" true --
@@ -106,31 +124,31 @@ func addParamFlags(cmd *cobra.Command, params *[]string) {
 // warning so `loom check` doubles as a "what params does this workflow need?"
 // probe; `loom run` passes false so the same case is a hard failure. seeded
 // annotates the plan with carried-over tasks on resume. It returns the resolved
-// params (and CLI param map) for the caller to execute with.
-func check(r tui.Renderer, wf *workflow.Workflow, paramArgs []string, file map[string]string, advisory bool, seeded map[workflow.TaskID]bool) (workflow.ParamValues, map[string]string, error) {
+// params for the caller to execute with.
+func check(r tui.Renderer, wf *workflow.Workflow, paramArgs []string, file map[string]string, advisory bool, seeded map[workflow.TaskID]bool) (workflow.ParamValues, error) {
 	cliParams, err := workflow.ParseParamArgs(paramArgs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	resolved, err := workflow.ResolveParams(wf, cliParams, file)
 	if err != nil {
 		var miss *workflow.MissingRequiredParamError
 		if !advisory || !errors.As(err, &miss) {
-			return nil, nil, err
+			return nil, err
 		}
 		// Route the advisory through the renderer so every stdout byte flows
 		// through the seam, not around it.
 		if werr := r.Warn(fmt.Sprintf("required param %q not supplied", miss.Name)); werr != nil {
-			return nil, nil, werr
+			return nil, werr
 		}
 		// Rebuild a partial bag so MISSING entries still surface in the printed
 		// plan rather than the section truncating silently.
 		resolved = partialResolved(wf, cliParams)
 	}
 	if err := r.Plan(wf, resolved, cliParams, seeded); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return resolved, cliParams, nil
+	return resolved, nil
 }
 
 // doRun runs the shared check phase (validate + print the plan) and then, only
@@ -140,16 +158,9 @@ func doRun(w io.Writer, path string, paramArgs []string) (err error) {
 	if err != nil {
 		return err
 	}
-	// One renderer drives both phases (check's plan and runWorkflow's header,
-	// progress, and summary) so a stateful renderer can hold a unified display
-	// across them. Its teardown error surfaces unless a prior error already won.
-	r := tui.New(w)
-	defer func() {
-		if cerr := r.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}()
-	resolved, _, err := check(r, wf, paramArgs, nil, false, nil)
+	r, finish := newRenderer(w)
+	defer finish(&err)
+	resolved, err := check(r, wf, paramArgs, nil, false, nil)
 	if err != nil {
 		return err
 	}
@@ -174,24 +185,14 @@ func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := linkSubWorkflows(wf, path, nil); err != nil {
+	// ParseFile validated the top-level routing; linkAndValidate re-runs it after
+	// linking so any sub-workflow children are checked too.
+	if err := linkAndValidate(wf, path); err != nil {
 		return err
 	}
-	if err := checkSubWorkflows(wf); err != nil {
-		return err
-	}
-	// ParseFile validated the top-level routing; re-run after linking so any
-	// sub-workflow children are checked too (ValidateRouting recurses wf.Subs).
-	if err := wf.ValidateRouting(); err != nil {
-		return err
-	}
-	r := tui.New(w)
-	defer func() {
-		if cerr := r.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}()
-	_, _, err = check(r, wf, paramArgs, nil, true, nil)
+	r, finish := newRenderer(w)
+	defer finish(&err)
+	_, err = check(r, wf, paramArgs, nil, true, nil)
 	return err
 }
 

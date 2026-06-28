@@ -38,25 +38,50 @@ type seedEntry struct {
 	exitCode int
 }
 
-// resolveSeed reduces a seedPlan to the set and per-task entries the run will
-// actually honor, dropping ids no longer present in the current workflow. An
-// id that no longer resolves cannot be re-gated, stamped, or skipped, so
-// dropping it here keeps the plan annotation, the stamped record, and the
-// executor's task count consistent. A zero plan yields nil maps.
-func resolveSeed(wf *workflow.Workflow, plan seedPlan) (map[workflow.TaskID]bool, map[workflow.TaskID]seedEntry) {
+// resolvedSeed is the seed material a run actually honors. seed is the per-task
+// output fed verbatim to executor.Options.Seed; set is the id set the executor
+// skips and the plan annotates; entries is the per-task material stamped into
+// the fresh run record. set and entries are filtered to ids still present in the
+// current workflow, while seed is carried verbatim. A zero value (all nil) marks
+// a plain run.
+type resolvedSeed struct {
+	seed    map[workflow.TaskID]string
+	set     map[workflow.TaskID]bool
+	entries map[workflow.TaskID]seedEntry
+}
+
+// resolveSeed reduces a seedPlan to the seed material the run will actually
+// honor, dropping ids no longer present in the current workflow from set and
+// entries. An id that no longer resolves cannot be re-gated, stamped, or
+// skipped, so dropping it here keeps the plan annotation, the stamped record,
+// and the executor's task count consistent. A zero plan yields a zero
+// resolvedSeed.
+func resolveSeed(wf *workflow.Workflow, plan seedPlan) resolvedSeed {
 	if len(plan.seed) == 0 {
-		return nil, nil
+		return resolvedSeed{}
 	}
-	set := make(map[workflow.TaskID]bool, len(plan.seed))
-	entries := make(map[workflow.TaskID]seedEntry, len(plan.entries))
+	rs := resolvedSeed{
+		seed:    plan.seed,
+		set:     make(map[workflow.TaskID]bool, len(plan.seed)),
+		entries: make(map[workflow.TaskID]seedEntry, len(plan.entries)),
+	}
 	for _, s := range plan.entries {
 		if wf.ByID(s.id) == nil {
 			continue
 		}
-		entries[s.id] = s
-		set[s.id] = true
+		rs.entries[s.id] = s
+		rs.set[s.id] = true
 	}
-	return set, entries
+	return rs
+}
+
+// runContext carries the on-disk roots a single run is recorded against: the
+// resolved LOOM_HOME, the cwd the run was launched from, and the inlined
+// manifest the store persists.
+type runContext struct {
+	home     string
+	cwd      string
+	manifest []byte
 }
 
 // runWorkflow is the unified run pipeline shared by doRun and runFromRecord.
@@ -79,8 +104,8 @@ type provenance struct {
 func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan, prov ...provenance) error {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
-	// only need the seeded set the executor will actually honor.
-	seededSet, seededEntries := resolveSeed(wf, plan)
+	// only need the seed material the executor will actually honor.
+	rs := resolveSeed(wf, plan)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -107,7 +132,8 @@ func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *
 	if len(prov) > 0 {
 		p = prov[0]
 	}
-	_, runErr := runOnce(ctx, r, w, home, cwd, manifest, wf, resolved, state, plan.seed, seededSet, seededEntries, p)
+	rc := runContext{home: home, cwd: cwd, manifest: manifest}
+	_, runErr := runOnce(ctx, r, w, rc, wf, resolved, state, rs, p)
 	return runErr
 }
 
@@ -116,10 +142,10 @@ func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *
 // `writes_state` outputs into state. state is read for substitution and
 // written back in place.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, seed map[workflow.TaskID]string, seededSet map[workflow.TaskID]bool, seededEntries map[workflow.TaskID]seedEntry, prov provenance) (rep *executor.Report, runErr error) {
-	run, err := store.Open(wf.ID, manifest, store.Config{
-		Root:        home,
-		Cwd:         cwd,
+func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, rs resolvedSeed, prov provenance) (rep *executor.Report, runErr error) {
+	run, err := store.Open(wf.ID, rc.manifest, store.Config{
+		Root:        rc.home,
+		Cwd:         rc.cwd,
 		OnError:     func(e error) { _, _ = fmt.Fprintf(w, "  store: %v\n", e) },
 		Params:      stringifyParams(resolved),
 		ScheduleID:  prov.scheduleID,
@@ -143,11 +169,11 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 	// The renderer is owned by the caller (doRun / runFromRecord), so runOnce
 	// neither creates nor closes it. Header resets the progress counter and
 	// records the denominator.
-	expected := len(wf.Tasks) - len(seededSet)
+	expected := len(wf.Tasks) - len(rs.set)
 	if err := r.Header(tui.RunMeta{
 		RunFile: run.Path(),
-		Cwd:     cwd,
-		Seeded:  len(seededSet),
+		Cwd:     rc.cwd,
+		Seeded:  len(rs.set),
 		Total:   expected,
 	}); err != nil {
 		return nil, err
@@ -160,11 +186,11 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 	// reused for the executor below so the run is never double-wrapped.
 	// Suppressed entirely on a plain run so its output stays byte-identical.
 	sh := storeHooks(run)
-	if len(seededSet) > 0 {
+	if len(rs.set) > 0 {
 		// Stamp in topological (plan) order so a seeded task is never recorded
 		// before a seeded dependency it relies on.
 		for _, id := range wf.Plan() {
-			s, ok := seededEntries[id]
+			s, ok := rs.entries[id]
 			if !ok {
 				continue
 			}
@@ -198,9 +224,9 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 	// exit code for every completed task: a seeded clean-exit script must resolve
 	// to "0", not be left verbatim as an unknown reference.
 	var seedExit map[workflow.TaskID]int
-	if len(seededEntries) > 0 {
-		seedExit = make(map[workflow.TaskID]int, len(seededEntries))
-		for id, s := range seededEntries {
+	if len(rs.entries) > 0 {
+		seedExit = make(map[workflow.TaskID]int, len(rs.entries))
+		for id, s := range rs.entries {
 			seedExit[id] = s.exitCode
 		}
 	}
@@ -208,7 +234,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
 		sh,
-	), executor.Options{Params: resolved, Seed: seed, SeedExitCodes: seedExit, State: state})
+	), executor.Options{Params: resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: state})
 	if rep != nil {
 		// A summary write error does not mask a real run failure: surface it only
 		// when the run itself otherwise succeeded.
@@ -219,7 +245,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, home, cwd string,
 		// output under the named key. Only completed tasks appear in
 		// rep.Outputs, so a partial run carries over what it managed to produce.
 		if persistState(state, wf, rep) {
-			if err := store.SaveState(home, wf.ID, state); err != nil {
+			if err := store.SaveState(rc.home, wf.ID, state); err != nil {
 				_, _ = fmt.Fprintf(w, "  store: %v\n", err)
 			}
 		}
