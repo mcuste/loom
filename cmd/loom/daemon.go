@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -40,7 +38,7 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, stop := interruptContext()
 			defer stop()
 			d := newDaemon(home, cmd.OutOrStdout())
 			return d.run(ctx)

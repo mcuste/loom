@@ -14,7 +14,10 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -37,4 +40,11 @@ func newRootCmd() *cobra.Command {
 	}
 	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd(), newWorkflowsCmd(), newScheduleCmd(), newDaemonCmd())
 	return root
+}
+
+// interruptContext returns a context cancelled on the first SIGINT or SIGTERM,
+// the shared graceful-shutdown signal for the run pipeline (runWorkflow) and the
+// scheduler daemon. The returned stop must be deferred to release the handler.
+func interruptContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
