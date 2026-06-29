@@ -237,10 +237,9 @@ tasks:
     depends_on: [a]
     prompt: "got: {{a}}"
 `
+	// writeWorkflow returns an absolute path under its own TempDir, so the run
+	// finds it regardless of the cwd we chdir'd into above.
 	wfPath := writeWorkflow(t, wfBody)
-	// writeWorkflow uses its own TempDir; copy into the cwd so the run still
-	// finds the workflow file via the supplied path.
-	_ = wfPath // path is absolute so cwd is irrelevant.
 
 	runID := "20260101T000000Z-cccccc"
 	writeRunRecord(t, "wf", runID, wfBody, []map[string]any{
@@ -276,19 +275,8 @@ func TestResumeCommand_DropsSeedForIDsRemovedFromWorkflow(t *testing.T) {
 	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
-	// Original record has `a` (ok) and `b` (failed, depended on `a`); the
-	// current workflow has only `b` and it depends on nothing.
-	origManifest := `name: wf
-model: m1
-tasks:
-  - id: a
-    runtime: cmd-echo
-    prompt: x
-  - id: b
-    runtime: cmd-echo
-    depends_on: [a]
-    prompt: "saw {{a}}"
-`
+	// The original run had `a` (ok) and `b` (failed, depended on `a`); the
+	// current workflow below has only `b`, and it depends on nothing.
 	currentManifest := `name: wf
 model: m1
 tasks:
@@ -303,7 +291,6 @@ tasks:
 		{"id": "a", "status": "ok", "output": "stored-a"},
 		{"id": "b", "status": "failed", "error": "kaboom"},
 	}, nil)
-	_ = origManifest
 
 	var buf bytes.Buffer
 	root := newRootCmd()
