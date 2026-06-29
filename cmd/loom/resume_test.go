@@ -15,6 +15,15 @@ import (
 // are used by the seeding logic, so the test passes only those.
 func writeRunRecord(t *testing.T, wfID, runID, manifest string, tasks []map[string]any, params map[string]string) string {
 	t.Helper()
+	return writeRunRecordFull(t, wfID, runID, manifest, "", tasks, params)
+}
+
+// writeRunRecordFull is the underlying record builder: it drops a synthetic
+// failed run record under the test's runs root, adding the optional `cwd` and
+// `params` fields only when non-empty. writeRunRecord and writeRunRecordWithCwd
+// are the thin wrappers callers use.
+func writeRunRecordFull(t *testing.T, wfID, runID, manifest, cwd string, tasks []map[string]any, params map[string]string) string {
+	t.Helper()
 	dir := filepath.Join(testRunsDir(t), wfID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir runs: %v", err)
@@ -26,6 +35,9 @@ func writeRunRecord(t *testing.T, wfID, runID, manifest string, tasks []map[stri
 		"status":      "failed",
 		"manifest":    manifest,
 		"tasks":       tasks,
+	}
+	if cwd != "" {
+		rec["cwd"] = cwd
 	}
 	if params != nil {
 		rec["params"] = params
@@ -362,31 +374,10 @@ tasks:
 	}
 }
 
-// writeRunRecordWithCwd drops a synthetic run record under the test's runs
-// root with an explicit `cwd` field, used by the resume-chdir test. It mirrors
-// writeRunRecord but adds the cwd the original run was invoked from.
+// writeRunRecordWithCwd drops a synthetic run record carrying an explicit `cwd`
+// field, used by the resume-chdir test to pin the directory the original run
+// was invoked from.
 func writeRunRecordWithCwd(t *testing.T, wfID, runID, manifest, cwd string, tasks []map[string]any) string {
 	t.Helper()
-	dir := filepath.Join(testRunsDir(t), wfID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir runs: %v", err)
-	}
-	rec := map[string]any{
-		"run_id":      runID,
-		"workflow_id": wfID,
-		"started_at":  "2026-06-09T14:30:52Z",
-		"status":      "failed",
-		"manifest":    manifest,
-		"cwd":         cwd,
-		"tasks":       tasks,
-	}
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal record: %v", err)
-	}
-	path := filepath.Join(dir, runID+".json")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write record: %v", err)
-	}
-	return path
+	return writeRunRecordFull(t, wfID, runID, manifest, cwd, tasks, nil)
 }
