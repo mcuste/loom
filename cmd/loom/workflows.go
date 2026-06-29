@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -285,8 +284,15 @@ func walkRegistry(root string) ([]workflowRef, error) {
 	if walkErr != nil {
 		return nil, walkErr
 	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].name < refs[j].name })
+	sortRefsByName(refs)
 	return refs, nil
+}
+
+// sortRefsByName orders refs by colon-name in place. Both walkRegistry and
+// walkRegistries sort by the same key; centralizing it keeps the two ordering
+// rules from drifting.
+func sortRefsByName(refs []workflowRef) {
+	slices.SortFunc(refs, func(a, b workflowRef) int { return strings.Compare(a.name, b.name) })
 }
 
 // walkRegistries walks each root in order via walkRegistry, merging the results
@@ -309,7 +315,7 @@ func walkRegistries(roots []string) ([]workflowRef, error) {
 			refs = append(refs, r)
 		}
 	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].name < refs[j].name })
+	sortRefsByName(refs)
 	return refs, nil
 }
 

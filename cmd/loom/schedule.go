@@ -150,7 +150,7 @@ func doScheduleCron(w io.Writer, ref, expr, tz, overlap string, catchup bool, pa
 	default:
 		return fmt.Errorf("invalid --overlap %q: want skip, queue, or allow", overlap)
 	}
-	wf, _, path, params, err := loadAndResolve(ref, paramArgs)
+	wf, path, params, err := loadAndResolve(ref, paramArgs)
 	if err != nil {
 		return err
 	}
@@ -182,7 +182,7 @@ func doScheduleAt(w io.Writer, ref, timeStr, dateStr, tz string, catchup bool, p
 	if err != nil {
 		return err
 	}
-	wf, _, path, params, err := loadAndResolve(ref, paramArgs)
+	wf, path, params, err := loadAndResolve(ref, paramArgs)
 	if err != nil {
 		return err
 	}
@@ -226,22 +226,22 @@ func parseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time) (ti
 // CLI-supplied param map (not the defaults) so the daemon resolves fresh
 // against the then-current workflow at fire time. ResolveParams is still called
 // here to reject a missing required param up front.
-func loadAndResolve(ref string, paramArgs []string) (*workflow.Workflow, []byte, string, map[string]string, error) {
-	wf, manifest, path, err := loadWorkflow(ref)
+func loadAndResolve(ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
+	wf, _, path, err := loadWorkflow(ref)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return nil, "", nil, err
 	}
 	cliParams, err := workflow.ParseParamArgs(paramArgs)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return nil, "", nil, err
 	}
 	if _, err := workflow.ResolveParams(wf, cliParams, nil); err != nil {
-		return nil, nil, "", nil, err
+		return nil, "", nil, err
 	}
 	if len(cliParams) == 0 {
 		cliParams = nil
 	}
-	return wf, manifest, path, cliParams, nil
+	return wf, path, cliParams, nil
 }
 
 func addAndReport(w io.Writer, rec schedule.Record) error {
