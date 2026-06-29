@@ -44,13 +44,15 @@ func loomHomeForTest(t *testing.T) string {
 	return dir
 }
 
-// testRunsDir returns the runs root the store writes under: $LOOM_HOME/runs
-// when LOOM_HOME is set (every e2e test sets it via loomHomeForTest), else the
-// legacy ./.loom/runs fallback so helpers still work in tests that don't.
+// testRunsDir returns the runs root the store writes under, resolved through
+// the same loomHome() the production commands use rather than re-deriving the
+// $LOOM_HOME rule here. Every caller sets LOOM_HOME via loomHomeForTest, so
+// this stays inside the test's temp home.
 func testRunsDir(t *testing.T) string {
 	t.Helper()
-	if home := os.Getenv("LOOM_HOME"); home != "" {
-		return filepath.Join(home, "runs")
+	home, err := loomHome()
+	if err != nil {
+		t.Fatalf("loomHome: %v", err)
 	}
-	return filepath.Join(".loom", "runs")
+	return filepath.Join(home, "runs")
 }
