@@ -20,24 +20,30 @@ func absPath(p string) string {
 	return p
 }
 
+// triggerCommon holds the schedule flags shared by `schedule cron` and
+// `schedule at`: the timezone the trigger is interpreted in, the catch-up
+// policy, and the repeatable -p params. Embedded into cronOpts and atOpts so the
+// clump is declared (and flag-bound) once.
+type triggerCommon struct {
+	tz        string
+	catchup   bool
+	paramArgs []string
+}
+
 // cronOpts bundles the trigger-shaping flags of `schedule cron` so the handler
 // takes the clump as one unit rather than a long positional list.
 type cronOpts struct {
-	expr      string
-	tz        string
-	overlap   string
-	catchup   bool
-	paramArgs []string
+	triggerCommon
+	expr    string
+	overlap string
 }
 
 // atOpts bundles the trigger-shaping flags of `schedule at` so the handler
 // takes the clump as one unit rather than a long positional list.
 type atOpts struct {
-	timeStr   string
-	dateStr   string
-	tz        string
-	catchup   bool
-	paramArgs []string
+	triggerCommon
+	timeStr string
+	dateStr string
 }
 
 // baseRecord builds the trigger-independent fields shared by `schedule cron`,
