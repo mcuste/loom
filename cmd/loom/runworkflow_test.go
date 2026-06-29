@@ -76,7 +76,6 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	plan := seedPlan{
-		seed:    map[workflow.TaskID]string{"a": "stored-a"},
 		entries: []seedEntry{{id: "a", prompt: "would-fail-if-rerun", output: "stored-a"}},
 	}
 
@@ -111,7 +110,6 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	plan := seedPlan{
-		seed:    map[workflow.TaskID]string{"a": "stored-a"},
 		entries: []seedEntry{{id: "a", prompt: "would-fail-if-rerun", output: "stored-a"}},
 	}
 
@@ -156,7 +154,6 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	plan := seedPlan{
-		seed:    map[workflow.TaskID]string{"a": "stored-a"},
 		entries: []seedEntry{{id: "a", prompt: "would-fail-if-rerun", output: "stored-a"}},
 	}
 
@@ -205,7 +202,6 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	plan := seedPlan{
-		seed:    map[workflow.TaskID]string{"a": "stored-a"},
 		entries: []seedEntry{{id: "a", prompt: "would-fail-if-rerun", output: "stored-a"}},
 	}
 
@@ -239,7 +235,6 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	plan := seedPlan{
-		seed:    map[workflow.TaskID]string{"ghost": "stored-ghost"},
 		entries: []seedEntry{{id: "ghost", prompt: "p", output: "stored-ghost"}},
 	}
 

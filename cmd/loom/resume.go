@@ -134,23 +134,16 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 		return err
 	}
 
-	inWorkflow := make(map[workflow.TaskID]bool, len(wf.Tasks))
-	for i := range wf.Tasks {
-		inWorkflow[wf.Tasks[i].ID] = true
-	}
-
-	plan := seedPlan{seed: make(map[workflow.TaskID]string, len(rec.Tasks))}
+	// Seed every ok task from the record unfiltered; resolveSeed is the single
+	// authority that drops ids no longer present in the current workflow (the
+	// executor ignores Seed keys with no matching task).
+	var plan seedPlan
 	for _, t := range rec.Tasks {
 		if t.Status != store.StatusOK {
 			continue
 		}
-		tid := workflow.TaskID(t.ID)
-		if !inWorkflow[tid] {
-			continue
-		}
-		plan.seed[tid] = t.Output
 		plan.entries = append(plan.entries, seedEntry{
-			id:       tid,
+			id:       workflow.TaskID(t.ID),
 			prompt:   t.Prompt,
 			command:  t.Command,
 			output:   t.Output,
