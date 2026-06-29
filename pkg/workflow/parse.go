@@ -505,6 +505,10 @@ func ParseFile(path string) (*Workflow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	inlined, err = AnchorScriptPaths(inlined, filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	wf, err := Parse(inlined)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -567,6 +571,70 @@ func InlinePromptFiles(data []byte, baseDir string) ([]byte, error) {
 		return nil, fmt.Errorf("yaml: %w", err)
 	}
 	return out, nil
+}
+
+// AnchorScriptPaths rewrites every task's relative `script:` path to an absolute
+// path anchored at baseDir, so a script task resolves to the same file no matter
+// what directory loom runs in: a fresh run, a `check`, a resume that restored a
+// different cwd, or a daemon reload. Without it a relative `script:` would be
+// resolved against the process cwd at exec time, which is both surprising and
+// not portable.
+//
+// It is the script analogue of InlinePromptFiles: the rewrite is baked into the
+// returned bytes, so the persisted manifest stays self-contained and every later
+// Parse of those bytes (including a stored-manifest resume that has no baseDir)
+// agrees on the path.
+//
+// Only plain relative paths are anchored. An absolute path is left as-is, and a
+// path carrying a `{{...}}` template is left untouched so a dynamically built
+// path is resolved against the run's cwd after substitution rather than having
+// baseDir prepended to a half-formed value. Like InlinePromptFiles it
+// short-circuits with no YAML round-trip when the raw bytes contain no `script`
+// token.
+func AnchorScriptPaths(data []byte, baseDir string) ([]byte, error) {
+	if !bytes.Contains(data, []byte("script")) {
+		return data, nil
+	}
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	anchorScriptNodes(&doc, absBase)
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	return out, nil
+}
+
+// anchorScriptNodes recurses the node tree, anchoring the value of every
+// `script:` key it finds against baseDir (already made absolute by the caller).
+// Walking the whole tree (not just top-level tasks) means a `script:` inside a
+// nested loop or for_each body is anchored the same way.
+func anchorScriptNodes(n *yaml.Node, baseDir string) {
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			if k.Kind != yaml.ScalarNode || k.Value != "script" || v.Kind != yaml.ScalarNode {
+				continue
+			}
+			if s := v.Value; s != "" && !filepath.IsAbs(s) && !strings.Contains(s, "{{") {
+				v.Value = filepath.Join(baseDir, s)
+			}
+		}
+		// Keys are scalars that never hold a nested body, so recurse into values only.
+		for i := 1; i < len(n.Content); i += 2 {
+			anchorScriptNodes(n.Content[i], baseDir)
+		}
+		return
+	}
+	for _, c := range n.Content {
+		anchorScriptNodes(c, baseDir)
+	}
 }
 
 // inlineSystemPromptFile rewrites a top-level `system_prompt_file:` key into an

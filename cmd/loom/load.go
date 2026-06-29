@@ -48,6 +48,14 @@ func readAndParse(path string) (*workflow.Workflow, []byte, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
+	// Anchor relative `script:` paths to absolute paths in the manifest so the
+	// stored, self-contained manifest resolves the same script no matter the cwd
+	// at run, resume, or daemon-reload time (the analogue of inlining prompt_file
+	// content above).
+	manifest, err = workflow.AnchorScriptPaths(manifest, filepath.Dir(path))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
 	wf, err := workflow.Parse(manifest)
 	if err != nil {
 		return nil, nil, err
