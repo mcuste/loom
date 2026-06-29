@@ -49,12 +49,21 @@ func runWorkflowsLs(t *testing.T) string {
 // rowWithName reports whether any listing row's name column (first field) equals
 // name exactly, so a test can assert presence without matching the path column.
 func rowWithName(out, name string) bool {
+	return countRowsWithName(out, name) > 0
+}
+
+// countRowsWithName counts the listing rows whose name column (first field)
+// equals name exactly. Scoping to the name column matters because the resolved-
+// path column also contains the stem (e.g. "both.yaml"), so a raw substring
+// count would over-count.
+func countRowsWithName(out, name string) int {
+	rows := 0
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if f := strings.Fields(line); len(f) > 0 && f[0] == name {
-			return true
+			rows++
 		}
 	}
-	return false
+	return rows
 }
 
 // TestWorkflowsLsDedupsYamlOverYml pins that `loom workflows ls` collapses a
@@ -66,15 +75,7 @@ func TestWorkflowsLsDedupsYamlOverYml(t *testing.T) {
 	writeRegistryWF(t, home, "both.yml")
 
 	out := runWorkflowsLs(t)
-	// Count rows whose name column is exactly "both"; the resolved-path column
-	// also contains "both.yaml", so a raw substring count would over-count.
-	rows := 0
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == "both" {
-			rows++
-		}
-	}
-	if rows != 1 {
+	if rows := countRowsWithName(out, "both"); rows != 1 {
 		t.Errorf("listing should dedup colliding stem to one name; got %d rows:\n%s", rows, out)
 	}
 }
@@ -201,15 +202,7 @@ func TestWorkflowsLsMergesLocalAndGlobal(t *testing.T) {
 			t.Errorf("listing missing merged name %q; got:\n%s", want, out)
 		}
 	}
-	// Count rows whose name column is exactly "shadow"; the resolved-path column
-	// now also contains "shadow.yaml", so a raw substring count would double it.
-	shadowRows := 0
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == "shadow" {
-			shadowRows++
-		}
-	}
-	if shadowRows != 1 {
+	if shadowRows := countRowsWithName(out, "shadow"); shadowRows != 1 {
 		t.Errorf("shadowed name should list once; got %d rows:\n%s", shadowRows, out)
 	}
 	if !strings.Contains(out, "LOCAL-DESC") {
