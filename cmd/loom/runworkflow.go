@@ -84,28 +84,41 @@ type runContext struct {
 	manifest []byte
 }
 
-// runWorkflow is the unified run pipeline shared by doRun and runFromRecord.
-// It parses nothing itself; callers hand it the already-parsed workflow and
-// resolved params after the check phase has already validated and printed the
-// plan. plan carries the optional seed: a zero plan runs the whole workflow,
-// while a non-empty plan stamps each seeded task into the fresh run record as
-// already-ok and tells the executor to skip them. The store's Close error is
-// reported independently so a write failure after a successful run does not
-// mask the nil return value.
 // provenance records what initiated a run so the store can distinguish a
-// scheduled run from a direct CLI invocation. It is threaded into the unified
-// pipeline as an optional trailing argument so the many existing runWorkflow
-// callers (and tests) stay unchanged; only the daemon supplies one.
+// scheduled run from a direct CLI invocation. A zero value marks a direct CLI
+// run; only the daemon supplies one.
 type provenance struct {
 	scheduleID  string
 	triggeredBy string
 }
 
-func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *workflow.Workflow, resolved workflow.ParamValues, plan seedPlan, prov ...provenance) error {
+// runRequest bundles everything the unified run pipeline consumes: the parsed
+// workflow and its inlined manifest, the resolved params, the resolved
+// LOOM_HOME, the optional seed plan, and the provenance. wf, manifest, and
+// resolved arrive together from the check phase, so grouping them keeps the
+// pipeline signature stable. A zero plan and zero prov mark a plain direct run.
+type runRequest struct {
+	wf       *workflow.Workflow
+	manifest []byte
+	resolved workflow.ParamValues
+	home     string
+	plan     seedPlan
+	prov     provenance
+}
+
+// runWorkflow is the unified run pipeline shared by doRun, runFromRecord, and
+// the daemon. It parses nothing itself; callers hand it the already-parsed
+// workflow and resolved params after the check phase has already validated and
+// printed the plan. req.plan carries the optional seed: a zero plan runs the
+// whole workflow, while a non-empty plan stamps each seeded task into the fresh
+// run record as already-ok and tells the executor to skip them. The store's
+// Close error is reported independently so a write failure after a successful
+// run does not mask the nil return value.
+func runWorkflow(r tui.Renderer, w io.Writer, req runRequest) error {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
 	// only need the seed material the executor will actually honor.
-	rs := resolveSeed(wf, plan)
+	rs := resolveSeed(req.wf, req.plan)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -123,17 +136,13 @@ func runWorkflow(r tui.Renderer, w io.Writer, home string, manifest []byte, wf *
 	// Load cross-run state once. Each run substitutes `{{state.key}}` from it
 	// and folds its `writes_state` outputs back in. A missing file yields an
 	// empty map.
-	state, err := store.LoadState(home, wf.ID)
+	state, err := store.LoadState(req.home, req.wf.ID)
 	if err != nil {
 		return err
 	}
 
-	var p provenance
-	if len(prov) > 0 {
-		p = prov[0]
-	}
-	rc := runContext{home: home, cwd: cwd, manifest: manifest}
-	_, runErr := runOnce(ctx, r, w, rc, wf, resolved, state, rs, p)
+	rc := runContext{home: req.home, cwd: cwd, manifest: req.manifest}
+	_, runErr := runOnce(ctx, r, w, rc, req.wf, req.resolved, state, rs, req.prov)
 	return runErr
 }
 
@@ -179,57 +188,10 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 		return nil, err
 	}
 
-	// Stamp each seeded task into the new run record as an already-ok entry so
-	// a future resume of this run can find them. The executor fires no hooks
-	// for seeded tasks (by design), so drive the store hooks directly here,
-	// mimicking what the executor would have done. The same Hooks instance is
-	// reused for the executor below so the run is never double-wrapped.
-	// Suppressed entirely on a plain run so its output stays byte-identical.
+	// One store-hooks instance drives both the seeded-task stamping and the
+	// executor below, so the run is never double-wrapped.
 	sh := storeHooks(run)
-	if len(rs.set) > 0 {
-		// Stamp in topological (plan) order so a seeded task is never recorded
-		// before a seeded dependency it relies on.
-		for _, id := range wf.Plan() {
-			s, ok := rs.entries[id]
-			if !ok {
-				continue
-			}
-			t := wf.ByID(id)
-			if t == nil {
-				continue
-			}
-			if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
-				// Shell, script, and sub-workflow tasks have no runtime of their own
-				// (a sub-workflow's child brings its own), so they seed with empty
-				// runtime metadata, matching the ("", "", "") OnStart that runTask
-				// fires for them.
-				sh.OnStart(*t, 0, "", "", "")
-			} else {
-				rt, m, e := wf.Effective(t)
-				sh.OnStart(*t, 0, rt, m, e)
-			}
-			sh.OnFinish(*t, 0, executor.TaskResult{
-				TaskID:   id,
-				Prompt:   s.prompt,
-				Command:  s.command,
-				Output:   s.output,
-				ExitCode: s.exitCode,
-			}, nil)
-		}
-	}
-
-	// Carry seeded exit codes into the run so a resumed downstream task's
-	// `{{id.exit}}` resolves to the recorded code. Every seeded task is recorded
-	// (not just non-zero ones), mirroring a fresh run where recordResult stores an
-	// exit code for every completed task: a seeded clean-exit script must resolve
-	// to "0", not be left verbatim as an unknown reference.
-	var seedExit map[workflow.TaskID]int
-	if len(rs.entries) > 0 {
-		seedExit = make(map[workflow.TaskID]int, len(rs.entries))
-		for id, s := range rs.entries {
-			seedExit[id] = s.exitCode
-		}
-	}
+	seedExit := stampSeeded(sh, wf, rs)
 
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
@@ -251,6 +213,59 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 		}
 	}
 	return rep, runErr
+}
+
+// stampSeeded records each seeded task into the new run record as an already-ok
+// entry (via the store hooks sh) so a future resume of this run can find them.
+// The executor fires no hooks for seeded tasks by design, so this mimics what it
+// would have done. It returns the per-task exit codes to feed the executor as
+// SeedExitCodes; both are empty on a plain run, so its output stays
+// byte-identical. sh is the same hooks instance the executor reuses, so the run
+// is never double-wrapped.
+func stampSeeded(sh executor.Hooks, wf *workflow.Workflow, rs resolvedSeed) map[workflow.TaskID]int {
+	// Stamp in topological (plan) order so a seeded task is never recorded
+	// before a seeded dependency it relies on.
+	for _, id := range wf.Plan() {
+		s, ok := rs.entries[id]
+		if !ok {
+			continue
+		}
+		t := wf.ByID(id)
+		if t == nil {
+			continue
+		}
+		if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
+			// Shell, script, and sub-workflow tasks have no runtime of their own
+			// (a sub-workflow's child brings its own), so they seed with empty
+			// runtime metadata, matching the ("", "", "") OnStart that runTask
+			// fires for them.
+			sh.OnStart(*t, 0, "", "", "")
+		} else {
+			rt, m, e := wf.Effective(t)
+			sh.OnStart(*t, 0, rt, m, e)
+		}
+		sh.OnFinish(*t, 0, executor.TaskResult{
+			TaskID:   id,
+			Prompt:   s.prompt,
+			Command:  s.command,
+			Output:   s.output,
+			ExitCode: s.exitCode,
+		}, nil)
+	}
+
+	// Carry seeded exit codes into the run so a resumed downstream task's
+	// `{{id.exit}}` resolves to the recorded code. Every seeded task is recorded
+	// (not just non-zero ones), mirroring a fresh run where recordResult stores an
+	// exit code for every completed task: a seeded clean-exit script must resolve
+	// to "0", not be left verbatim as an unknown reference.
+	if len(rs.entries) == 0 {
+		return nil
+	}
+	seedExit := make(map[workflow.TaskID]int, len(rs.entries))
+	for id, s := range rs.entries {
+		seedExit[id] = s.exitCode
+	}
+	return seedExit
 }
 
 // persistState folds each `writes_state` task's trimmed output into state and

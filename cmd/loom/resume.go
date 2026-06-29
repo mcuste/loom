@@ -71,19 +71,11 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	}
 	// The YAML path arg is relative to the CURRENT cwd, so read and parse the
 	// manifest BEFORE any chdir; otherwise a relative path would resolve against
-	// the recorded dir and miss the file the user pointed at.
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	// Inline `prompt_file:` references relative to the workflow's directory (still
-	// the current cwd, before any chdir) so the resumed run stores and replays the
-	// same self-contained manifest as a fresh run.
-	manifest, err := workflow.InlinePromptFiles(raw, filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	wf, err := workflow.Parse(manifest)
+	// the recorded dir and miss the file the user pointed at. readAndParse inlines
+	// `prompt_file:` refs relative to the workflow's directory (still the current
+	// cwd here) so the resumed run stores and replays the same self-contained
+	// manifest as a fresh run.
+	wf, manifest, err := readAndParse(path)
 	if err != nil {
 		return err
 	}
@@ -182,7 +174,7 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-	return runWorkflow(r, w, home, manifest, wf, resolved, plan)
+	return runWorkflow(r, w, runRequest{wf: wf, manifest: manifest, resolved: resolved, home: home, plan: plan})
 }
 
 // findRunRecord resolves a user-supplied run id to a path under

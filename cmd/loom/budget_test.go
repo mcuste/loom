@@ -61,7 +61,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{})
+	err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home})
 
 	var got *executor.BudgetExceededError
 	if !errors.As(err, &got) {

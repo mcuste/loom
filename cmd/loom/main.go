@@ -171,7 +171,7 @@ func doRun(w io.Writer, path string, paramArgs []string) (err error) {
 	if err != nil {
 		return err
 	}
-	return runWorkflow(r, w, home, manifest, wf, resolved, seedPlan{})
+	return runWorkflow(r, w, runRequest{wf: wf, manifest: manifest, resolved: resolved, home: home})
 }
 
 // doCheck runs the shared check phase only: validate and print the plan, then

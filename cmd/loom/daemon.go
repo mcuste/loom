@@ -287,7 +287,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	cr := &captureRenderer{Renderer: tui.New(lf)}
 	defer func() { _ = cr.Close() }()
 	prov := provenance{scheduleID: rec.ID, triggeredBy: "schedule"}
-	runErr := runWorkflow(cr, lf, d.home, manifest, wf, resolved, seedPlan{}, prov)
+	runErr := runWorkflow(cr, lf, runRequest{wf: wf, manifest: manifest, resolved: resolved, home: d.home, prov: prov})
 	res.runID = runIDFromPath(cr.runFile)
 	res.err = runErr
 	if runErr != nil {

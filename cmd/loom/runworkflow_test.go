@@ -44,7 +44,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, seedPlan{}); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -81,7 +81,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home, plan: plan}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	if !strings.Contains(buf.String(), "Seeded   : 1 task(s) from prior run") {
@@ -116,7 +116,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home, plan: plan}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -161,7 +161,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home, plan: plan}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -210,7 +210,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home, plan: plan}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -244,7 +244,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if err := runWorkflow(tui.New(&buf), &buf, home, []byte(manifest), wf, resolved, plan); err != nil {
+	if err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home, plan: plan}); err != nil {
 		t.Fatalf("runWorkflow: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()

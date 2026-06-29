@@ -20,18 +20,7 @@ func loadWorkflow(ref string) (*workflow.Workflow, []byte, string, error) {
 	if err != nil {
 		return nil, nil, "", err
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	// Inline `prompt_file:` references relative to the workflow's directory, then
-	// parse the inlined bytes. The inlined manifest is what gets stored, so the
-	// run record stays self-contained even if the referenced files later change.
-	manifest, err := workflow.InlinePromptFiles(raw, filepath.Dir(path))
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("%s: %w", path, err)
-	}
-	wf, err := workflow.Parse(manifest)
+	wf, manifest, err := readAndParse(path)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -42,6 +31,28 @@ func loadWorkflow(ref string) (*workflow.Workflow, []byte, string, error) {
 		return nil, nil, "", err
 	}
 	return wf, manifest, path, nil
+}
+
+// readAndParse reads the workflow file at the resolved path, inlines its
+// `prompt_file:` references relative to the file's directory, and parses the
+// inlined bytes. The inlined manifest is what the store persists, so the run
+// record stays self-contained even if the referenced files later change. It
+// stops before linking and validation so callers that must obtain the manifest
+// before a chdir (--resume-latest) can defer that tail.
+func readAndParse(path string) (*workflow.Workflow, []byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	manifest, err := workflow.InlinePromptFiles(raw, filepath.Dir(path))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+	wf, err := workflow.Parse(manifest)
+	if err != nil {
+		return nil, nil, err
+	}
+	return wf, manifest, nil
 }
 
 // linkAndValidate runs the post-parse validation tail shared by loadWorkflow,
