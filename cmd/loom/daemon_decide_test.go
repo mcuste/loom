@@ -57,6 +57,38 @@ func TestDecideFireCron(t *testing.T) {
 	})
 }
 
+// TestDecideFireCronZeroNextFire pins the bootstrap branch: a cron record with
+// an unset NextFire computes its first tick from now rather than treating the
+// zero time as due. With now on a minute boundary the next "* * * * *" tick is
+// in the future, so the record is not due and the computed tick is returned.
+func TestDecideFireCronZeroNextFire(t *testing.T) {
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	rec := cronRec(time.Time{}, false) // NextFire unset
+
+	fire, remove, next, err := decideFire(rec, base, false)
+	if err != nil || fire || remove {
+		t.Fatalf("fire=%v remove=%v err=%v, want all false/nil", fire, remove, err)
+	}
+	if !next.After(base) {
+		t.Fatalf("next %v not computed forward from %v", next, base)
+	}
+}
+
+// TestDecideFireCronBadExpr pins that an unparseable cron expression surfaces as
+// an error from decideFire (via NextFireAfter) rather than a silent no-fire.
+func TestDecideFireCronBadExpr(t *testing.T) {
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	rec := schedule.Record{
+		ID:      "wf_cron_bad",
+		Trigger: schedule.Trigger{Cron: "not a cron", TZ: "UTC"},
+		Enabled: true,
+	}
+
+	if _, _, _, err := decideFire(rec, base, false); err == nil {
+		t.Fatal("decideFire on a malformed cron returned nil error; want a parse error")
+	}
+}
+
 func TestDecideFireOneOff(t *testing.T) {
 	at := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)
 	rec := schedule.Record{

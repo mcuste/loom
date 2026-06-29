@@ -225,6 +225,37 @@ func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 	}
 }
 
+// TestDaemonScanSkipsDisabledSchedule pins that scan ignores a disabled record:
+// a due tick on a disabled schedule launches no fire and writes no run, even
+// though its cron time has passed.
+func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
+	home := t.TempDir()
+	path := writeWorkflow(t, shellWorkflow)
+	_, err := schedule.Add(home, schedule.Record{
+		WorkflowID: "shellwf",
+		Ref:        path,
+		Path:       path,
+		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
+		Enabled:    false, // disabled: scan must skip it
+	}, schedule.Config{Now: fixedClock("2026-06-28T10:00:30Z"), Rand: counterRand(1)})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	d := newDaemon(home, io.Discard)
+	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
+
+	results := make(chan fireResult, 1)
+	d.scan(false, results)
+
+	if got := d.fired.Load(); got != 0 {
+		t.Fatalf("fired = %d, want 0 (a disabled schedule must not fire)", got)
+	}
+	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 0 {
+		t.Fatalf("got %d runs, want 0 (disabled)", len(runs))
+	}
+}
+
 // TestDaemonRunLoopFiresThenStopsOnCancel drives the real scan/sleep loop (not
 // scan/complete in isolation): it scans a due schedule, fires it in a goroutine,
 // folds the run id back through complete, and returns nil when ctx is cancelled.
