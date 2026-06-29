@@ -198,22 +198,32 @@ func executeRun(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest
 		r.Hooks(),
 		sh,
 	), executor.Options{Params: req.resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: state})
-	if rep != nil {
-		// A summary write error does not mask a real run failure: surface it only
-		// when the run itself otherwise succeeded.
-		if err := r.Summary(wf, rep, expected); err != nil && runErr == nil {
-			runErr = err
-		}
-		// Persist write-backs: each task with `writes_state` records its trimmed
-		// output under the named key. Only completed tasks appear in
-		// rep.Outputs, so a partial run carries over what it managed to produce.
-		if persistState(state, wf, rep) {
-			if err := store.SaveState(req.home, wf.ID, state); err != nil {
-				reportStoreErr(w, err)
-			}
+	runErr = finalizeRun(w, r, req, rep, expected, state, runErr)
+	return rep, runErr
+}
+
+// finalizeRun renders the run summary and folds `writes_state` outputs back into
+// state once the executor returns. It is a no-op when rep is nil (the store
+// failed to open). A summary write error does not mask a real run failure: it is
+// surfaced only when the run itself otherwise succeeded, so finalizeRun returns
+// the (possibly updated) runErr for the caller to propagate.
+func finalizeRun(w io.Writer, r tui.Renderer, req runRequest, rep *executor.Report, expected int, state map[string]string, runErr error) error {
+	if rep == nil {
+		return runErr
+	}
+	wf := req.wf
+	if err := r.Summary(wf, rep, expected); err != nil && runErr == nil {
+		runErr = err
+	}
+	// Persist write-backs: each task with `writes_state` records its trimmed
+	// output under the named key. Only completed tasks appear in rep.Outputs, so
+	// a partial run carries over what it managed to produce.
+	if persistState(state, wf, rep) {
+		if err := store.SaveState(req.home, wf.ID, state); err != nil {
+			reportStoreErr(w, err)
 		}
 	}
-	return rep, runErr
+	return runErr
 }
 
 // reportStoreErr writes a store-layer error to w on its own indented line. The
