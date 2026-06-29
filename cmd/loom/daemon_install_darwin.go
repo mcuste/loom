@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -34,9 +35,10 @@ const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 `
 
-// installDaemon writes a launchd agent that supervises `loom daemon` and prints
-// the command to load it.
-func installDaemon(w io.Writer, execPath, home string) error {
+// installDaemon writes a launchd agent that supervises `loom daemon`. Unless
+// manual is set it also loads the agent so the daemon starts immediately;
+// otherwise it prints the command to load it.
+func installDaemon(w io.Writer, execPath, home string, manual bool) error {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve user home: %w", err)
@@ -51,6 +53,19 @@ func installDaemon(w io.Writer, execPath, home string) error {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	_, err = fmt.Fprintf(w, "wrote launchd agent %s\n\nenable it with:\n  launchctl load %s\n", path, path)
+	if manual {
+		_, err = fmt.Fprintf(w, "wrote launchd agent %s\n\nenable it with:\n  launchctl load %s\n", path, path)
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "wrote launchd agent %s\n", path); err != nil {
+		return err
+	}
+	cmd := exec.Command("launchctl", "load", path)
+	cmd.Stdout = w
+	cmd.Stderr = w
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("launchctl load %s: %w (re-run with --manual to load it yourself)", path, err)
+	}
+	_, err = fmt.Fprintf(w, "loaded launchd agent; the daemon is now running and will start at login\n")
 	return err
 }

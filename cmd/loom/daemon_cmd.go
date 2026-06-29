@@ -32,11 +32,14 @@ func newDaemonCmd() *cobra.Command {
 }
 
 // newDaemonInstallCmd writes a platform supervisor unit (launchd on macOS,
-// systemd on Linux) that keeps `loom daemon` running across logout and reboot.
+// systemd on Linux) that keeps `loom daemon` running across logout and reboot,
+// and by default loads it so the daemon starts immediately. Pass --manual to
+// only write the unit and print the commands to enable it yourself.
 func newDaemonInstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var manual bool
+	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install a launchd/systemd unit that keeps `loom daemon` running",
+		Short: "Install and enable a launchd/systemd unit that keeps `loom daemon` running",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exec, err := os.Executable()
@@ -47,7 +50,9 @@ func newDaemonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return installDaemon(cmd.OutOrStdout(), exec, home)
+			return installDaemon(cmd.OutOrStdout(), exec, home, manual)
 		},
 	}
+	cmd.Flags().BoolVar(&manual, "manual", false, "only write the unit file; print the commands to enable it yourself instead of running them")
+	return cmd
 }
