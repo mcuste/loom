@@ -374,6 +374,45 @@ tasks:
 	}
 }
 
+// TestResumeCommand_RejectsNewlyRequiredParam pins the workflow-evolution case
+// where a param turned required after the original run: the stored manifest now
+// declares a required `env` the record predates and cannot carry, so the resume
+// must fail at param resolution rather than re-run with the param unresolved.
+func TestResumeCommand_RejectsNewlyRequiredParam(t *testing.T) {
+	loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+
+	manifest := `name: wf
+model: m1
+params:
+  - name: env
+    required: true
+tasks:
+  - id: a
+    runtime: cmd-echo
+    prompt: "hello {{params.env}}"
+  - id: b
+    runtime: cmd-echo
+    depends_on: [a]
+    prompt: "got: {{a}}"
+`
+	runID := "20260101T000000Z-abcabc"
+	// params nil: the now-required `env` is unsatisfiable from the record, and
+	// the resume supplies no -p override.
+	writeRunRecord(t, "wf", runID, manifest, []map[string]any{
+		{"id": "a", "status": "ok", "output": "hello", "prompt": "hello"},
+		{"id": "b", "status": "failed", "error": "kaboom"},
+	}, nil)
+
+	out, err := runCLI(t, "resume", runID)
+	if err == nil {
+		t.Fatalf("resume succeeded; want a missing-required-param error\noutput:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "env") {
+		t.Errorf("error = %v, want it to name the unresolved `env` param", err)
+	}
+}
+
 // writeRunRecordWithCwd drops a synthetic run record carrying an explicit `cwd`
 // field, used by the resume-chdir test to pin the directory the original run
 // was invoked from.
