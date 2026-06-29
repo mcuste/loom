@@ -40,9 +40,10 @@ type atOpts struct {
 	paramArgs []string
 }
 
-// baseRecord builds the trigger-independent fields shared by `schedule cron`
-// and `schedule at`. The caller sets Trigger (and, for cron, Overlap) on the
-// returned record before persisting it.
+// baseRecord builds the trigger-independent fields shared by `schedule cron`,
+// `schedule at`, and `schedule sync` (inline blocks). The caller sets Trigger
+// (and, for cron, Overlap; for inline, ID) on the returned record before
+// persisting it.
 func baseRecord(wf *workflow.Workflow, ref, path string, params map[string]string, catchup bool) schedule.Record {
 	return schedule.Record{
 		WorkflowID: string(wf.ID),

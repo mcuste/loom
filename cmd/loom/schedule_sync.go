@@ -94,14 +94,9 @@ func syncInlineSchedule(home string, wf *workflow.Workflow, path, ref string) (s
 		return "", nil
 	}
 
-	rec := schedule.Record{
-		ID:         id,
-		WorkflowID: string(wf.ID),
-		Ref:        ref,
-		Path:       path,
-		Trigger:    schedule.Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ},
-		Enabled:    true,
-	}
+	rec := baseRecord(wf, ref, path, nil, false)
+	rec.ID = id
+	rec.Trigger = schedule.Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ}
 	if err := schedule.Validate(rec); err != nil {
 		return "", err
 	}
