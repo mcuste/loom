@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
@@ -30,6 +31,10 @@ type daemon struct {
 	out     io.Writer
 	now     func() time.Time
 	running *runningSet
+	// fired counts the fires actually launched (one increment per `go execute`).
+	// It is the synchronous seam a test reads to prove a skipped or queue-held
+	// tick launched no run, without racing the async run record.
+	fired atomic.Uint64
 }
 
 func newDaemon(home string, out io.Writer) *daemon {
@@ -167,6 +172,7 @@ func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next
 	if remove {
 		d.removeRecord(rec.ID)
 	}
+	d.fired.Add(1)
 	go d.execute(rec, now, results)
 	d.logf("schedule %s: firing %s", rec.ID, rec.WorkflowID)
 	return true

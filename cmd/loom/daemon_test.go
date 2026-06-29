@@ -122,10 +122,11 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 	results := make(chan fireResult, 1)
 	d.scan(false, results)
 
-	select {
-	case <-results:
-		t.Fatal("a fire was launched despite overlap=skip with a run in flight")
-	case <-time.After(150 * time.Millisecond):
+	// scan launches `go execute` synchronously, so once it returns the fired
+	// counter is settled: zero proves the skip policy launched no run, without
+	// racing the async run record.
+	if got := d.fired.Load(); got != 0 {
+		t.Fatalf("fired = %d, want 0 (skip must not launch a fire with a run in flight)", got)
 	}
 	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 0 {
 		t.Fatalf("got %d runs, want 0 (skipped)", len(runs))
@@ -163,11 +164,11 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	results := make(chan fireResult, 1)
 	d.scan(false, results)
 
-	// Held: no fire launched while the prior run is in flight.
-	select {
-	case <-results:
-		t.Fatal("a fire was launched despite overlap=queue with a run in flight")
-	case <-time.After(150 * time.Millisecond):
+	// Held: no fire launched while the prior run is in flight. fired is settled
+	// the moment scan returns (the `go execute` launch is synchronous), so a zero
+	// count proves the hold deterministically.
+	if got := d.fired.Load(); got != 0 {
+		t.Fatalf("fired = %d, want 0 (queue must hold the fire while a run is in flight)", got)
 	}
 	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 0 {
 		t.Fatalf("got %d runs, want 0 (held)", len(runs))
