@@ -75,15 +75,6 @@ func resolveSeed(wf *workflow.Workflow, plan seedPlan) resolvedSeed {
 	return rs
 }
 
-// runContext carries the on-disk roots a single run is recorded against: the
-// resolved LOOM_HOME, the cwd the run was launched from, and the inlined
-// manifest the store persists.
-type runContext struct {
-	home     string
-	cwd      string
-	manifest []byte
-}
-
 // provenance records what initiated a run so the store can distinguish a
 // scheduled run from a direct CLI invocation. A zero value marks a direct CLI
 // run; only the daemon supplies one.
@@ -162,24 +153,26 @@ func runWorkflow(r tui.Renderer, w io.Writer, req runRequest) error {
 		return err
 	}
 
-	rc := runContext{home: req.home, cwd: cwd, manifest: req.manifest}
-	_, runErr := runOnce(ctx, r, w, rc, req.wf, req.resolved, state, rs, req.prov)
+	_, runErr := runOnce(ctx, r, w, req, cwd, state, rs)
 	return runErr
 }
 
 // runOnce executes the DAG exactly once: it opens a fresh run record, stamps
 // any seeded tasks, runs the executor, prints the summary, and folds
-// `writes_state` outputs into state. state is read for substitution and
-// written back in place.
+// `writes_state` outputs into state. req carries the parsed workflow, resolved
+// params, manifest, home, and provenance; cwd is the invocation directory the
+// caller resolved (the one genuinely new root at this layer). state is read for
+// substitution and written back in place.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf *workflow.Workflow, resolved workflow.ParamValues, state map[string]string, rs resolvedSeed, prov provenance) (rep *executor.Report, runErr error) {
-	run, err := store.Open(wf.ID, rc.manifest, store.Config{
-		Root:        rc.home,
-		Cwd:         rc.cwd,
+func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest, cwd string, state map[string]string, rs resolvedSeed) (rep *executor.Report, runErr error) {
+	wf := req.wf
+	run, err := store.Open(wf.ID, req.manifest, store.Config{
+		Root:        req.home,
+		Cwd:         cwd,
 		OnError:     func(e error) { reportStoreErr(w, e) },
-		Params:      stringifyParams(resolved),
-		ScheduleID:  prov.scheduleID,
-		TriggeredBy: prov.triggeredBy,
+		Params:      stringifyParams(req.resolved),
+		ScheduleID:  req.prov.scheduleID,
+		TriggeredBy: req.prov.triggeredBy,
 	})
 	if err != nil {
 		return nil, err
@@ -202,7 +195,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 	expected := len(wf.Tasks) - len(rs.set)
 	if err := r.Header(tui.RunMeta{
 		RunFile: run.Path(),
-		Cwd:     rc.cwd,
+		Cwd:     cwd,
 		Seeded:  len(rs.set),
 		Total:   expected,
 	}); err != nil {
@@ -217,7 +210,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
 		sh,
-	), executor.Options{Params: resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: state})
+	), executor.Options{Params: req.resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: state})
 	if rep != nil {
 		// A summary write error does not mask a real run failure: surface it only
 		// when the run itself otherwise succeeded.
@@ -228,7 +221,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 		// output under the named key. Only completed tasks appear in
 		// rep.Outputs, so a partial run carries over what it managed to produce.
 		if persistState(state, wf, rep) {
-			if err := store.SaveState(rc.home, wf.ID, state); err != nil {
+			if err := store.SaveState(req.home, wf.ID, state); err != nil {
 				reportStoreErr(w, err)
 			}
 		}
