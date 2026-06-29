@@ -2,9 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -259,5 +266,155 @@ tasks:
 		if entry, ok := raw.(map[string]any); ok && entry["id"] == "ghost" {
 			t.Errorf("ghost seed was stamped into the run record but its id is absent from the workflow")
 		}
+	}
+}
+
+// TestRunCommand_RecordsInvocationCwd pins that a run records the directory it
+// was invoked from in the run record's `cwd` field, so a later resume can
+// restore it.
+func TestRunCommand_RecordsInvocationCwd(t *testing.T) {
+	loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	path := writeWorkflow(t, `
+name: wf
+runtime: cmd-echo
+model: m1
+tasks:
+  - id: greet
+    prompt: hello
+`)
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"run", path})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(testRunsDir(t), "wf", "latest.json"))
+	if err != nil {
+		t.Fatalf("read latest.json: %v", err)
+	}
+	var record struct {
+		Cwd string `json:"cwd"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("unmarshal run record: %v\nraw:\n%s", err, data)
+	}
+	if record.Cwd != cwd {
+		t.Errorf("record.cwd = %q, want %q (invocation cwd not recorded)", record.Cwd, cwd)
+	}
+}
+
+// TestRunCommand_PersistsExecutorOutputThroughStoreHooks pins the cmd/loom
+// pass-through: storeHooks now wires run.OnFinish straight onto
+// executor.Hooks.OnFinish with no field-by-field copy, so the executor's
+// TaskResult.Output must reach the on-disk record verbatim. The cmd-echo fake
+// echoes the substituted prompt as its output, so a correct pass-through
+// writes that text into tasks[0].output.
+func TestRunCommand_PersistsExecutorOutputThroughStoreHooks(t *testing.T) {
+	path := writeWorkflow(t, `
+name: wf
+runtime: cmd-echo
+model: m1
+tasks:
+  - id: greet
+    prompt: hello world
+`)
+	loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"run", path})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(testRunsDir(t), "wf", "latest.json"))
+	if err != nil {
+		t.Fatalf("read latest.json: %v", err)
+	}
+	var record struct {
+		Tasks []struct {
+			Output string `json:"output"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("unmarshal run record: %v\nraw:\n%s", err, data)
+	}
+	if len(record.Tasks) != 1 {
+		t.Fatalf("len(record.tasks) = %d, want 1", len(record.Tasks))
+	}
+	if got := record.Tasks[0].Output; got != "hello world" {
+		t.Fatalf("tasks[0].output = %q, want %q", got, "hello world")
+	}
+}
+
+// cmdCostRuntime is a no-binary fake registered for the budget surfacing test.
+// Each Run succeeds and reports a fixed cost so a chained workflow accumulates
+// a predictable TotalCostUSD and trips the workflow budget.
+type cmdCostRuntime struct{}
+
+func (cmdCostRuntime) Validate(req runtime.Request) error {
+	if req.Model == "" {
+		return runtime.ErrMissingModel
+	}
+	return nil
+}
+
+func (cmdCostRuntime) Run(_ context.Context, req runtime.Request) (runtime.Response, error) {
+	return runtime.Response{
+		Output: req.Prompt,
+		Usage:  runtime.Usage{TotalCostUSD: 0.5},
+	}, nil
+}
+
+func init() {
+	runtime.Register("cmd-cost", cmdCostRuntime{})
+}
+
+// TestRunWorkflow_SurfacesBudgetExceeded pins that when the executor aborts on
+// the workflow cost budget, runWorkflow surfaces the typed
+// executor.BudgetExceededError to the caller rather than swallowing it. The
+// three-task chain at cost 0.5 each overruns the 0.75 budget before its last
+// task is dispatched.
+func TestRunWorkflow_SurfacesBudgetExceeded(t *testing.T) {
+	home := loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+
+	manifest := `name: wf
+runtime: cmd-cost
+model: m1
+budget:
+  max_cost_usd: 0.75
+tasks:
+  - id: a
+    prompt: x
+  - id: b
+    depends_on: [a]
+    prompt: x
+  - id: c
+    depends_on: [b]
+    prompt: x
+`
+	wf, resolved := parseAndResolve(t, manifest, nil, nil)
+
+	var buf bytes.Buffer
+	err := runWorkflow(tui.New(&buf), &buf, runRequest{wf: wf, manifest: []byte(manifest), resolved: resolved, home: home})
+
+	var got *executor.BudgetExceededError
+	if !errors.As(err, &got) {
+		t.Fatalf("errors.As BudgetExceededError failed; err = %v\noutput:\n%s", err, buf.String())
 	}
 }

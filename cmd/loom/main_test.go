@@ -2,65 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/mcuste/loom/pkg/runtime"
 )
-
-// cmdEchoRuntime is a no-binary fake registered for the cmd/loom smoke tests.
-// Its Run returns the substituted prompt verbatim so a test can confirm that
-// param substitution happened before the executor dispatched the request.
-type cmdEchoRuntime struct{}
-
-func (cmdEchoRuntime) Validate(req runtime.Request) error {
-	if req.Model == "" {
-		return runtime.ErrMissingModel
-	}
-	return nil
-}
-
-func (cmdEchoRuntime) Run(_ context.Context, req runtime.Request) (runtime.Response, error) {
-	return runtime.Response{
-		Output: req.Prompt,
-		Usage:  runtime.Usage{InputTokens: 1, OutputTokens: 1},
-	}, nil
-}
-
-func init() {
-	runtime.Register("cmd-echo", cmdEchoRuntime{})
-}
-
-// writeWorkflow drops a workflow YAML into t.TempDir() and returns the path.
-func writeWorkflow(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "wf.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("write workflow: %v", err)
-	}
-	return path
-}
-
-// chdirTo cd's into dir for the rest of the test, restoring the original
-// cwd via t.Cleanup. e2e tests pair this with loomHomeForTest so the store
-// roots under an isolated $LOOM_HOME and the run's recorded cwd is the temp
-// dir rather than the test process's working directory.
-func chdirTo(t *testing.T, dir string) {
-	t.Helper()
-	orig, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir %s: %v", dir, err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-}
 
 // TestRunCommandRejectsUnknownParam pins that the run command refuses a `-p`
 // flag whose key is not declared in the workflow's params block. The error

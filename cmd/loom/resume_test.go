@@ -387,36 +387,74 @@ tasks:
 	}
 }
 
-// TestFindRunRecord_ResolvesShortSuffixAndPrefix pins that the run-id lookup
-// accepts the full id, the short hex suffix shown in the runs table, and a
-// leading timestamp prefix, so users can paste what the UI displays.
-func TestFindRunRecord_ResolvesShortSuffixAndPrefix(t *testing.T) {
-	home := loomHomeForTest(t)
-	writeRunRecord(t, "deploy", "20260623T100000Z-0afad3", "name: deploy", nil, nil)
+// TestResumeCommand_ChdirsToRecordedCwd pins that `loom resume <id>` changes
+// into the run record's recorded cwd before re-running, so a re-run shell
+// task's relative writes land in the original directory rather than the
+// directory the resume was launched from.
+func TestResumeCommand_ChdirsToRecordedCwd(t *testing.T) {
+	loomHomeForTest(t)
+	recordedCwd := t.TempDir()
+	invocationCwd := t.TempDir()
+	chdirTo(t, invocationCwd)
 
-	for _, q := range []string{"20260623T100000Z-0afad3", "0afad3", "20260623"} {
-		p, err := findRunRecord(home, q)
-		if err != nil {
-			t.Fatalf("findRunRecord(%q): %v", q, err)
-		}
-		if filepath.Base(p) != "20260623T100000Z-0afad3.json" {
-			t.Errorf("query %q resolved to %s", q, p)
-		}
+	manifest := `name: wf
+model: m1
+tasks:
+  - id: a
+    runtime: cmd-echo
+    prompt: x
+  - id: write
+    depends_on: [a]
+    command: 'echo hi > marker.txt'
+`
+	runID := "20260101T000000Z-ffffff"
+	writeRunRecordWithCwd(t, "wf", runID, manifest, recordedCwd, []map[string]any{
+		{"id": "a", "status": "ok", "output": "stored-a", "prompt": "x"},
+		{"id": "write", "status": "failed", "error": "kaboom"},
+	})
+
+	var buf bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"resume", runID})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("resume: %v\noutput:\n%s", err, buf.String())
 	}
-	if _, err := findRunRecord(home, "nope"); err == nil {
-		t.Errorf("expected not-found error for an unmatched id")
+
+	if _, err := os.Stat(filepath.Join(recordedCwd, "marker.txt")); err != nil {
+		t.Errorf("re-run shell task did not write into the recorded cwd: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(invocationCwd, "marker.txt")); err == nil {
+		t.Errorf("re-run shell task wrote into the invocation cwd; resume did not chdir to the recorded cwd")
 	}
 }
 
-// TestFindRunRecord_AmbiguousSuffixErrors pins that a fragment matching more
-// than one run is reported rather than silently picking one.
-func TestFindRunRecord_AmbiguousSuffixErrors(t *testing.T) {
-	home := loomHomeForTest(t)
-	writeRunRecord(t, "a", "20260101T000000Z-aaaaaa", "name: a", nil, nil)
-	writeRunRecord(t, "b", "20260102T000000Z-aaaaaa", "name: b", nil, nil)
-
-	_, err := findRunRecord(home, "aaaaaa")
-	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("want ambiguous error, got %v", err)
+// writeRunRecordWithCwd drops a synthetic run record under the test's runs
+// root with an explicit `cwd` field, used by the resume-chdir test. It mirrors
+// writeRunRecord but adds the cwd the original run was invoked from.
+func writeRunRecordWithCwd(t *testing.T, wfID, runID, manifest, cwd string, tasks []map[string]any) string {
+	t.Helper()
+	dir := filepath.Join(testRunsDir(t), wfID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir runs: %v", err)
 	}
+	rec := map[string]any{
+		"run_id":      runID,
+		"workflow_id": wfID,
+		"started_at":  "2026-06-09T14:30:52Z",
+		"status":      "failed",
+		"manifest":    manifest,
+		"cwd":         cwd,
+		"tasks":       tasks,
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	path := filepath.Join(dir, runID+".json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+	return path
 }

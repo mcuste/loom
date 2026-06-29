@@ -58,12 +58,3 @@ func doScheduleToggle(w io.Writer, id string, enabled bool) error {
 	_, err = fmt.Fprintf(w, "%s %s\n", pick(enabled, "enabled", "disabled"), id)
 	return err
 }
-
-// pick returns yes when cond holds, no otherwise: a tiny ternary so a bool-to-
-// label mapping reads on one line instead of a four-line if/else.
-func pick(cond bool, yes, no string) string {
-	if cond {
-		return yes
-	}
-	return no
-}
