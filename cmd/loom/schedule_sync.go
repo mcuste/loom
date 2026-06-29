@@ -124,5 +124,5 @@ func syncInlineSchedule(home string, wf *workflow.Workflow, path, ref string) (s
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("added inline schedule %s, next fire %s", stored.ID, fireTime(stored.NextFire)), nil
+	return fmt.Sprintf("added inline schedule %s, next fire %s", stored.ID, formatFireTime(stored.NextFire)), nil
 }
