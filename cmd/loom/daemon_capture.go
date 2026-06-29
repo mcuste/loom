@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/mcuste/loom/pkg/tui"
 )
@@ -26,5 +27,5 @@ func runIDFromPath(p string) string {
 		return ""
 	}
 	base := filepath.Base(p)
-	return base[:len(base)-len(filepath.Ext(base))]
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
