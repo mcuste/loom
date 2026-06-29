@@ -190,10 +190,7 @@ func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next
 		if d.running.active(rec.ID) {
 			d.logf("schedule %s: previous run still in flight, skipping this fire", rec.ID)
 			// Advance past this tick so skip means skip, not retry.
-			if rec.Trigger.IsCron() {
-				rec.NextFire = next
-				d.updateRecord(rec)
-			}
+			d.advanceCron(rec, next)
 			return true
 		}
 	case schedule.OverlapQueue:
@@ -205,10 +202,10 @@ func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next
 	}
 
 	d.running.mark(rec.ID)
-	if rec.Trigger.IsCron() {
-		rec.NextFire = next
-		d.updateRecord(rec)
-	} else if remove {
+	// advanceCron persists the next tick for a cron and no-ops for a one-off;
+	// remove is only ever set for a one-off that just fired.
+	d.advanceCron(rec, next)
+	if remove {
 		d.removeRecord(rec.ID)
 	}
 	go d.execute(rec, now, results)
@@ -289,6 +286,15 @@ func (d *daemon) openLog(id string, fireTime time.Time) (string, *os.File, error
 		return "", nil, fmt.Errorf("create log file: %w", err)
 	}
 	return path, f, nil
+}
+
+// advanceCron consumes rec's current cron tick by persisting next as its
+// NextFire; it is a no-op for a one-off, whose firing is recorded by removal.
+func (d *daemon) advanceCron(rec schedule.Record, next time.Time) {
+	if rec.Trigger.IsCron() {
+		rec.NextFire = next
+		d.updateRecord(rec)
+	}
 }
 
 func (d *daemon) updateRecord(rec schedule.Record) {
