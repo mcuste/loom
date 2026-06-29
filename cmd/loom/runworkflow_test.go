@@ -126,14 +126,7 @@ tasks:
 	}
 
 	rec := readNewRun(t, "wf", "")
-	tasks, _ := rec["tasks"].([]any)
-	var bPrompt string
-	for _, raw := range tasks {
-		entry := raw.(map[string]any)
-		if entry["id"] == "b" {
-			bPrompt, _ = entry["prompt"].(string)
-		}
-	}
+	bPrompt, _ := taskField(t, rec, "b", "prompt")
 	if bPrompt != "got: stored-a" {
 		t.Errorf("b.prompt = %q, want %q (seed of a did not bypass runtime and feed downstream)", bPrompt, "got: stored-a")
 	}
@@ -170,16 +163,7 @@ tasks:
 	}
 
 	rec := readNewRun(t, "wf", "")
-	tasks, _ := rec["tasks"].([]any)
-	var aOutput string
-	var sawA bool
-	for _, raw := range tasks {
-		entry := raw.(map[string]any)
-		if entry["id"] == "a" {
-			sawA = true
-			aOutput, _ = entry["output"].(string)
-		}
-	}
+	aOutput, sawA := taskField(t, rec, "a", "output")
 	if !sawA {
 		t.Fatalf("seeded task `a` was not stamped into the new run record")
 	}
@@ -261,11 +245,8 @@ tasks:
 	}
 
 	rec := readNewRun(t, "wf", "")
-	tasks, _ := rec["tasks"].([]any)
-	for _, raw := range tasks {
-		if entry, ok := raw.(map[string]any); ok && entry["id"] == "ghost" {
-			t.Errorf("ghost seed was stamped into the run record but its id is absent from the workflow")
-		}
+	if _, ok := taskField(t, rec, "ghost", "output"); ok {
+		t.Errorf("ghost seed was stamped into the run record but its id is absent from the workflow")
 	}
 }
 

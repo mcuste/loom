@@ -114,6 +114,24 @@ func readNewRun(t *testing.T, wfID, skipID string) map[string]any {
 	return m
 }
 
+// taskField returns the string value of field for the task with the given id in
+// a run record decoded as map[string]any, plus whether that task is present at
+// all. It centralizes the tasks[].(map[string]any) digging the seed and resume
+// assertions would otherwise repeat (and panic on if a cast slipped).
+func taskField(t *testing.T, rec map[string]any, id, field string) (string, bool) {
+	t.Helper()
+	tasks, _ := rec["tasks"].([]any)
+	for _, raw := range tasks {
+		entry, ok := raw.(map[string]any)
+		if !ok || entry["id"] != id {
+			continue
+		}
+		val, _ := entry[field].(string)
+		return val, true
+	}
+	return "", false
+}
+
 // TestResumeCommand_SeedsOkTasksAndRerunsFailed pins the contract: tasks with
 // status="ok" in the record are seeded with their stored output so the
 // executor never re-dispatches them, and downstream failed tasks re-run with
@@ -155,14 +173,7 @@ tasks:
 	}
 
 	rec := readNewRun(t, "wf", runID)
-	tasks, _ := rec["tasks"].([]any)
-	var bPrompt string
-	for _, raw := range tasks {
-		entry := raw.(map[string]any)
-		if entry["id"] == "b" {
-			bPrompt, _ = entry["prompt"].(string)
-		}
-	}
+	bPrompt, _ := taskField(t, rec, "b", "prompt")
 	if bPrompt != "got: stored-a" {
 		t.Errorf("b.prompt = %q, want %q (seed of a did not feed downstream)", bPrompt, "got: stored-a")
 	}
@@ -249,14 +260,7 @@ tasks:
 	}
 
 	rec := readNewRun(t, "wf", runID)
-	tasks, _ := rec["tasks"].([]any)
-	var bPrompt string
-	for _, raw := range tasks {
-		entry := raw.(map[string]any)
-		if entry["id"] == "b" {
-			bPrompt, _ = entry["prompt"].(string)
-		}
-	}
+	bPrompt, _ := taskField(t, rec, "b", "prompt")
 	if bPrompt != "got: stored-a" {
 		t.Errorf("b.prompt = %q, want %q (resume-latest did not seed a)", bPrompt, "got: stored-a")
 	}
@@ -320,17 +324,8 @@ tasks:
 	// The new run record must contain `b` (re-run) and NOT contain `a`
 	// (dropped: not in the current workflow).
 	rec := readNewRun(t, "wf", runID)
-	tasks, _ := rec["tasks"].([]any)
-	var sawA, sawB bool
-	for _, raw := range tasks {
-		entry := raw.(map[string]any)
-		switch entry["id"] {
-		case "a":
-			sawA = true
-		case "b":
-			sawB = true
-		}
-	}
+	_, sawA := taskField(t, rec, "a", "status")
+	_, sawB := taskField(t, rec, "b", "status")
 	if sawA {
 		t.Errorf("new run record contains task `a`, but `a` was removed from the workflow")
 	}
