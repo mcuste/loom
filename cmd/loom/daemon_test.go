@@ -194,7 +194,7 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 
 	d := newDaemon(home, io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
-	d.setRunning(added.ID, true) // pretend a prior run is still going
+	d.running.mark(added.ID) // pretend a prior run is still going
 
 	results := make(chan fireResult, 1)
 	d.scan(false, results)

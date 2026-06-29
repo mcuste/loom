@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -76,12 +75,10 @@ func newDaemonInstallCmd() *cobra.Command {
 // decision deterministically; running tracks in-flight fires per schedule id so
 // the overlap policy can skip or serialize them.
 type daemon struct {
-	home string
-	out  io.Writer
-	now  func() time.Time
-
-	mu      sync.Mutex
-	running map[string]bool
+	home    string
+	out     io.Writer
+	now     func() time.Time
+	running *runningSet
 }
 
 func newDaemon(home string, out io.Writer) *daemon {
@@ -89,7 +86,7 @@ func newDaemon(home string, out io.Writer) *daemon {
 		home:    home,
 		out:     out,
 		now:     time.Now,
-		running: map[string]bool{},
+		running: newRunningSet(),
 	}
 }
 
@@ -190,7 +187,7 @@ func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
 func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next time.Time, results chan<- fireResult) bool {
 	switch rec.EffectiveOverlap() {
 	case schedule.OverlapSkip:
-		if d.isRunning(rec.ID) {
+		if d.running.active(rec.ID) {
 			d.logf("schedule %s: previous run still in flight, skipping this fire", rec.ID)
 			// Advance past this tick so skip means skip, not retry.
 			if rec.Trigger.IsCron() {
@@ -200,14 +197,14 @@ func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next
 			return true
 		}
 	case schedule.OverlapQueue:
-		if d.isRunning(rec.ID) {
+		if d.running.active(rec.ID) {
 			return false // hold; retry on next scan after the run completes
 		}
 	case schedule.OverlapAllow:
 		// fall through: fire regardless of any in-flight run
 	}
 
-	d.setRunning(rec.ID, true)
+	d.running.mark(rec.ID)
 	if rec.Trigger.IsCron() {
 		rec.NextFire = next
 		d.updateRecord(rec)
@@ -264,7 +261,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 // record (for a surviving cron schedule). One-offs were already removed in
 // startFire, so a missing record here is expected and ignored.
 func (d *daemon) complete(res fireResult) {
-	d.setRunning(res.scheduleID, false)
+	d.running.clear(res.scheduleID)
 	if res.oneOff {
 		return
 	}
@@ -292,22 +289,6 @@ func (d *daemon) openLog(id string, fireTime time.Time) (string, *os.File, error
 		return "", nil, fmt.Errorf("create log file: %w", err)
 	}
 	return path, f, nil
-}
-
-func (d *daemon) isRunning(id string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.running[id]
-}
-
-func (d *daemon) setRunning(id string, v bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if v {
-		d.running[id] = true
-	} else {
-		delete(d.running, id)
-	}
 }
 
 func (d *daemon) updateRecord(rec schedule.Record) {

@@ -199,18 +199,18 @@ func runWorkflow(r tui.Renderer, w io.Writer, req runRequest) error {
 		return err
 	}
 
-	_, runErr := runOnce(ctx, r, w, req, cwd, state, rs)
+	_, runErr := executeRun(ctx, r, w, req, cwd, state, rs)
 	return runErr
 }
 
-// runOnce executes the DAG exactly once: it opens a fresh run record, stamps
-// any seeded tasks, runs the executor, prints the summary, and folds
-// `writes_state` outputs into state. req carries the parsed workflow, resolved
-// params, manifest, home, and provenance; cwd is the invocation directory the
-// caller resolved (the one genuinely new root at this layer). state is read for
+// executeRun executes the DAG: it opens a fresh run record, stamps any seeded
+// tasks, runs the executor, prints the summary, and folds `writes_state`
+// outputs into state. req carries the parsed workflow, resolved params,
+// manifest, home, and provenance; cwd is the invocation directory the caller
+// resolved (the one genuinely new root at this layer). state is read for
 // substitution and written back in place.
 // The returned report is nil only when the store could not be opened.
-func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest, cwd string, state map[string]string, rs resolvedSeed) (rep *executor.Report, runErr error) {
+func executeRun(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest, cwd string, state map[string]string, rs resolvedSeed) (rep *executor.Report, runErr error) {
 	wf := req.wf
 	run, err := store.Open(wf.ID, req.manifest, store.Config{
 		Root:        req.home,
@@ -235,7 +235,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest, c
 		}
 	}()
 
-	// The renderer is owned by the caller (doRun / runFromRecord), so runOnce
+	// The renderer is owned by the caller (doRun / runFromRecord), so executeRun
 	// neither creates nor closes it. Header resets the progress counter and
 	// records the denominator.
 	expected := len(wf.Tasks) - len(rs.set)
@@ -251,7 +251,8 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest, c
 	// One store-hooks instance drives both the seeded-task stamping and the
 	// executor below, so the run is never double-wrapped.
 	sh := storeHooks(run)
-	seedExit := stampSeeded(sh, wf, rs)
+	stampSeeded(sh, wf, rs)
+	seedExit := seededExitCodes(rs)
 
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		r.Hooks(),
@@ -285,11 +286,10 @@ func reportStoreErr(w io.Writer, err error) {
 // stampSeeded records each seeded task into the new run record as an already-ok
 // entry (via the store hooks sh) so a future resume of this run can find them.
 // The executor fires no hooks for seeded tasks by design, so this mimics what it
-// would have done. It returns the per-task exit codes to feed the executor as
-// SeedExitCodes; both are empty on a plain run, so its output stays
-// byte-identical. sh is the same hooks instance the executor reuses, so the run
-// is never double-wrapped.
-func stampSeeded(sh executor.Hooks, wf *workflow.Workflow, rs resolvedSeed) map[workflow.TaskID]int {
+// would have done. On a plain run rs.entries is empty and nothing is stamped, so
+// the output stays byte-identical. sh is the same hooks instance the executor
+// reuses, so the run is never double-wrapped.
+func stampSeeded(sh executor.Hooks, wf *workflow.Workflow, rs resolvedSeed) {
 	// Stamp in topological (plan) order so a seeded task is never recorded
 	// before a seeded dependency it relies on.
 	for _, id := range wf.Plan() {
@@ -319,12 +319,16 @@ func stampSeeded(sh executor.Hooks, wf *workflow.Workflow, rs resolvedSeed) map[
 			ExitCode: s.exitCode,
 		}, nil)
 	}
+}
 
-	// Carry seeded exit codes into the run so a resumed downstream task's
-	// `{{id.exit}}` resolves to the recorded code. Every seeded task is recorded
-	// (not just non-zero ones), mirroring a fresh run where recordResult stores an
-	// exit code for every completed task: a seeded clean-exit script must resolve
-	// to "0", not be left verbatim as an unknown reference.
+// seededExitCodes returns the per-seeded-task exit codes to feed the executor as
+// SeedExitCodes, so a resumed downstream task's `{{id.exit}}` resolves to the
+// recorded code. Every seeded task is recorded (not just non-zero ones),
+// mirroring a fresh run where recordResult stores an exit code for every
+// completed task: a seeded clean-exit script must resolve to "0", not be left
+// verbatim as an unknown reference. It returns nil on a plain run so the
+// executor's output stays byte-identical.
+func seededExitCodes(rs resolvedSeed) map[workflow.TaskID]int {
 	if len(rs.entries) == 0 {
 		return nil
 	}
