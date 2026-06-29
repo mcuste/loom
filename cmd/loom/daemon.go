@@ -184,43 +184,6 @@ func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
 	return soonest
 }
 
-// decideFire is the pure firing decision for one record at instant now. It
-// returns whether to fire, whether to remove the record, and the NextFire to
-// persist. firstScan distinguishes a tick that is due now from one that was
-// missed while the daemon was down (only honored for catch-up).
-func decideFire(rec schedule.Record, now time.Time, firstScan bool) (fire, remove bool, next time.Time, err error) {
-	if rec.Trigger.IsCron() {
-		nf := rec.NextFire
-		if nf.IsZero() {
-			if nf, err = rec.NextFireAfter(now); err != nil {
-				return false, false, time.Time{}, err
-			}
-		}
-		if now.Before(nf) {
-			return false, false, nf, nil // not due
-		}
-		advanced, err := rec.NextFireAfter(now)
-		if err != nil {
-			return false, false, time.Time{}, err
-		}
-		if firstScan && !rec.Catchup {
-			// Missed tick(s) while down; skip without firing.
-			return false, false, advanced, nil
-		}
-		return true, false, advanced, nil
-	}
-
-	// One-off.
-	at := rec.Trigger.At
-	if now.Before(at) {
-		return false, false, at, nil // not due
-	}
-	if firstScan && !rec.Catchup {
-		return false, true, time.Time{}, nil // missed while down, drop
-	}
-	return true, true, time.Time{}, nil // fire then remove
-}
-
 // startFire applies the overlap policy and, if clear to run, marks the schedule
 // running, persists the post-fire record state, and launches the run. It
 // returns false when the queue policy must hold the fire for a later scan.
@@ -362,42 +325,4 @@ func (d *daemon) removeRecord(id string) {
 func (d *daemon) logf(format string, a ...any) {
 	ts := d.now().UTC().Format("2006-01-02 15:04:05")
 	_, _ = fmt.Fprintf(d.out, "%s  %s\n", ts, fmt.Sprintf(format, a...))
-}
-
-// captureRenderer wraps a renderer to record the run-file path the pipeline
-// reports in its header, so the daemon can recover the run id without the
-// pipeline returning it.
-type captureRenderer struct {
-	tui.Renderer
-	runFile string
-}
-
-func (c *captureRenderer) Header(meta tui.RunMeta) error {
-	c.runFile = meta.RunFile
-	return c.Renderer.Header(meta)
-}
-
-// runIDFromPath extracts the run id from a run-record path (its basename minus
-// the .json extension). Returns "" for an empty path.
-func runIDFromPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	base := filepath.Base(p)
-	return base[:len(base)-len(filepath.Ext(base))]
-}
-
-// earliest returns the earlier of two instants, treating the zero time as
-// "unset" (so a real instant always wins over zero).
-func earliest(a, b time.Time) time.Time {
-	switch {
-	case a.IsZero():
-		return b
-	case b.IsZero():
-		return a
-	case b.Before(a):
-		return b
-	default:
-		return a
-	}
 }
