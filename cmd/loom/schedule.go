@@ -26,53 +26,41 @@ func newScheduleCmd() *cobra.Command {
 }
 
 func newScheduleCronCmd() *cobra.Command {
-	var (
-		paramArgs []string
-		expr      string
-		tz        string
-		overlap   string
-		catchup   bool
-	)
+	var o cronOpts
 	cmd := &cobra.Command{
 		Use:               "cron <workflow>",
 		Short:             "Schedule a workflow to run on a recurring cron expression",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleCron(cmd.OutOrStdout(), args[0], expr, tz, overlap, catchup, paramArgs)
+			return doScheduleCron(cmd.OutOrStdout(), args[0], o)
 		},
 	}
-	addParamFlags(cmd, &paramArgs)
-	cmd.Flags().StringVar(&expr, "expr", "", "cron expression, e.g. \"0 15 * * *\" (required)")
-	cmd.Flags().StringVar(&tz, "tz", "", "IANA timezone the expression is evaluated in (default: daemon local time)")
-	cmd.Flags().StringVar(&overlap, "overlap", "skip", "policy when a prior run is still in flight: skip|queue|allow")
-	cmd.Flags().BoolVar(&catchup, "catchup", false, "fire once on daemon startup if a scheduled tick was missed")
+	addParamFlags(cmd, &o.paramArgs)
+	cmd.Flags().StringVar(&o.expr, "expr", "", "cron expression, e.g. \"0 15 * * *\" (required)")
+	cmd.Flags().StringVar(&o.tz, "tz", "", "IANA timezone the expression is evaluated in (default: daemon local time)")
+	cmd.Flags().StringVar(&o.overlap, "overlap", "skip", "policy when a prior run is still in flight: skip|queue|allow")
+	cmd.Flags().BoolVar(&o.catchup, "catchup", false, "fire once on daemon startup if a scheduled tick was missed")
 	_ = cmd.MarkFlagRequired("expr")
 	return cmd
 }
 
 func newScheduleAtCmd() *cobra.Command {
-	var (
-		paramArgs []string
-		timeStr   string
-		dateStr   string
-		tz        string
-		catchup   bool
-	)
+	var o atOpts
 	cmd := &cobra.Command{
 		Use:               "at <workflow>",
 		Short:             "Schedule a workflow to run once at a given time",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleAt(cmd.OutOrStdout(), args[0], timeStr, dateStr, tz, catchup, paramArgs)
+			return doScheduleAt(cmd.OutOrStdout(), args[0], o)
 		},
 	}
-	addParamFlags(cmd, &paramArgs)
-	cmd.Flags().StringVar(&timeStr, "time", "", "clock time HH:MM (required)")
-	cmd.Flags().StringVar(&dateStr, "date", "", "calendar date YYYY-MM-DD (default: today, or tomorrow if the time already passed)")
-	cmd.Flags().StringVar(&tz, "tz", "", "IANA timezone the time is interpreted in (default: daemon local time)")
-	cmd.Flags().BoolVar(&catchup, "catchup", false, "run even if the daemon was down when the instant passed")
+	addParamFlags(cmd, &o.paramArgs)
+	cmd.Flags().StringVar(&o.timeStr, "time", "", "clock time HH:MM (required)")
+	cmd.Flags().StringVar(&o.dateStr, "date", "", "calendar date YYYY-MM-DD (default: today, or tomorrow if the time already passed)")
+	cmd.Flags().StringVar(&o.tz, "tz", "", "IANA timezone the time is interpreted in (default: daemon local time)")
+	cmd.Flags().BoolVar(&o.catchup, "catchup", false, "run even if the daemon was down when the instant passed")
 	_ = cmd.MarkFlagRequired("time")
 	return cmd
 }

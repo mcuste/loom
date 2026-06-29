@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -10,16 +11,46 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
+// absPath returns the absolute form of p, falling back to p when resolution
+// fails. The scheduler stores an absolute workflow path so the daemon reloads
+// the same file regardless of its own working directory.
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+// cronOpts bundles the trigger-shaping flags of `schedule cron` so the handler
+// takes the clump as one unit rather than a long positional list.
+type cronOpts struct {
+	expr      string
+	tz        string
+	overlap   string
+	catchup   bool
+	paramArgs []string
+}
+
+// atOpts bundles the trigger-shaping flags of `schedule at` so the handler
+// takes the clump as one unit rather than a long positional list.
+type atOpts struct {
+	timeStr   string
+	dateStr   string
+	tz        string
+	catchup   bool
+	paramArgs []string
+}
+
 // doScheduleCron validates the workflow and params, then persists a recurring
 // schedule. Validation happens now so a bad workflow, missing required param,
 // or malformed cron expression fails at the prompt, not at 15:00.
-func doScheduleCron(w io.Writer, ref, expr, tz, overlap string, catchup bool, paramArgs []string) error {
-	switch schedule.Overlap(overlap) {
+func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
+	switch schedule.Overlap(o.overlap) {
 	case schedule.OverlapSkip, schedule.OverlapQueue, schedule.OverlapAllow:
 	default:
-		return fmt.Errorf("invalid --overlap %q: want skip, queue, or allow", overlap)
+		return fmt.Errorf("invalid --overlap %q: want skip, queue, or allow", o.overlap)
 	}
-	wf, path, params, err := loadAndResolve(ref, paramArgs)
+	wf, path, params, err := loadAndResolve(ref, o.paramArgs)
 	if err != nil {
 		return err
 	}
@@ -27,31 +58,31 @@ func doScheduleCron(w io.Writer, ref, expr, tz, overlap string, catchup bool, pa
 		WorkflowID: string(wf.ID),
 		Ref:        ref,
 		Path:       absPath(path),
-		Trigger:    schedule.Trigger{Cron: expr, TZ: tz},
+		Trigger:    schedule.Trigger{Cron: o.expr, TZ: o.tz},
 		Params:     params,
 		Enabled:    true,
-		Overlap:    schedule.Overlap(overlap),
-		Catchup:    catchup,
+		Overlap:    schedule.Overlap(o.overlap),
+		Catchup:    o.catchup,
 	}
 	return addAndReport(w, rec)
 }
 
 // doScheduleAt validates the workflow and params, parses the one-off instant in
 // the chosen timezone, and persists a one-off schedule.
-func doScheduleAt(w io.Writer, ref, timeStr, dateStr, tz string, catchup bool, paramArgs []string) error {
+func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	loc := time.Local
-	if tz != "" {
-		l, err := time.LoadLocation(tz)
+	if o.tz != "" {
+		l, err := time.LoadLocation(o.tz)
 		if err != nil {
-			return fmt.Errorf("invalid --tz %q: %w", tz, err)
+			return fmt.Errorf("invalid --tz %q: %w", o.tz, err)
 		}
 		loc = l
 	}
-	at, err := parseAtTime(timeStr, dateStr, loc, time.Now())
+	at, err := parseAtTime(o.timeStr, o.dateStr, loc, time.Now())
 	if err != nil {
 		return err
 	}
-	wf, path, params, err := loadAndResolve(ref, paramArgs)
+	wf, path, params, err := loadAndResolve(ref, o.paramArgs)
 	if err != nil {
 		return err
 	}
@@ -59,10 +90,10 @@ func doScheduleAt(w io.Writer, ref, timeStr, dateStr, tz string, catchup bool, p
 		WorkflowID: string(wf.ID),
 		Ref:        ref,
 		Path:       absPath(path),
-		Trigger:    schedule.Trigger{At: at, TZ: tz},
+		Trigger:    schedule.Trigger{At: at, TZ: o.tz},
 		Params:     params,
 		Enabled:    true,
-		Catchup:    catchup,
+		Catchup:    o.catchup,
 	}
 	return addAndReport(w, rec)
 }

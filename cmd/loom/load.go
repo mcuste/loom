@@ -70,13 +70,3 @@ func linkAndValidate(wf *workflow.Workflow, selfPath string) error {
 	}
 	return wf.ValidateRouting()
 }
-
-// absPath returns the absolute form of p, falling back to p when resolution
-// fails. The scheduler stores an absolute workflow path so the daemon reloads
-// the same file regardless of its own working directory.
-func absPath(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		return abs
-	}
-	return p
-}
