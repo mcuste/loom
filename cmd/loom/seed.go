@@ -85,16 +85,11 @@ func stampSeeded(sh executor.Hooks, wf *workflow.Workflow, rs resolvedSeed) {
 		if t == nil {
 			continue
 		}
-		if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
-			// Shell, script, and sub-workflow tasks have no runtime of their own
-			// (a sub-workflow's child brings its own), so they seed with empty
-			// runtime metadata, matching the ("", "", "") OnStart that runTask
-			// fires for them.
-			sh.OnStart(*t, 0, "", "", "")
-		} else {
-			rt, m, e := wf.Effective(t)
-			sh.OnStart(*t, 0, rt, m, e)
-		}
+		// StartMeta is the single authority for which task kinds carry runtime
+		// metadata: a prompt task reports its effective triple, every other kind
+		// the empty ("", "", "") triple, matching the OnStart runTask fires.
+		rt, m, e := wf.StartMeta(t)
+		sh.OnStart(*t, 0, rt, m, e)
 		sh.OnFinish(*t, 0, executor.TaskResult{
 			TaskID:   id,
 			Prompt:   s.prompt,

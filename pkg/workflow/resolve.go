@@ -36,6 +36,22 @@ func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effo
 	return r, m, e
 }
 
+// StartMeta returns the runtime, model, and effort a task reports to a hook's
+// OnStart when it begins. A prompt (LLM) task carries its [Workflow.Effective]
+// triple; shell, script, and sub-workflow tasks have no runtime of their own (a
+// sub-workflow's child brings its own) and report the empty triple, matching the
+// per-kind OnStart calls the executor's dispatch makes. It is the single
+// authority for "which task kinds carry runtime metadata", so seed stamping can
+// mirror a fresh run without re-deriving the rule.
+//
+// t must be non-nil.
+func (w *Workflow) StartMeta(t *Task) (runtime.Name, runtime.Model, runtime.Effort) {
+	if t.BodyKind() == BodyPrompt {
+		return w.Effective(t)
+	}
+	return "", "", ""
+}
+
 // EffectiveSystemPrompt returns the system prompt the runtime will see for t:
 // the task-level SystemPrompt when non-empty, otherwise the workflow-level
 // default. It mirrors [Workflow.Effective]'s task-over-workflow fallback so a
