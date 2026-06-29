@@ -214,6 +214,14 @@ tasks:
 	if err := root.Execute(); err != nil {
 		t.Fatalf("resume latest: %v\noutput:\n%s", err, buf.String())
 	}
+
+	// Resolving to the right record means b re-ran with a's stored output
+	// seeded in; a wrong-record resolution would not produce this prompt.
+	rec := readNewRun(t, "wf", runID)
+	bPrompt, _ := taskField(t, rec, "b", "prompt")
+	if bPrompt != "got: stored-a" {
+		t.Errorf("b.prompt = %q, want %q (latest did not resolve to this run)", bPrompt, "got: stored-a")
+	}
 }
 
 // TestRunCommand_ResumeLatestFlag pins the alternate entry point:
