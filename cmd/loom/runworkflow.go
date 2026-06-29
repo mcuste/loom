@@ -97,6 +97,21 @@ type runRequest struct {
 	prov     provenance
 }
 
+// doRun runs the shared check phase (validate + print the plan) and then, only
+// if it passes, executes the whole workflow fresh. home is resolved up front (as
+// the resume paths do) so a home-resolution failure surfaces before the plan.
+func doRun(w io.Writer, path string, paramArgs []string) error {
+	wf, manifest, _, err := loadWorkflow(path)
+	if err != nil {
+		return err
+	}
+	home, err := loomHome()
+	if err != nil {
+		return err
+	}
+	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home}, paramArgs, nil, nil)
+}
+
 // renderCheckRun runs the shared check phase (validate + print the plan) against
 // a single renderer and, only if it passes, executes req. doRun and runFromRecord
 // share this tail: one renderer drives both the check and the run that follows, so
@@ -107,7 +122,7 @@ type runRequest struct {
 func renderCheckRun(w io.Writer, req runRequest, paramArgs []string, file map[string]string, seeded map[workflow.TaskID]bool) (err error) {
 	r, finish := newRenderer(w)
 	defer finish(&err)
-	resolved, err := check(r, req.wf, paramArgs, file, false, seeded)
+	resolved, err := validateAndPlan(r, req.wf, paramArgs, file, false, seeded)
 	if err != nil {
 		return err
 	}

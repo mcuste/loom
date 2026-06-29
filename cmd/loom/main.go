@@ -14,15 +14,9 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"io"
 	"os"
 
 	"github.com/spf13/cobra"
-
-	"github.com/mcuste/loom/pkg/tui"
-	"github.com/mcuste/loom/pkg/workflow"
 
 	// Side-effect imports register runtimes with the runtime package.
 	_ "github.com/mcuste/loom/pkg/runtime/claudecode"
@@ -102,109 +96,4 @@ func firstArg(args []string) string {
 		return args[0]
 	}
 	return ""
-}
-
-// newRenderer creates a renderer over w and returns it alongside a closer to
-// defer. The closer surfaces the renderer's teardown error through errp unless a
-// prior error already won, so a caller with a named return writes:
-//
-//	r, finish := newRenderer(w)
-//	defer finish(&err)
-//
-// One renderer drives a command's check phase and the run that follows, so a
-// stateful renderer can hold a unified display across both.
-func newRenderer(w io.Writer) (tui.Renderer, func(*error)) {
-	r := tui.New(w)
-	return r, func(errp *error) {
-		if cerr := r.Close(); cerr != nil && *errp == nil {
-			*errp = cerr
-		}
-	}
-}
-
-// check is the validation phase shared by `loom check` and `loom run`: it
-// parses the CLI params, resolves them against wf, and prints the execution
-// plan. Routing `run` through it is what makes "run does a check first" true --
-// both commands reach the same validate-and-print routine before anything
-// executes. file is the lower-precedence param tier (a record's stored params
-// on resume; nil otherwise). advisory downgrades a missing required param to a
-// warning so `loom check` doubles as a "what params does this workflow need?"
-// probe; `loom run` passes false so the same case is a hard failure. seeded
-// annotates the plan with carried-over tasks on resume. It returns the resolved
-// params for the caller to execute with.
-func check(r tui.Renderer, wf *workflow.Workflow, paramArgs []string, file map[string]string, advisory bool, seeded map[workflow.TaskID]bool) (workflow.ParamValues, error) {
-	cliParams, err := workflow.ParseParamArgs(paramArgs)
-	if err != nil {
-		return nil, err
-	}
-	resolved, err := workflow.ResolveParams(wf, cliParams, file)
-	if err != nil {
-		var miss *workflow.MissingRequiredParamError
-		if !advisory || !errors.As(err, &miss) {
-			return nil, err
-		}
-		// Route the advisory through the renderer so every stdout byte flows
-		// through the seam, not around it.
-		if werr := r.Warn(fmt.Sprintf("required param %q not supplied", miss.Name)); werr != nil {
-			return nil, werr
-		}
-		// Rebuild a partial bag so MISSING entries still surface in the printed
-		// plan rather than the section truncating silently.
-		resolved = partialResolved(wf, cliParams)
-	}
-	if err := r.Plan(wf, resolved, cliParams, seeded); err != nil {
-		return nil, err
-	}
-	return resolved, nil
-}
-
-// doRun runs the shared check phase (validate + print the plan) and then, only
-// if it passes, executes the whole workflow fresh. home is resolved up front (as
-// the resume paths do) so a home-resolution failure surfaces before the plan.
-func doRun(w io.Writer, path string, paramArgs []string) error {
-	wf, manifest, _, err := loadWorkflow(path)
-	if err != nil {
-		return err
-	}
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
-	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home}, paramArgs, nil, nil)
-}
-
-// doCheck runs the shared check phase only: validate and print the plan, then
-// stop without executing.
-func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
-	path, err = resolveWorkflowRef(path)
-	if err != nil {
-		return err
-	}
-	wf, err := workflow.ParseFile(path)
-	if err != nil {
-		return err
-	}
-	// ParseFile validated the top-level routing; linkAndValidate re-runs it after
-	// linking so any sub-workflow children are checked too.
-	if err := linkAndValidate(wf, path); err != nil {
-		return err
-	}
-	r, finish := newRenderer(w)
-	defer finish(&err)
-	_, err = check(r, wf, paramArgs, nil, true, nil)
-	return err
-}
-
-// partialResolved keeps the merge order identical to ResolveParams.
-func partialResolved(wf *workflow.Workflow, cli map[string]string) workflow.ParamValues {
-	out := make(workflow.ParamValues, len(wf.Params))
-	for _, p := range wf.Params {
-		if p.HasDefault {
-			out[p.Name] = p.Default
-		}
-	}
-	for k, v := range cli {
-		out[workflow.ParamName(k)] = v
-	}
-	return out
 }
