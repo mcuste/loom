@@ -364,9 +364,10 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		}
 		st.mu.Lock()
 		body := workflow.Substitute(bindLoopVar(t.Command, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
+		env := taskEnv(st.outputs, opts.Params, opts.State, st.prev, st.exitCodes, st.loopVar, st.loopVal)
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			return runShell(ctx, t, body)
+			return runShell(ctx, t, body, env)
 		})
 	case workflow.BodyScript:
 		if hooks.OnStart != nil {
@@ -378,9 +379,10 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		for i, a := range t.Args {
 			args[i] = workflow.Substitute(bindLoopVar(a, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
 		}
+		env := taskEnv(st.outputs, opts.Params, opts.State, st.prev, st.exitCodes, st.loopVar, st.loopVal)
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			return runScript(ctx, t, path, args)
+			return runScript(ctx, t, path, args, env)
 		})
 	case workflow.BodyPrompt:
 		rt, model, effort := wf.Effective(t)

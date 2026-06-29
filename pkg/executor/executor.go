@@ -358,9 +358,10 @@ func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime
 // tolerates that code, in which case the task succeeds with its stdout output
 // and the code captured for `{{id.exit}}`. The exit code is recorded on the
 // result either way, so a failure still surfaces it to the store and TUI.
-func runShell(ctx context.Context, t *workflow.Task, line string) (TaskResult, error) {
+func runShell(ctx context.Context, t *workflow.Task, line string, env []string) (TaskResult, error) {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", "-c", line)
+	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -398,9 +399,10 @@ func runShell(ctx context.Context, t *workflow.Task, line string) (TaskResult, e
 // missing, not executable, or not found on PATH) and a run cancellation are
 // returned as errors, since neither yields a real script exit code. stderr is
 // written through to the parent so a script's diagnostics remain visible.
-func runScript(ctx context.Context, t *workflow.Task, path string, args []string) (TaskResult, error) {
+func runScript(ctx context.Context, t *workflow.Task, path string, args, env []string) (TaskResult, error) {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = env
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	res := TaskResult{

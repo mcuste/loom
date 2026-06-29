@@ -24,3 +24,17 @@ func ClassifierClasses() []workflow.RetryClass {
 	}
 	return classes
 }
+
+// TaskEnv exposes taskEnv to the external test package so the bare-name env
+// injection scheme (naming, precedence, leading-digit skip) can be asserted
+// without re-deriving it.
+func TaskEnv(
+	outputs map[workflow.TaskID]string,
+	params workflow.ParamValues,
+	state map[string]string,
+	prev map[workflow.TaskID]string,
+	exitCodes map[workflow.TaskID]int,
+	loopVar, loopVal string,
+) []string {
+	return taskEnv(outputs, params, state, prev, exitCodes, loopVar, loopVal)
+}
