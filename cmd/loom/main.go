@@ -97,6 +97,15 @@ func addParamFlags(cmd *cobra.Command, params *[]string) {
 		"set a workflow parameter (repeatable), e.g. -p env=prod")
 }
 
+// firstArg returns the optional single positional argument (a workflow filter
+// for `runs`/`schedule ls`/`schedule sync`), or "" when absent.
+func firstArg(args []string) string {
+	if len(args) == 1 {
+		return args[0]
+	}
+	return ""
+}
+
 // newRenderer creates a renderer over w and returns it alongside a closer to
 // defer. The closer surfaces the renderer's teardown error through errp unless a
 // prior error already won, so a caller with a named return writes:

@@ -77,14 +77,6 @@ func newRunsShowCmd() *cobra.Command {
 	return cmd
 }
 
-// firstArg returns the optional positional workflow filter, or "" when absent.
-func firstArg(args []string) string {
-	if len(args) == 1 {
-		return args[0]
-	}
-	return ""
-}
-
 // doRuns gathers the run index and renders it: the interactive browser on a
 // rich terminal, a plain table otherwise (piped, --plain, or no runs yet). An
 // optional workflow argument narrows the index to one workflow; limit > 0 keeps
