@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -118,7 +116,7 @@ func runWorkflow(r tui.Renderer, w io.Writer, req runRequest) error {
 	// only need the seed material the executor will actually honor.
 	rs := resolveSeed(req.wf, req.plan)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := interruptContext()
 	defer stop()
 
 	// home is resolved once by the caller (before any resume-time chdir) so a
@@ -139,26 +137,38 @@ func runWorkflow(r tui.Renderer, w io.Writer, req runRequest) error {
 		return err
 	}
 
-	_, runErr := executeRun(ctx, r, w, req, cwd, state, rs)
+	x := &runExec{r: r, w: w, req: req, state: state}
+	_, runErr := x.execute(ctx, cwd, rs)
 	return runErr
 }
 
-// executeRun executes the DAG: it opens a fresh run record, stamps any seeded
+// runExec bundles the context that travels unchanged through the run pipeline's
+// execute/finalize hops: the renderer the caller owns, the writer store errors
+// go to, the parsed run request, and the cross-run state map (read for
+// substitution, written back in place). The per-run locals the executor produces
+// as it goes (cwd, the resolved seed, the expected task count) stay as method
+// arguments rather than fields, since they are only known partway through.
+type runExec struct {
+	r     tui.Renderer
+	w     io.Writer
+	req   runRequest
+	state map[string]string
+}
+
+// execute executes the DAG: it opens a fresh run record, stamps any seeded
 // tasks, runs the executor, prints the summary, and folds `writes_state`
-// outputs into state. req carries the parsed workflow, resolved params,
-// manifest, home, and provenance; cwd is the invocation directory the caller
-// resolved (the one genuinely new root at this layer). state is read for
-// substitution and written back in place.
+// outputs into state. cwd is the invocation directory the caller resolved (the
+// one genuinely new root at this layer); rs is the seed material the run honors.
 // The returned report is nil only when the store could not be opened.
-func executeRun(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest, cwd string, state map[string]string, rs resolvedSeed) (rep *executor.Report, runErr error) {
-	wf := req.wf
-	run, err := store.Open(wf.ID, req.manifest, store.Config{
-		Root:        req.home,
+func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (rep *executor.Report, runErr error) {
+	wf := x.req.wf
+	run, err := store.Open(wf.ID, x.req.manifest, store.Config{
+		Root:        x.req.home,
 		Cwd:         cwd,
-		OnError:     func(e error) { reportStoreErr(w, e) },
-		Params:      stringifyParams(req.resolved),
-		ScheduleID:  req.prov.scheduleID,
-		TriggeredBy: req.prov.triggeredBy,
+		OnError:     func(e error) { reportStoreErr(x.w, e) },
+		Params:      stringifyParams(x.req.resolved),
+		ScheduleID:  x.req.prov.scheduleID,
+		TriggeredBy: x.req.prov.triggeredBy,
 	})
 	if err != nil {
 		return nil, err
@@ -171,15 +181,15 @@ func executeRun(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest
 	// error channel, so its own write error is intentionally discarded.
 	defer func() {
 		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
-			reportStoreErr(w, closeErr)
+			reportStoreErr(x.w, closeErr)
 		}
 	}()
 
-	// The renderer is owned by the caller (doRun / runFromRecord), so executeRun
+	// The renderer is owned by the caller (doRun / runFromRecord), so execute
 	// neither creates nor closes it. Header resets the progress counter and
 	// records the denominator.
 	expected := len(wf.Tasks) - len(rs.set)
-	if err := r.Header(tui.RunMeta{
+	if err := x.r.Header(tui.RunMeta{
 		RunFile: run.Path(),
 		Cwd:     cwd,
 		Seeded:  len(rs.set),
@@ -195,32 +205,32 @@ func executeRun(ctx context.Context, r tui.Renderer, w io.Writer, req runRequest
 	seedExit := seededExitCodes(rs)
 
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
-		r.Hooks(),
+		x.r.Hooks(),
 		sh,
-	), executor.Options{Params: req.resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: state})
-	runErr = finalizeRun(w, r, req, rep, expected, state, runErr)
+	), executor.Options{Params: x.req.resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: x.state})
+	runErr = x.finalize(rep, expected, runErr)
 	return rep, runErr
 }
 
-// finalizeRun renders the run summary and folds `writes_state` outputs back into
+// finalize renders the run summary and folds `writes_state` outputs back into
 // state once the executor returns. It is a no-op when rep is nil (the store
 // failed to open). A summary write error does not mask a real run failure: it is
-// surfaced only when the run itself otherwise succeeded, so finalizeRun returns
+// surfaced only when the run itself otherwise succeeded, so finalize returns
 // the (possibly updated) runErr for the caller to propagate.
-func finalizeRun(w io.Writer, r tui.Renderer, req runRequest, rep *executor.Report, expected int, state map[string]string, runErr error) error {
+func (x *runExec) finalize(rep *executor.Report, expected int, runErr error) error {
 	if rep == nil {
 		return runErr
 	}
-	wf := req.wf
-	if err := r.Summary(wf, rep, expected); err != nil && runErr == nil {
+	wf := x.req.wf
+	if err := x.r.Summary(wf, rep, expected); err != nil && runErr == nil {
 		runErr = err
 	}
 	// Persist write-backs: each task with `writes_state` records its trimmed
 	// output under the named key. Only completed tasks appear in rep.Outputs, so
 	// a partial run carries over what it managed to produce.
-	if persistState(state, wf, rep) {
-		if err := store.SaveState(req.home, wf.ID, state); err != nil {
-			reportStoreErr(w, err)
+	if persistState(x.state, wf, rep) {
+		if err := store.SaveState(x.req.home, wf.ID, x.state); err != nil {
+			reportStoreErr(x.w, err)
 		}
 	}
 	return runErr
