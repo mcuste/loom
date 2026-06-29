@@ -375,6 +375,43 @@ tasks:
 	}
 }
 
+// TestRunCommand_SurfacesTaskFailure pins the run command's error contract: a
+// task whose runtime errors on dispatch must make `loom run` return a non-nil
+// error (so the process exits non-zero), and the persisted record must mark the
+// run failed. cmd-fail errors on Run, and here it is genuinely dispatched (no
+// seed bypasses it), so a clean Execute would be a regression.
+func TestRunCommand_SurfacesTaskFailure(t *testing.T) {
+	path := writeWorkflow(t, `
+name: wf
+runtime: cmd-fail
+model: m1
+tasks:
+  - id: boom
+    prompt: x
+`)
+	loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+
+	out, err := runCLI(t, "run", path)
+	if err == nil {
+		t.Fatalf("run of a failing task returned nil error; want failure. output:\n%s", out)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(testRunsDir(t), "wf", "latest.json"))
+	if readErr != nil {
+		t.Fatalf("read latest.json: %v", readErr)
+	}
+	var record struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("unmarshal run record: %v\nraw:\n%s", err, data)
+	}
+	if record.Status != "failed" {
+		t.Errorf("record.status = %q, want %q", record.Status, "failed")
+	}
+}
+
 // TestRunCommandRejectsUnknownParam pins that the run command refuses a `-p`
 // flag whose key is not declared in the workflow's params block. The error
 // must surface from ResolveParams before any task runs.
