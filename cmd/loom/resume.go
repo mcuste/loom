@@ -37,11 +37,7 @@ func doResume(w io.Writer, runID string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	path, err := findRunRecord(home, runID)
-	if err != nil {
-		return err
-	}
-	rec, err := store.Load(path)
+	rec, err := loadRunRecord(home, runID)
 	if err != nil {
 		return err
 	}

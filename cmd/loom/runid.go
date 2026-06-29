@@ -56,6 +56,17 @@ func findRunRecord(home, runID string) (string, error) {
 	}
 }
 
+// loadRunRecord resolves a user-supplied run id to its record path and loads it.
+// It is the shared prelude behind `loom resume` and `loom runs show`, both of
+// which turn an id into a record before acting on it.
+func loadRunRecord(home, runID string) (*store.RunRecord, error) {
+	path, err := findRunRecord(home, runID)
+	if err != nil {
+		return nil, err
+	}
+	return store.Load(path)
+}
+
 // runIDMatches reports whether the stored full run id matches a user-supplied
 // fragment: its short suffix (the hex after the last "-") or a leading prefix
 // (e.g. the timestamp). Exact equality is handled by the caller.

@@ -113,11 +113,7 @@ func doShow(w io.Writer, runID, task string, summary bool) error {
 	if err != nil {
 		return err
 	}
-	path, err := findRunRecord(home, runID)
-	if err != nil {
-		return err
-	}
-	rec, err := store.Load(path)
+	rec, err := loadRunRecord(home, runID)
 	if err != nil {
 		return err
 	}
