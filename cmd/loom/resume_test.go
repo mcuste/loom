@@ -2,34 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/mcuste/loom/pkg/runtime"
 )
-
-// cmdFailRuntime always fails Run; the resume tests wire `a` to this runtime
-// so the test can prove the executor bypassed `a` entirely. If `a` were
-// re-dispatched, Run would return an error and the resume would fail.
-type cmdFailRuntime struct{}
-
-func (cmdFailRuntime) Validate(req runtime.Request) error {
-	if req.Model == "" {
-		return runtime.ErrMissingModel
-	}
-	return nil
-}
-
-func (cmdFailRuntime) Run(_ context.Context, _ runtime.Request) (runtime.Response, error) {
-	return runtime.Response{}, errors.New("cmd-fail must never be dispatched")
-}
-
-func init() { runtime.Register("cmd-fail", cmdFailRuntime{}) }
 
 // writeRunRecord drops a synthetic .loom/runs/<wfID>/<runID>.json under the
 // current directory. The manifest field carries the workflow body verbatim

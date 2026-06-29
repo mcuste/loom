@@ -1,36 +1,10 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/mcuste/loom/pkg/runtime"
 )
-
-// cmdEchoRuntime is a no-binary fake registered for the cmd/loom smoke tests.
-// Its Run returns the substituted prompt verbatim so a test can confirm that
-// param substitution happened before the executor dispatched the request.
-type cmdEchoRuntime struct{}
-
-func (cmdEchoRuntime) Validate(req runtime.Request) error {
-	if req.Model == "" {
-		return runtime.ErrMissingModel
-	}
-	return nil
-}
-
-func (cmdEchoRuntime) Run(_ context.Context, req runtime.Request) (runtime.Response, error) {
-	return runtime.Response{
-		Output: req.Prompt,
-		Usage:  runtime.Usage{InputTokens: 1, OutputTokens: 1},
-	}, nil
-}
-
-func init() {
-	runtime.Register("cmd-echo", cmdEchoRuntime{})
-}
 
 // writeWorkflow drops a workflow YAML into t.TempDir() and returns the path.
 func writeWorkflow(t *testing.T, body string) string {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/mcuste/loom/pkg/executor"
-	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -340,29 +338,6 @@ tasks:
 	if got := record.Tasks[0].Output; got != "hello world" {
 		t.Fatalf("tasks[0].output = %q, want %q", got, "hello world")
 	}
-}
-
-// cmdCostRuntime is a no-binary fake registered for the budget surfacing test.
-// Each Run succeeds and reports a fixed cost so a chained workflow accumulates
-// a predictable TotalCostUSD and trips the workflow budget.
-type cmdCostRuntime struct{}
-
-func (cmdCostRuntime) Validate(req runtime.Request) error {
-	if req.Model == "" {
-		return runtime.ErrMissingModel
-	}
-	return nil
-}
-
-func (cmdCostRuntime) Run(_ context.Context, req runtime.Request) (runtime.Response, error) {
-	return runtime.Response{
-		Output: req.Prompt,
-		Usage:  runtime.Usage{TotalCostUSD: 0.5},
-	}, nil
-}
-
-func init() {
-	runtime.Register("cmd-cost", cmdCostRuntime{})
 }
 
 // TestRunWorkflow_SurfacesBudgetExceeded pins that when the executor aborts on
