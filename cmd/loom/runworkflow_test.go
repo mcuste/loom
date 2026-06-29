@@ -268,13 +268,8 @@ tasks:
     prompt: hello
 `)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", path})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "run", path); err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, out)
 	}
 
 	data, err := os.ReadFile(filepath.Join(testRunsDir(t), "wf", "latest.json"))
@@ -310,14 +305,8 @@ tasks:
 	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", path})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "run", path); err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, out)
 	}
 
 	data, err := os.ReadFile(filepath.Join(testRunsDir(t), "wf", "latest.json"))
@@ -430,15 +419,9 @@ tasks:
 	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", path, "-p", "ghost=x"})
-
-	err := root.Execute()
+	out, err := runCLI(t, "run", path, "-p", "ghost=x")
 	if err == nil {
-		t.Fatalf("Execute returned nil; want UnknownCLIParamError. output=%s", buf.String())
+		t.Fatalf("Execute returned nil; want UnknownCLIParamError. output=%s", out)
 	}
 	if !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("error %q does not name the offending param %q", err.Error(), "ghost")
@@ -462,16 +445,10 @@ tasks:
 	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", path})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	out, err := runCLI(t, "run", path)
+	if err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, out)
 	}
-	out := buf.String()
 
 	// OnStart shell flavour: "[N/N] greet (shell)".
 	if !strings.Contains(out, "greet (shell)") {
@@ -506,14 +483,8 @@ tasks:
 	loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", path, "-p", "who=loom"})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("Execute: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "run", path, "-p", "who=loom"); err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, out)
 	}
 
 	// Read the run record via latest.json so we don't have to glob a run id.

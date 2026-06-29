@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 )
@@ -26,15 +25,10 @@ tasks:
 func TestCheckCommandWarnsOnMissingRequired(t *testing.T) {
 	path := writeWorkflow(t, requiredParamWorkflow)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", path})
-	if err := root.Execute(); err != nil {
+	out, err := runCLI(t, "run", "check", path)
+	if err != nil {
 		t.Fatalf("check (no -p) returned err = %v; want nil", err)
 	}
-	out := buf.String()
 	if !strings.Contains(out, "warning") || !strings.Contains(out, "env") {
 		t.Errorf("expected warning naming `env`; got:\n%s", out)
 	}
@@ -48,15 +42,10 @@ func TestCheckCommandWarnsOnMissingRequired(t *testing.T) {
 func TestCheckCommandResolvesSuppliedRequired(t *testing.T) {
 	path := writeWorkflow(t, requiredParamWorkflow)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", path, "-p", "env=prod"})
-	if err := root.Execute(); err != nil {
+	out, err := runCLI(t, "run", "check", path, "-p", "env=prod")
+	if err != nil {
 		t.Fatalf("check (-p env=prod) returned err = %v; want nil", err)
 	}
-	out := buf.String()
 	if strings.Contains(out, "warning") {
 		t.Errorf("did not expect warning when env is supplied; got:\n%s", out)
 	}
@@ -70,12 +59,7 @@ func TestCheckCommandResolvesSuppliedRequired(t *testing.T) {
 func TestCheckCommandRejectsDuplicateParam(t *testing.T) {
 	path := writeWorkflow(t, requiredParamWorkflow)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", path, "-p", "env=a", "-p", "env=b"})
-	if err := root.Execute(); err == nil {
+	if _, err := runCLI(t, "run", "check", path, "-p", "env=a", "-p", "env=b"); err == nil {
 		t.Fatalf("check with duplicate -p returned nil; want DuplicateCLIParamError")
 	}
 }
@@ -91,16 +75,10 @@ tasks:
     command: echo hello
 `)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", path})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("check returned err = %v; want nil\noutput:\n%s", err, buf.String())
+	out, err := runCLI(t, "run", "check", path)
+	if err != nil {
+		t.Fatalf("check returned err = %v; want nil\noutput:\n%s", err, out)
 	}
-	out := buf.String()
 
 	// Plan line must contain kind=shell.
 	if !strings.Contains(out, "kind=shell") {

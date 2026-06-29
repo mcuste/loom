@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,13 +194,8 @@ tasks:
   - id: cut
     workflow: release
 `)
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", parentPath})
-	if err := root.Execute(); err == nil {
-		t.Fatalf("check accepted a sub-workflow missing a required child param; want error. output:\n%s", buf.String())
+	if out, err := runCLI(t, "run", "check", parentPath); err == nil {
+		t.Fatalf("check accepted a sub-workflow missing a required child param; want error. output:\n%s", out)
 	}
 }
 
@@ -221,13 +215,8 @@ tasks:
       version: "1.0.0"
       ghost: "x"
 `)
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", parentPath})
-	if err := root.Execute(); err == nil {
-		t.Fatalf("check accepted a with: key that is not a child param; want error. output:\n%s", buf.String())
+	if out, err := runCLI(t, "run", "check", parentPath); err == nil {
+		t.Fatalf("check accepted a with: key that is not a child param; want error. output:\n%s", out)
 	}
 }
 
@@ -252,12 +241,7 @@ tasks:
   - id: cut
     workflow: ambig
 `)
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "check", parentPath})
-	if err := root.Execute(); err == nil {
-		t.Fatalf("check accepted a child with an ambiguous output; want error. output:\n%s", buf.String())
+	if out, err := runCLI(t, "run", "check", parentPath); err == nil {
+		t.Fatalf("check accepted a child with an ambiguous output; want error. output:\n%s", out)
 	}
 }

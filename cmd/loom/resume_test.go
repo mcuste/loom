@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -140,14 +139,8 @@ tasks:
 		{"id": "b", "status": "failed", "error": "kaboom"},
 	}, nil)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"resume", runID})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("resume: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "resume", runID); err != nil {
+		t.Fatalf("resume: %v\noutput:\n%s", err, out)
 	}
 
 	rec := readNewRun(t, "wf", runID)
@@ -183,14 +176,8 @@ tasks:
 	}, nil)
 	linkLatest(t, "wf", runID)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"resume", "latest"})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("resume latest: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "resume", "latest"); err != nil {
+		t.Fatalf("resume latest: %v\noutput:\n%s", err, out)
 	}
 
 	// Resolving to the right record means b re-ran with a's stored output
@@ -234,14 +221,8 @@ tasks:
 	}, nil)
 	linkLatest(t, "wf", runID)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", wfPath, "--resume-latest"})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("run --resume-latest: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "run", wfPath, "--resume-latest"); err != nil {
+		t.Fatalf("run --resume-latest: %v\noutput:\n%s", err, out)
 	}
 
 	rec := readNewRun(t, "wf", runID)
@@ -278,18 +259,12 @@ tasks:
 		{"id": "b", "status": "failed", "error": "kaboom"},
 	}, nil)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"resume", runID})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("resume: %v\noutput:\n%s", err, buf.String())
+	out, err := runCLI(t, "resume", runID)
+	if err != nil {
+		t.Fatalf("resume: %v\noutput:\n%s", err, out)
 	}
 
 	// The progress lines must not show a negative or zero denominator.
-	out := buf.String()
 	if strings.Contains(out, "/-") || strings.Contains(out, "/0]") {
 		t.Errorf("progress line carries a non-positive denominator:\n%s", out)
 	}
@@ -335,14 +310,8 @@ tasks:
 		{"id": "b", "status": "failed", "error": "kaboom"},
 	}, map[string]string{"who": "alice"})
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"resume", runID})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("resume (no -p): %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "resume", runID); err != nil {
+		t.Fatalf("resume (no -p): %v\noutput:\n%s", err, out)
 	}
 
 	rec := readNewRun(t, "wf", runID)
@@ -381,13 +350,8 @@ tasks:
 		{"id": "write", "status": "failed", "error": "kaboom"},
 	})
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"resume", runID})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("resume: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "resume", runID); err != nil {
+		t.Fatalf("resume: %v\noutput:\n%s", err, out)
 	}
 
 	if _, err := os.Stat(filepath.Join(recordedCwd, "marker.txt")); err != nil {

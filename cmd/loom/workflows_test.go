@@ -174,13 +174,8 @@ tasks:
     prompt: hello
 `)
 
-	var buf bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"run", "greetme"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("run by name: %v\noutput:\n%s", err, buf.String())
+	if out, err := runCLI(t, "run", "greetme"); err != nil {
+		t.Fatalf("run by name: %v\noutput:\n%s", err, out)
 	}
 
 	if _, err := os.Stat(filepath.Join(testRunsDir(t), "greetme", "latest.json")); err != nil {
