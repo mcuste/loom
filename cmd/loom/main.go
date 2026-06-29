@@ -232,6 +232,13 @@ func storeHooks(run *store.Run) executor.Hooks {
 	}
 }
 
+// reportStoreErr writes a store-layer error to w on its own indented line. The
+// store is best-effort relative to the run itself, so these writes have no error
+// channel of their own and a failed write is intentionally discarded.
+func reportStoreErr(w io.Writer, err error) {
+	_, _ = fmt.Fprintf(w, "  store: %v\n", err)
+}
+
 // summaryFor returns nil when rep is nil so store.Run.Close leaves totals unset.
 func summaryFor(rep *executor.Report) *store.Summary {
 	if rep == nil {

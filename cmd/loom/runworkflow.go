@@ -155,7 +155,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 	run, err := store.Open(wf.ID, rc.manifest, store.Config{
 		Root:        rc.home,
 		Cwd:         rc.cwd,
-		OnError:     func(e error) { _, _ = fmt.Fprintf(w, "  store: %v\n", e) },
+		OnError:     func(e error) { reportStoreErr(w, e) },
 		Params:      stringifyParams(resolved),
 		ScheduleID:  prov.scheduleID,
 		TriggeredBy: prov.triggeredBy,
@@ -171,7 +171,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 	// error channel, so its own write error is intentionally discarded.
 	defer func() {
 		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
-			_, _ = fmt.Fprintf(w, "  store: %v\n", closeErr)
+			reportStoreErr(w, closeErr)
 		}
 	}()
 
@@ -208,7 +208,7 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 		// rep.Outputs, so a partial run carries over what it managed to produce.
 		if persistState(state, wf, rep) {
 			if err := store.SaveState(rc.home, wf.ID, state); err != nil {
-				_, _ = fmt.Fprintf(w, "  store: %v\n", err)
+				reportStoreErr(w, err)
 			}
 		}
 	}

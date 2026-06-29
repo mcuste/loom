@@ -26,8 +26,8 @@ func newScheduleCmd() *cobra.Command {
 		newScheduleAtCmd(),
 		newScheduleListCmd(),
 		newScheduleRemoveCmd(),
-		newScheduleEnableCmd(),
-		newScheduleDisableCmd(),
+		newScheduleToggleCmd("enable", "Enable a disabled schedule", true),
+		newScheduleToggleCmd("disable", "Disable a schedule without removing it", false),
 		newScheduleSyncCmd(),
 	)
 	return cmd
@@ -111,28 +111,17 @@ func newScheduleRemoveCmd() *cobra.Command {
 	return cmd
 }
 
-func newScheduleEnableCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "enable <id>",
-		Short: "Enable a disabled schedule",
+// newScheduleToggleCmd builds the `enable`/`disable` pair: identical save for the
+// verb and the enabled bit they flip, so one factory serves both.
+func newScheduleToggleCmd(use, short string, enabled bool) *cobra.Command {
+	return &cobra.Command{
+		Use:   use + " <id>",
+		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleToggle(cmd.OutOrStdout(), args[0], true)
+			return doScheduleToggle(cmd.OutOrStdout(), args[0], enabled)
 		},
 	}
-	return cmd
-}
-
-func newScheduleDisableCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "disable <id>",
-		Short: "Disable a schedule without removing it",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleToggle(cmd.OutOrStdout(), args[0], false)
-		},
-	}
-	return cmd
 }
 
 func newScheduleSyncCmd() *cobra.Command {
@@ -285,12 +274,8 @@ func doScheduleList(w io.Writer, workflowFilter string) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT FIRE\tENABLED\tOVERLAP")
 	for _, r := range recs {
-		enabled := "yes"
-		if !r.Enabled {
-			enabled = "no"
-		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.ID, r.WorkflowID, triggerSummary(r.Trigger), fireTime(r.NextFire), enabled, r.EffectiveOverlap())
+			r.ID, r.WorkflowID, triggerSummary(r.Trigger), fireTime(r.NextFire), pick(r.Enabled, "yes", "no"), r.EffectiveOverlap())
 	}
 	return tw.Flush()
 }
@@ -320,12 +305,17 @@ func doScheduleToggle(w io.Writer, id string, enabled bool) error {
 	if err := schedule.Update(home, rec); err != nil {
 		return err
 	}
-	state := "disabled"
-	if enabled {
-		state = "enabled"
-	}
-	_, err = fmt.Fprintf(w, "%s %s\n", state, id)
+	_, err = fmt.Fprintf(w, "%s %s\n", pick(enabled, "enabled", "disabled"), id)
 	return err
+}
+
+// pick returns yes when cond holds, no otherwise: a tiny ternary so a bool-to-
+// label mapping reads on one line instead of a four-line if/else.
+func pick(cond bool, yes, no string) string {
+	if cond {
+		return yes
+	}
+	return no
 }
 
 // inlineIDSuffix marks schedule ids that originate from a workflow's inline

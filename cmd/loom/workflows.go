@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -44,16 +45,8 @@ func resolveWorkflowRef(arg string) (string, error) {
 	}
 
 	for _, root := range roots {
-		// The per-component checks in splitWorkflowName already forbid any
-		// component that could climb out of the root ("", ".", "..", or one
-		// containing a separator), so the joins cannot escape lexically and
-		// need no further traversal guard. The dir form only repeats the final
-		// (already-validated) component, so it is equally safe.
-		flat := filepath.Join(append([]string{root}, parts...)...)
-		dir := filepath.Join(flat, parts[len(parts)-1])
-		// Flat before dir gives flat-wins precedence within a root.
-		for _, stem := range []string{flat, dir} {
-			for _, ext := range []string{".yaml", ".yml"} {
+		for _, stem := range candidateStems(root, parts) {
+			for _, ext := range workflowExts {
 				cand := stem + ext
 				if _, err := os.Stat(cand); err == nil {
 					return cand, nil
@@ -62,6 +55,35 @@ func resolveWorkflowRef(arg string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("workflow %q not found in any registry (searched %s); run `loom workflows ls` to list available workflows", arg, strings.Join(roots, ", "))
+}
+
+// workflowExts is the workflow file extensions, in precedence order: a name
+// resolves to its `.yaml` form before its `.yml` form, and walkRegistry treats
+// the same order as canonical when both exist. Centralized here so the two
+// resolution paths cannot drift.
+var workflowExts = []string{".yaml", ".yml"}
+
+// isWorkflowExt reports whether ext (as returned by filepath.Ext, leading dot
+// included) names a workflow file.
+func isWorkflowExt(ext string) bool {
+	return slices.Contains(workflowExts, ext)
+}
+
+// candidateStems returns the extensionless paths a registry name resolves to
+// within one root, in precedence order: the flat file `<root>/<parts...>` before
+// the eponymous-dir form `<root>/<parts...>/<last>`, so a flat file shadows a
+// dir form on the same name. walkRegistry encodes the identical flat-over-dir
+// precedence; TestRegistryResolveWalkParity pins the two together.
+//
+// The per-component checks in splitWorkflowName already forbid any component
+// that could climb out of the root ("", ".", "..", or one containing a
+// separator), so these joins cannot escape lexically and need no further
+// traversal guard. The dir form only repeats the final (already-validated)
+// component, so it is equally safe.
+func candidateStems(root string, parts []string) []string {
+	flat := filepath.Join(append([]string{root}, parts...)...)
+	dir := filepath.Join(flat, parts[len(parts)-1])
+	return []string{flat, dir}
 }
 
 // splitWorkflowName parses a registry name into its colon-separated path
@@ -237,7 +259,7 @@ func walkRegistry(root string) ([]workflowRef, error) {
 			return nil
 		}
 		ext := filepath.Ext(path)
-		if ext != ".yaml" && ext != ".yml" {
+		if !isWorkflowExt(ext) {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
