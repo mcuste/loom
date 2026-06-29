@@ -61,7 +61,7 @@ tasks:
     ok_exit: [1]           # extra non-zero exit codes to treat as success
 ```
 
-- `prompt_file` resolves relative to the **YAML dir**, inlined before validation. `script` path resolves relative to **loom's cwd**.
+- `prompt_file` resolves relative to the **YAML dir**, inlined before validation. A relative `script` path also resolves relative to the **YAML dir** (anchored to an absolute path in the stored manifest), so it runs the same whatever cwd `loom run` is invoked from; absolute and `{{...}}`-templated script paths are left as written.
 - `system_prompt` carries `{{params.x}}`/`{{state.k}}` only (no task refs). Rejected on `command`/`script`/`workflow` tasks and on `codex` runtime (Codex has no headless flag — use `AGENTS.md`).
 
 ## Placeholders & dependencies
@@ -74,7 +74,7 @@ tasks:
 ## Body kinds
 
 - **prompt / prompt_file** — dispatched to the runtime.
-- **command** — `sh -c`; stdout is the output; non-zero exit **fails** the task unless tolerated by `ok_exit`. Untrusted `{{id}}` splices are a shell-injection risk — quote/sanitize.
+- **command** — `sh -c`; stdout is the output; non-zero exit **fails** the task unless tolerated by `ok_exit`. Splicing `{{id}}` into the line is textual and **unsafe for arbitrary output** (backticks, `$(...)`, quotes execute). For any output that is not a known-safe scalar, read it from the **injected environment** instead (below).
 - **script** — runs the file directly; **non-zero exit does NOT fail** (exit is data). Only launch failure (missing/not executable) errors. `ok_exit` *narrows* tolerance to listed codes. Rejects `runtime`/`model`/`effort`/`system_prompt`/`schema`.
 - **workflow** — runs another workflow as one leaf; child's `output:` (or lone terminal) task is this task's result.
 
@@ -85,8 +85,14 @@ tasks:
 - id: alert
   depends_on: [check]
   when: "{{check.exit}} != 0"
-  command: echo "failed {{check.exit}}: {{check}}"
+  command: printf 'failed %s:\n%s\n' "$check_exit" "$check"   # env vars, not {{...}}
 ```
+
+**Env injection (command/script tasks).** Every shell/script task's child process gets the run's values as bare-named environment variables, so a command reads them as `"$name"` (inert to shell metacharacters) instead of splicing `{{...}}` into the line:
+
+- `$<id>` = that upstream task's output; `$<id>_exit` = its exit code.
+- `$<param>` / `$<state_key>` = param / state values; `$prev_<id>` = prior loop-iteration output; the for_each loop var by its `as` name.
+- The namespace is **flat**: an output, a same-named param, and the loop var collide (precedence, last wins: params → state → prev → exit → output → loop var); a task named like a real var (`PATH`, `HOME`) shadows it for the child; an id starting with a digit is skipped (not a valid shell name). Quote `"$x"` to keep whitespace/newlines intact.
 
 **ok_exit** — non-zero codes counted as success (0 always succeeds). Lets `command`/LLM tasks opt into exit-is-data so you can branch on `{{id.exit}}`. Rejected on `workflow`/loop-wrapper tasks. A tolerated non-zero LLM task has empty `{{id}}` output (no response) and is never memoized. Even without `ok_exit`, a failing task records its exit code (shown as `exit=N`).
 
