@@ -44,10 +44,9 @@ type atOpts struct {
 // schedule. Validation happens now so a bad workflow, missing required param,
 // or malformed cron expression fails at the prompt, not at 15:00.
 func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
-	switch schedule.Overlap(o.overlap) {
-	case schedule.OverlapSkip, schedule.OverlapQueue, schedule.OverlapAllow:
-	default:
-		return fmt.Errorf("invalid --overlap %q: want skip, queue, or allow", o.overlap)
+	overlap, err := schedule.ParseOverlap(o.overlap)
+	if err != nil {
+		return err
 	}
 	wf, path, params, err := loadAndResolve(ref, o.paramArgs)
 	if err != nil {
@@ -60,7 +59,7 @@ func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
 		Trigger:    schedule.Trigger{Cron: o.expr, TZ: o.tz},
 		Params:     params,
 		Enabled:    true,
-		Overlap:    schedule.Overlap(o.overlap),
+		Overlap:    overlap,
 		Catchup:    o.catchup,
 	}
 	return addAndReport(w, rec)

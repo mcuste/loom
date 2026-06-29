@@ -47,6 +47,18 @@ const (
 	OverlapAllow Overlap = "allow"
 )
 
+// ParseOverlap validates an overlap policy token and returns its typed value.
+// The accepted set is the single authority for what `--overlap` and any other
+// caller may supply, so a new policy is added here rather than in the CLI.
+func ParseOverlap(s string) (Overlap, error) {
+	switch Overlap(s) {
+	case OverlapSkip, OverlapQueue, OverlapAllow:
+		return Overlap(s), nil
+	default:
+		return "", fmt.Errorf("invalid overlap %q: want skip, queue, or allow", s)
+	}
+}
+
 // Trigger is a schedule's timing rule. Exactly one of Cron or At is set: Cron
 // is a recurring gronx expression, At is a one-off fire instant (stored UTC).
 // TZ is the IANA location name the cron expression is evaluated in; empty means
