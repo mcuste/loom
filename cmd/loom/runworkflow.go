@@ -236,6 +236,13 @@ func runOnce(ctx context.Context, r tui.Renderer, w io.Writer, rc runContext, wf
 	return rep, runErr
 }
 
+// reportStoreErr writes a store-layer error to w on its own indented line. The
+// store is best-effort relative to the run itself, so these writes have no error
+// channel of their own and a failed write is intentionally discarded.
+func reportStoreErr(w io.Writer, err error) {
+	_, _ = fmt.Fprintf(w, "  store: %v\n", err)
+}
+
 // stampSeeded records each seeded task into the new run record as an already-ok
 // entry (via the store hooks sh) so a future resume of this run can find them.
 // The executor fires no hooks for seeded tasks by design, so this mimics what it
