@@ -93,6 +93,45 @@ tasks:
 	}
 }
 
+// TestLinkSubWorkflows_AnchorsChildScriptPath pins that a relative `script:`
+// path in a linked child is anchored to the CHILD's own directory, exactly as
+// ParseFile anchors a top-level workflow. Without anchoring the child's
+// `script: run.sh` would exec as a bare command and fail "not found in $PATH".
+func TestLinkSubWorkflows_AnchorsChildScriptPath(t *testing.T) {
+	loomHomeForTest(t)
+	parentDir := t.TempDir()
+	childDir := t.TempDir()
+	scriptPath := writeFile(t, childDir, "run.sh", "#!/usr/bin/env bash\n")
+	childPath := writeFile(t, childDir, "child.yaml", `name: child
+tasks:
+  - id: lint
+    script: run.sh
+`)
+	parentPath := writeFile(t, parentDir, "parent.yaml", `name: parent
+tasks:
+  - id: cut
+    workflow: `+childPath+`
+`)
+	wf, err := workflow.ParseFile(parentPath)
+	if err != nil {
+		t.Fatalf("ParseFile parent: %v", err)
+	}
+	if err := linkSubWorkflows(wf, parentPath, nil); err != nil {
+		t.Fatalf("linkSubWorkflows: %v", err)
+	}
+	child := wf.Subs["cut"]
+	if child == nil {
+		t.Fatal("wf.Subs[cut] = nil; want the linked child")
+	}
+	got := child.ByID("lint").Script
+	if !filepath.IsAbs(got) {
+		t.Errorf("child script path = %q, want an absolute anchored path", got)
+	}
+	if want := canonicalPath(scriptPath); canonicalPath(got) != want {
+		t.Errorf("child script path = %q, want it anchored to %q", got, want)
+	}
+}
+
 // TestLinkSubWorkflows_Cycle pins that a link cycle (A links B, B links A) is
 // detected and reported rather than recursing forever.
 func TestLinkSubWorkflows_Cycle(t *testing.T) {

@@ -39,8 +39,13 @@ func linkSubWorkflows(wf *workflow.Workflow, selfPath string, chain []string) er
 		if err != nil {
 			return fmt.Errorf("task %q: read sub-workflow %q: %w", t.ID, t.Workflow, err)
 		}
-		// prompt_file refs in the child resolve beside the CHILD yaml.
+		// prompt_file refs and relative script paths in the child resolve beside
+		// the CHILD yaml, exactly as ParseFile anchors a top-level workflow.
 		inlined, err := workflow.InlinePromptFiles(raw, filepath.Dir(childPath))
+		if err != nil {
+			return fmt.Errorf("task %q: %s: %w", t.ID, childPath, err)
+		}
+		inlined, err = workflow.AnchorScriptPaths(inlined, filepath.Dir(childPath))
 		if err != nil {
 			return fmt.Errorf("task %q: %s: %w", t.ID, childPath, err)
 		}
