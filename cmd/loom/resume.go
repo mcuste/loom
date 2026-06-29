@@ -162,5 +162,5 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// then execute. The record's params are the lower-precedence tier under any
 	// CLI overrides.
 	seeded := resolveSeed(wf, plan).set
-	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home, plan: plan}, paramArgs, rec.Params, seeded)
+	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home, plan: plan}, paramInputs{cli: paramArgs, file: rec.Params}, seeded)
 }

@@ -9,11 +9,42 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
+
+// newRunCmd is the parent for executing a workflow. Invoked with a workflow
+// path it validates and runs (or resumes the latest run with --resume-latest);
+// its `check` subcommand stops after validation and the printed plan. A path
+// that is not a subcommand routes to the parent (cobra runs it when args[0]
+// does not name a child), so `loom run wf.yaml` executes as before.
+func newRunCmd() *cobra.Command {
+	var (
+		paramArgs    []string
+		resumeLatest bool
+	)
+	cmd := &cobra.Command{
+		Use:               "run <workflow>",
+		Short:             "Validate and run a workflow",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeWorkflowRef,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if resumeLatest {
+				return doRunResumeLatest(cmd.OutOrStdout(), args[0], paramArgs)
+			}
+			return doRun(cmd.OutOrStdout(), args[0], paramArgs)
+		},
+	}
+	addParamFlags(cmd, &paramArgs)
+	cmd.Flags().BoolVar(&resumeLatest, "resume-latest", false,
+		"seed ok tasks from $LOOM_HOME/runs/<wf>/latest.json (default $HOME/.loom) and re-run the remainder")
+	cmd.AddCommand(newCheckCmd())
+	return cmd
+}
 
 // seedPlan carries the optional seeded-task set threaded into the unified run
 // pipeline. seed maps task ids to their stored output (fed to
@@ -109,20 +140,20 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home}, paramArgs, nil, nil)
+	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home}, paramInputs{cli: paramArgs}, nil)
 }
 
 // renderCheckRun runs the shared check phase (validate + print the plan) against
 // a single renderer and, only if it passes, executes req. doRun and runFromRecord
 // share this tail: one renderer drives both the check and the run that follows, so
-// a stateful display spans both. file is the lower-precedence param tier (a
-// record's stored params on resume; nil for a fresh run); seeded annotates the
-// plan with carried-over tasks. The caller fills req.wf, req.manifest, req.home,
-// and any seed plan; the resolved params come from the check done here.
-func renderCheckRun(w io.Writer, req runRequest, paramArgs []string, file map[string]string, seeded map[workflow.TaskID]bool) (err error) {
+// a stateful display spans both. params carries the CLI and (lower-precedence)
+// file tiers; seeded annotates the plan with carried-over tasks. The caller
+// fills req.wf, req.manifest, req.home, and any seed plan; the resolved params
+// come from the check done here.
+func renderCheckRun(w io.Writer, req runRequest, params paramInputs, seeded map[workflow.TaskID]bool) (err error) {
 	r, finish := newRenderer(w)
 	defer finish(&err)
-	resolved, err := validateAndPlan(r, req.wf, paramArgs, file, false, seeded)
+	resolved, err := validateAndPlan(r, req.wf, params, false, seeded)
 	if err != nil {
 		return err
 	}
