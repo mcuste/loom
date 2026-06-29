@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -134,6 +135,155 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 	if !got.NextFire.After(d.now()) {
 		t.Fatalf("NextFire %v not advanced past now %v", got.NextFire, d.now())
 	}
+}
+
+// TestDaemonScanQueueHoldsThenFires pins the overlap=queue policy: a fire whose
+// previous run is still in flight is HELD (not launched, NextFire left untouched
+// so it stays due) and then fires on the next scan once the in-flight run clears.
+func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
+	home := t.TempDir()
+	path := writeWorkflow(t, shellWorkflow)
+	added, err := schedule.Add(home, schedule.Record{
+		WorkflowID: "shellwf",
+		Ref:        path,
+		Path:       path,
+		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
+		Overlap:    schedule.OverlapQueue,
+		Enabled:    true,
+	}, schedule.Config{Now: fixedClock("2026-06-28T10:00:30Z"), Rand: counterRand(1)})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	dueAt, _ := schedule.Get(home, added.ID)
+
+	d := newDaemon(home, io.Discard)
+	d.now = fixedClock("2026-06-28T10:01:05Z")
+	d.running.mark(added.ID) // a prior run is still going
+
+	results := make(chan fireResult, 1)
+	d.scan(false, results)
+
+	// Held: no fire launched while the prior run is in flight.
+	select {
+	case <-results:
+		t.Fatal("a fire was launched despite overlap=queue with a run in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 0 {
+		t.Fatalf("got %d runs, want 0 (held)", len(runs))
+	}
+	// Unlike skip, queue leaves NextFire untouched so the tick stays due.
+	if got, _ := schedule.Get(home, added.ID); !got.NextFire.Equal(dueAt.NextFire) {
+		t.Fatalf("NextFire = %v, want it held at %v (queue must not advance past the tick)", got.NextFire, dueAt.NextFire)
+	}
+
+	// The prior run completes; the next scan fires the held tick.
+	d.running.clear(added.ID)
+	d.scan(false, results)
+	res := awaitResult(t, results)
+	if res.err != nil {
+		t.Fatalf("fire error: %v", res.err)
+	}
+	d.complete(res)
+	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1 after the held tick fired", len(runs))
+	}
+}
+
+// TestDaemonScanAllowFiresWhileRunning pins the overlap=allow policy: a fire is
+// launched even though a previous run for the same schedule is still in flight.
+func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
+	home := t.TempDir()
+	path := writeWorkflow(t, shellWorkflow)
+	added, err := schedule.Add(home, schedule.Record{
+		WorkflowID: "shellwf",
+		Ref:        path,
+		Path:       path,
+		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
+		Overlap:    schedule.OverlapAllow,
+		Enabled:    true,
+	}, schedule.Config{Now: fixedClock("2026-06-28T10:00:30Z"), Rand: counterRand(1)})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	d := newDaemon(home, io.Discard)
+	d.now = fixedClock("2026-06-28T10:01:05Z")
+	d.running.mark(added.ID) // a prior run is still going; allow ignores it
+
+	results := make(chan fireResult, 1)
+	d.scan(false, results)
+
+	res := awaitResult(t, results)
+	if res.err != nil {
+		t.Fatalf("fire error: %v", res.err)
+	}
+	d.complete(res)
+	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1 (allow fires regardless of the in-flight run)", len(runs))
+	}
+}
+
+// TestDaemonRunLoopFiresThenStopsOnCancel drives the real scan/sleep loop (not
+// scan/complete in isolation): it scans a due schedule, fires it in a goroutine,
+// folds the run id back through complete, and returns nil when ctx is cancelled.
+func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
+	home := t.TempDir()
+	path := writeWorkflow(t, shellWorkflow)
+	added, err := schedule.Add(home, schedule.Record{
+		WorkflowID: "shellwf",
+		Ref:        path,
+		Path:       path,
+		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
+		Catchup:    true, // the loop's first scan applies catch-up; fire the due tick
+		Enabled:    true,
+	}, schedule.Config{Now: fixedClock("2026-06-28T10:00:30Z"), Rand: counterRand(1)})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	d := newDaemon(home, io.Discard)
+	d.now = fixedClock("2026-06-28T10:01:05Z")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.run(ctx) }()
+
+	// The loop fires the due schedule and folds the run id back via complete.
+	// Wait on that observable record state rather than a fixed sleep.
+	waitForCondition(t, func() bool {
+		rec, err := schedule.Get(home, added.ID)
+		return err == nil && rec.LastRunID != ""
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v, want nil after ctx cancel", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not return after ctx cancel")
+	}
+
+	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1 from the loop's fire", len(runs))
+	}
+}
+
+// waitForCondition polls cond until it holds or a 30s deadline elapses, failing
+// the test on timeout. Used to synchronize on observable store/schedule state
+// written by the daemon's background goroutines without a fixed sleep.
+func waitForCondition(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met within 30s")
 }
 
 func awaitResult(t *testing.T, results <-chan fireResult) fireResult {
