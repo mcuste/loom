@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
 )
@@ -80,6 +81,63 @@ func TestScheduleEnableDisableRemove(t *testing.T) {
 	}
 	if recs, _ := schedule.List(home, ""); len(recs) != 0 {
 		t.Fatalf("got %d schedules after rm, want 0", len(recs))
+	}
+}
+
+func TestScheduleAtCreatesOneOffRecord(t *testing.T) {
+	home := loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+	path := writeWorkflow(t, shellWorkflow)
+
+	out, err := runCLI(t, "schedule", "at", path, "--time", "09:30", "--date", "2099-01-01", "--tz", "UTC")
+	if err != nil {
+		t.Fatalf("schedule at: %v (%s)", err, out)
+	}
+	recs, err := schedule.List(home, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d schedules, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.WorkflowID != "shellwf" || !r.Enabled {
+		t.Fatalf("unexpected record: %+v", r)
+	}
+	if r.Trigger.IsCron() {
+		t.Errorf("trigger is cron, want a one-off `at` trigger: %+v", r.Trigger)
+	}
+	want := time.Date(2099, 1, 1, 9, 30, 0, 0, time.UTC)
+	if !r.Trigger.At.Equal(want) {
+		t.Errorf("Trigger.At = %v, want %v", r.Trigger.At, want)
+	}
+}
+
+func TestScheduleListRendersTableAndEmpty(t *testing.T) {
+	home := loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+
+	// With nothing scheduled, ls reports the empty state rather than a header.
+	if out, err := runCLI(t, "schedule", "ls"); err != nil {
+		t.Fatalf("schedule ls (empty): %v (%s)", err, out)
+	} else if !strings.Contains(out, "no schedules") {
+		t.Errorf("empty ls should say `no schedules`; got:\n%s", out)
+	}
+
+	path := writeWorkflow(t, shellWorkflow)
+	if _, err := runCLI(t, "schedule", "cron", path, "--expr", "0 15 * * *", "--tz", "UTC"); err != nil {
+		t.Fatalf("schedule cron: %v", err)
+	}
+	id := mustOneID(t, home)
+
+	out, err := runCLI(t, "schedule", "ls")
+	if err != nil {
+		t.Fatalf("schedule ls: %v (%s)", err, out)
+	}
+	for _, want := range []string{"ID", "WORKFLOW", "TRIGGER", "OVERLAP", id, "shellwf", "0 15 * * *"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ls output missing %q:\n%s", want, out)
+		}
 	}
 }
 
