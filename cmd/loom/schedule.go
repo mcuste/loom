@@ -341,38 +341,31 @@ func doScheduleSync(w io.Writer, ref string) error {
 	if err != nil {
 		return err
 	}
-	if ref != "" {
-		wf, _, path, err := loadWorkflow(ref)
-		if err != nil {
-			return err
-		}
-		msg, err := syncInlineSchedule(home, wf, absPath(path), ref)
-		if err != nil {
-			return err
-		}
-		if msg == "" {
-			msg = "no inline schedule"
-		}
-		_, err = fmt.Fprintf(w, "%s: %s\n", ref, msg)
-		return err
+	if ref == "" {
+		return syncAll(w, home)
 	}
-
-	roots, err := registrySearchRoots()
+	msg, err := syncOne(home, ref, ref)
 	if err != nil {
 		return err
 	}
-	refs, err := walkRegistries(roots)
+	if msg == "" {
+		msg = "no inline schedule"
+	}
+	_, err = fmt.Fprintf(w, "%s: %s\n", ref, msg)
+	return err
+}
+
+// syncAll reconciles the inline schedule of every registry workflow, skipping
+// (with a note) any workflow that fails to load so one broken file does not
+// abort the sweep. It reports when nothing had an inline block to sync.
+func syncAll(w io.Writer, home string) error {
+	refs, err := listRegistryWorkflows()
 	if err != nil {
 		return err
 	}
 	synced := 0
 	for _, r := range refs {
-		wf, _, path, err := loadWorkflow(r.path)
-		if err != nil {
-			fmt.Fprintf(w, "skip %s: %v\n", r.name, err)
-			continue
-		}
-		msg, err := syncInlineSchedule(home, wf, absPath(path), r.name)
+		msg, err := syncOne(home, r.path, r.name)
 		if err != nil {
 			fmt.Fprintf(w, "skip %s: %v\n", r.name, err)
 			continue
@@ -387,6 +380,19 @@ func doScheduleSync(w io.Writer, ref string) error {
 		return err
 	}
 	return nil
+}
+
+// syncOne loads the workflow at loadRef (a registry name or a file path) and
+// reconciles its inline schedule, returning syncInlineSchedule's status ("" when
+// the workflow carries no inline block). displayName is the ref recorded on the
+// schedule and shown in messages, which differs from loadRef in the sweep (a
+// path loads, the colon-name displays).
+func syncOne(home, loadRef, displayName string) (string, error) {
+	wf, _, path, err := loadWorkflow(loadRef)
+	if err != nil {
+		return "", err
+	}
+	return syncInlineSchedule(home, wf, absPath(path), displayName)
 }
 
 // syncInlineSchedule upserts (or removes) the inline schedule for one workflow

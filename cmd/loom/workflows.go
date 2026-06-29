@@ -151,11 +151,7 @@ func completeWorkflowRef(_ *cobra.Command, args []string, _ string) ([]string, c
 	if len(args) != 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	roots, err := registrySearchRoots()
-	if err != nil {
-		return nil, cobra.ShellCompDirectiveDefault
-	}
-	refs, err := walkRegistries(roots)
+	refs, err := listRegistryWorkflows()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveDefault
 	}
@@ -295,6 +291,17 @@ func walkRegistries(roots []string) ([]workflowRef, error) {
 	return refs, nil
 }
 
+// listRegistryWorkflows resolves the ordered registry roots and walks them into
+// the merged local+global workflow set. It is the shared prelude behind
+// completion, `workflows ls`, and `schedule sync`.
+func listRegistryWorkflows() ([]workflowRef, error) {
+	roots, err := registrySearchRoots()
+	if err != nil {
+		return nil, err
+	}
+	return walkRegistries(roots)
+}
+
 // descWidth caps the description column so a long first line does not push the
 // resolved path far off to the right.
 const descWidth = 60
@@ -305,11 +312,7 @@ const descWidth = 60
 // description leaves the description column blank; an absent registry root lists
 // nothing. Columns are aligned with a tabwriter so the output reads as a table.
 func doWorkflowsList(w io.Writer) error {
-	roots, err := registrySearchRoots()
-	if err != nil {
-		return err
-	}
-	refs, err := walkRegistries(roots)
+	refs, err := listRegistryWorkflows()
 	if err != nil {
 		return err
 	}
