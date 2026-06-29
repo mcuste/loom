@@ -40,6 +40,20 @@ type atOpts struct {
 	paramArgs []string
 }
 
+// baseRecord builds the trigger-independent fields shared by `schedule cron`
+// and `schedule at`. The caller sets Trigger (and, for cron, Overlap) on the
+// returned record before persisting it.
+func baseRecord(wf *workflow.Workflow, ref, path string, params map[string]string, catchup bool) schedule.Record {
+	return schedule.Record{
+		WorkflowID: string(wf.ID),
+		Ref:        ref,
+		Path:       absPath(path),
+		Params:     params,
+		Enabled:    true,
+		Catchup:    catchup,
+	}
+}
+
 // doScheduleCron validates the workflow and params, then persists a recurring
 // schedule. Validation happens now so a bad workflow, missing required param,
 // or malformed cron expression fails at the prompt, not at 15:00.
@@ -52,16 +66,9 @@ func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
 	if err != nil {
 		return err
 	}
-	rec := schedule.Record{
-		WorkflowID: string(wf.ID),
-		Ref:        ref,
-		Path:       absPath(path),
-		Trigger:    schedule.Trigger{Cron: o.expr, TZ: o.tz},
-		Params:     params,
-		Enabled:    true,
-		Overlap:    overlap,
-		Catchup:    o.catchup,
-	}
+	rec := baseRecord(wf, ref, path, params, o.catchup)
+	rec.Trigger = schedule.Trigger{Cron: o.expr, TZ: o.tz}
+	rec.Overlap = overlap
 	return addAndReport(w, rec)
 }
 
@@ -84,15 +91,8 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	if err != nil {
 		return err
 	}
-	rec := schedule.Record{
-		WorkflowID: string(wf.ID),
-		Ref:        ref,
-		Path:       absPath(path),
-		Trigger:    schedule.Trigger{At: at, TZ: o.tz},
-		Params:     params,
-		Enabled:    true,
-		Catchup:    o.catchup,
-	}
+	rec := baseRecord(wf, ref, path, params, o.catchup)
+	rec.Trigger = schedule.Trigger{At: at, TZ: o.tz}
 	return addAndReport(w, rec)
 }
 
