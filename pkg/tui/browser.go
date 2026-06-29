@@ -739,15 +739,6 @@ func trunc(s string, width int) string {
 	return string(r[:width-1]) + "…"
 }
 
-// padRight pads s with spaces to width runes (no-op when already wider).
-func padRight(s string, width int) string {
-	n := width - len([]rune(s))
-	if n <= 0 {
-		return s
-	}
-	return s + strings.Repeat(" ", n)
-}
-
 func clamp(v, lo, hi int) int {
 	if v < lo {
 		return lo

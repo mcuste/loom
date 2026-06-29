@@ -126,10 +126,10 @@ func RunsTable(w io.Writer, headers []store.RunHeader) error {
 	sym := runViewSymbols(w)
 	now := time.Now()
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATUS\tWHEN\tWORKFLOW\tRUN\tTASKS\tDURATION\tCOST")
+	_, _ = fmt.Fprintln(tw, "STATUS\tWHEN\tWORKFLOW\tRUN\tTASKS\tDURATION\tCOST")
 	for _, h := range headers {
 		tasks := fmt.Sprintf("%d", h.TaskCount)
-		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\t$%.4f\n",
+		_, _ = fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\t$%.4f\n",
 			statusGlyph(h.Status, sym), h.Status,
 			relTime(h.StartedAt, now),
 			h.WorkflowID,
@@ -190,7 +190,7 @@ func ShowRun(w io.Writer, rec *store.RunRecord, full bool) error {
 		if tr.Error != "" {
 			note += "  " + strings.TrimSpace(tr.Error)
 		}
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t$%.6f%s\n",
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t$%.6f%s\n",
 			statusGlyph(tr.Status, sym), tr.ID+iterSuffix(tr.Iteration),
 			taskRouting(wf, tr), humanDur(tr.ElapsedMs), tr.Usage.TotalCostUSD, note)
 	}

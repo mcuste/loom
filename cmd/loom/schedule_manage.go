@@ -22,9 +22,9 @@ func doScheduleList(w io.Writer, workflowFilter string) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT FIRE\tENABLED\tOVERLAP")
+	_, _ = fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT FIRE\tENABLED\tOVERLAP")
 	for _, r := range recs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.ID, r.WorkflowID, triggerSummary(r.Trigger), formatFireTime(r.NextFire), pick(r.Enabled, "yes", "no"), r.EffectiveOverlap())
 	}
 	return tw.Flush()

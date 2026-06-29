@@ -48,11 +48,11 @@ func syncAll(w io.Writer, home string) error {
 	for _, r := range refs {
 		msg, err := syncOne(home, r.path, r.name)
 		if err != nil {
-			fmt.Fprintf(w, "skip %s: %v\n", r.name, err)
+			_, _ = fmt.Fprintf(w, "skip %s: %v\n", r.name, err)
 			continue
 		}
 		if msg != "" {
-			fmt.Fprintf(w, "%s: %s\n", r.name, msg)
+			_, _ = fmt.Fprintf(w, "%s: %s\n", r.name, msg)
 			synced++
 		}
 	}

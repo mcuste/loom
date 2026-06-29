@@ -198,7 +198,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 		d.logf("schedule %s: %v", rec.ID, err)
 		return
 	}
-	defer lf.Close()
+	defer func() { _ = lf.Close() }()
 
 	cr := &captureRenderer{Renderer: tui.New(lf)}
 	defer func() { _ = cr.Close() }()

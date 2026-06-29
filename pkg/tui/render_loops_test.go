@@ -307,7 +307,7 @@ func TestRenderPlan_RichPlacesLoopInline(t *testing.T) {
 	seed := lineIndex(t, got, "seed")
 	loop := lineIndex(t, got, "Loop work")
 	tail := lineIndex(t, got, "tail")
-	if !(seed < loop && loop < tail) {
+	if seed >= loop || loop >= tail {
 		t.Errorf("loop not inline: want seed(%d) < loop(%d) < tail(%d)\n%s", seed, loop, tail, got)
 	}
 }
@@ -326,7 +326,7 @@ func TestRenderPlan_PlainPlacesLoopInline(t *testing.T) {
 	seed := lineIndex(t, got, "1. seed")
 	loop := lineIndex(t, got, "  loop  ")
 	tail := lineIndex(t, got, "tail")
-	if !(seed < loop && loop < tail) {
+	if seed >= loop || loop >= tail {
 		t.Errorf("loop not inline: want seed(%d) < loop(%d) < tail(%d)\n%s", seed, loop, tail, got)
 	}
 }

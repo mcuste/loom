@@ -225,7 +225,7 @@ func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
 		lg.ID, loopDescriptor(*lg), len(lg.Members), plural(len(lg.Members)))))
 	b.WriteString("\n")
 	if lg.Description != "" {
-		b.WriteString(fmt.Sprintf("    %s %s\n", labelStyle.Render("desc"), lg.Description))
+		fmt.Fprintf(&b, "    %s %s\n", labelStyle.Render("desc"), lg.Description)
 	}
 	for _, id := range lg.Members {
 		b.WriteString(richTaskRow(wf, id, idWidth))
@@ -256,8 +256,8 @@ func richTaskRow(wf *workflow.Workflow, id workflow.TaskID, idWidth int) string 
 	cw := childIDWidth(child)
 	for i := range child.Tasks {
 		ct := &child.Tasks[i]
-		b.WriteString(fmt.Sprintf("        %-*s  %s  deps=%s\n",
-			cw, ct.ID, planTaskCols(child, ct), depsList(ct.DependsOn)))
+		fmt.Fprintf(&b, "        %-*s  %s  deps=%s\n",
+			cw, ct.ID, planTaskCols(child, ct), depsList(ct.DependsOn))
 	}
 	return b.String()
 }

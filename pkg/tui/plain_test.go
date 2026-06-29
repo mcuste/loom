@@ -205,7 +205,7 @@ func TestPlainRenderer_HooksRenderProgressLines(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			r := tui.New(&buf)
-			r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
+			_ = r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
 			buf.Reset() // drop the header; assert only the progress line
 			tc.call(r.Hooks())
 			if got := buf.String(); got != tc.want {
@@ -227,7 +227,7 @@ func TestPlainRenderer_HooksGrowDenominatorAcrossLoopPasses(t *testing.T) {
 
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
+	_ = r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
 	buf.Reset()
 
 	h := r.Hooks()
