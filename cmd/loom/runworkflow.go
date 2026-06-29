@@ -307,3 +307,33 @@ func persistState(state map[string]string, wf *workflow.Workflow, rep *executor.
 	}
 	return changed
 }
+
+// stringifyParams returns nil for an empty bag so `omitempty` keeps params
+// absent from the stored JSON rather than writing an empty object.
+func stringifyParams(p workflow.ParamValues) map[string]string {
+	if len(p) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(p))
+	for k, v := range p {
+		out[string(k)] = v
+	}
+	return out
+}
+
+// storeHooks binds store.Run.OnStart and store.Run.OnFinish as method values
+// directly: their signatures match executor.Hooks with no adapter needed.
+func storeHooks(run *store.Run) executor.Hooks {
+	return executor.Hooks{
+		OnStart:  run.OnStart,
+		OnFinish: run.OnFinish,
+	}
+}
+
+// summaryFor returns nil when rep is nil so store.Run.Close leaves totals unset.
+func summaryFor(rep *executor.Report) *store.Summary {
+	if rep == nil {
+		return nil
+	}
+	return &store.Summary{Usage: rep.Usage, TaskCount: len(rep.Tasks)}
+}
