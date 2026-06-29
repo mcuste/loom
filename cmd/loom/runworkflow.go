@@ -106,6 +106,27 @@ type runRequest struct {
 	prov     provenance
 }
 
+// renderCheckRun runs the shared check phase (validate + print the plan) against
+// a single renderer and, only if it passes, executes req. doRun and runFromRecord
+// share this tail: one renderer drives both the check and the run that follows, so
+// a stateful display spans both. file is the lower-precedence param tier (a
+// record's stored params on resume; nil for a fresh run); seeded annotates the
+// plan with carried-over tasks. The caller fills req.wf, req.manifest, req.home,
+// and any seed plan; the resolved params come from the check done here.
+func renderCheckRun(w io.Writer, req runRequest, paramArgs []string, file map[string]string, seeded map[workflow.TaskID]bool) (err error) {
+	r, finish := newRenderer(w)
+	defer finish(&err)
+	resolved, err := check(r, req.wf, paramArgs, file, false, seeded)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	req.resolved = resolved
+	return runWorkflow(r, w, req)
+}
+
 // runWorkflow is the unified run pipeline shared by doRun, runFromRecord, and
 // the daemon. It parses nothing itself; callers hand it the already-parsed
 // workflow and resolved params after the check phase has already validated and

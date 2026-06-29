@@ -123,7 +123,7 @@ func chdirToRecorded(w io.Writer, cwd string) error {
 // seeded task, the new run record gets a synthetic ok entry written through
 // the store hooks before the executor starts, so a subsequent resume of
 // THIS run finds them already-completed instead of re-dispatching.
-func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *store.RunRecord, paramArgs []string) (err error) {
+func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
 	wf, err := workflow.Parse(manifest)
 	if err != nil {
 		return err
@@ -165,16 +165,7 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// then execute. The record's params are the lower-precedence tier under any
 	// CLI overrides.
 	seeded := resolveSeed(wf, plan).set
-	r, finish := newRenderer(w)
-	defer finish(&err)
-	resolved, err := check(r, wf, paramArgs, rec.Params, false, seeded)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w); err != nil {
-		return err
-	}
-	return runWorkflow(r, w, runRequest{wf: wf, manifest: manifest, resolved: resolved, home: home, plan: plan})
+	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home, plan: plan}, paramArgs, rec.Params, seeded)
 }
 
 // findRunRecord resolves a user-supplied run id to a path under

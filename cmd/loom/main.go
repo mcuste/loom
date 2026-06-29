@@ -152,26 +152,18 @@ func check(r tui.Renderer, wf *workflow.Workflow, paramArgs []string, file map[s
 }
 
 // doRun runs the shared check phase (validate + print the plan) and then, only
-// if it passes, executes the whole workflow fresh.
-func doRun(w io.Writer, path string, paramArgs []string) (err error) {
+// if it passes, executes the whole workflow fresh. home is resolved up front (as
+// the resume paths do) so a home-resolution failure surfaces before the plan.
+func doRun(w io.Writer, path string, paramArgs []string) error {
 	wf, manifest, _, err := loadWorkflow(path)
 	if err != nil {
-		return err
-	}
-	r, finish := newRenderer(w)
-	defer finish(&err)
-	resolved, err := check(r, wf, paramArgs, nil, false, nil)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
 	home, err := loomHome()
 	if err != nil {
 		return err
 	}
-	return runWorkflow(r, w, runRequest{wf: wf, manifest: manifest, resolved: resolved, home: home})
+	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home}, paramArgs, nil, nil)
 }
 
 // doCheck runs the shared check phase only: validate and print the plan, then
