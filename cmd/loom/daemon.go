@@ -149,36 +149,44 @@ func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
 		if !rec.Enabled {
 			continue
 		}
-		fire, remove, next, err := decideFire(rec, now, firstScan)
-		if err != nil {
-			d.logf("schedule %s: %v", rec.ID, err)
-			continue
-		}
-		if remove && !fire {
-			// A one-off whose instant was missed while the daemon was down and
-			// that opted out of catch-up: drop it without running.
-			d.logf("schedule %s: one-off time passed while daemon was down, dropping", rec.ID)
-			d.removeRecord(rec.ID)
-			continue
-		}
-		if fire {
-			if !d.startFire(rec, now, remove, next, results) {
-				// Blocked by the overlap policy (queue): leave NextFire untouched so
-				// the next scan retries once the in-flight run completes.
-				soonest = earliest(soonest, now.Add(minWait))
-				continue
-			}
-		} else {
-			// Not due yet: persist the (possibly freshly computed) NextFire so the
-			// table and the next scan agree.
-			if !next.Equal(rec.NextFire) {
-				rec.NextFire = next
-				d.updateRecord(rec)
-			}
-		}
-		soonest = earliest(soonest, next)
+		soonest = earliest(soonest, d.processRecord(rec, now, firstScan, results))
 	}
 	return soonest
+}
+
+// processRecord evaluates one enabled schedule and acts on the firing decision:
+// it drops a missed one-off, fires (or holds) a due schedule, or persists a
+// freshly computed NextFire for one not yet due. It returns this record's
+// contribution to the scan's soonest-NextFire, or the zero time when it
+// contributes none (a decision error or a dropped one-off).
+func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan bool, results chan<- fireResult) time.Time {
+	fire, remove, next, err := decideFire(rec, now, firstScan)
+	if err != nil {
+		d.logf("schedule %s: %v", rec.ID, err)
+		return time.Time{}
+	}
+	if remove && !fire {
+		// A one-off whose instant was missed while the daemon was down and that
+		// opted out of catch-up: drop it without running.
+		d.logf("schedule %s: one-off time passed while daemon was down, dropping", rec.ID)
+		d.removeRecord(rec.ID)
+		return time.Time{}
+	}
+	if fire {
+		if !d.startFire(rec, now, remove, next, results) {
+			// Blocked by the overlap policy (queue): leave NextFire untouched so
+			// the next scan retries once the in-flight run completes.
+			return now.Add(minWait)
+		}
+		return next
+	}
+	// Not due yet: persist the (possibly freshly computed) NextFire so the table
+	// and the next scan agree.
+	if !next.Equal(rec.NextFire) {
+		rec.NextFire = next
+		d.updateRecord(rec)
+	}
+	return next
 }
 
 // startFire applies the overlap policy and, if clear to run, marks the schedule
