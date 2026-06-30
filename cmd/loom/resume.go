@@ -37,7 +37,7 @@ func doResume(w io.Writer, runID string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	rec, err := loadRunRecord(home, runID)
+	rec, err := store.LoadByRunID(home, runID)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// known (--resume-latest reads it from disk); for a stored-manifest resume it
 	// is empty, so path refs resolve relative to the (restored) working directory
 	// and registry-name refs through the cwd-based registry roots.
-	if err := linkAndValidate(wf, selfPath); err != nil {
+	if err := workflow.Link(wf, selfPath, resolveSubWorkflowRef); err != nil {
 		return err
 	}
 

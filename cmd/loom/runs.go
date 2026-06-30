@@ -113,7 +113,7 @@ func doShow(w io.Writer, runID, task string, summary bool) error {
 	if err != nil {
 		return err
 	}
-	rec, err := loadRunRecord(home, runID)
+	rec, err := store.LoadByRunID(home, runID)
 	if err != nil {
 		return err
 	}

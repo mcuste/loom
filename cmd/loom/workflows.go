@@ -25,7 +25,7 @@ func completeWorkflowRef(_ *cobra.Command, args []string, _ string) ([]string, c
 	}
 	names := make([]string, len(refs))
 	for i, r := range refs {
-		names[i] = r.name
+		names[i] = r.Name
 	}
 	return names, cobra.ShellCompDirectiveDefault
 }
@@ -67,7 +67,7 @@ func doWorkflowsList(w io.Writer) error {
 	}
 	tuiRefs := make([]tui.WorkflowRef, len(refs))
 	for i, r := range refs {
-		tuiRefs[i] = tui.WorkflowRef{Name: r.name, Path: r.path}
+		tuiRefs[i] = tui.WorkflowRef{Name: r.Name, Path: r.Path}
 	}
 	return tui.WorkflowsTable(w, tuiRefs)
 }

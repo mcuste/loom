@@ -1,13 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/pkg/runner"
-	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // newRunCmd is the parent for executing a workflow. Invoked with a workflow
@@ -52,28 +50,4 @@ func doRun(w io.Writer, path string, paramArgs []string) error {
 		return err
 	}
 	return renderCheckRun(w, runner.Request{Wf: wf, Manifest: manifest, Home: home}, paramInputs{cli: paramArgs}, nil)
-}
-
-// renderCheckRun runs the shared check phase (validate + print the plan) against
-// a single renderer and, only if it passes, executes req. doRun and runFromRecord
-// share this tail: one renderer drives both the check and the run that follows, so
-// a stateful display spans both. params carries the CLI and (lower-precedence)
-// file tiers; seeded annotates the plan with carried-over tasks. The caller
-// fills req.Wf, req.Manifest, req.Home, and any seed plan; the resolved params
-// come from the check done here.
-func renderCheckRun(w io.Writer, req runner.Request, params paramInputs, seeded map[workflow.TaskID]bool) (err error) {
-	r, finish := newRenderer(w)
-	defer finish(&err)
-	resolved, err := validateAndPlan(r, req.Wf, params, false, seeded)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w); err != nil {
-		return err
-	}
-	req.Resolved = resolved
-	ctx, stop := interruptContext()
-	defer stop()
-	_, err = runner.Run(ctx, r, w, req)
-	return err
 }

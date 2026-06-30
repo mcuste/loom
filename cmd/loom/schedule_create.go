@@ -85,7 +85,7 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 		}
 		loc = l
 	}
-	at, err := parseAtTime(o.timeStr, o.dateStr, loc, time.Now())
+	at, err := schedule.ParseAtTime(o.timeStr, o.dateStr, loc, time.Now(), "--time", "--date")
 	if err != nil {
 		return err
 	}
@@ -96,12 +96,6 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	rec := schedule.NewAtRecord(string(wf.ID), ref, absPath(path), params, o.catchup,
 		schedule.Trigger{At: at, TZ: o.tz})
 	return addAndReport(w, rec)
-}
-
-// parseAtTime passes --time and --date as field labels to schedule.ParseAtTime
-// so format errors name the offending flag rather than a generic field name.
-func parseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time) (time.Time, error) {
-	return schedule.ParseAtTime(timeStr, dateStr, loc, now, "--time", "--date")
 }
 
 // loadAndResolve loads the workflow and resolves its params, returning the
