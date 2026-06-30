@@ -72,6 +72,47 @@ type Trigger struct {
 // IsCron reports whether the trigger is a recurring cron rule.
 func (t Trigger) IsCron() bool { return t.Cron != "" }
 
+// Summary renders the trigger for display: "cron <expr>" (with optional TZ)
+// for a recurring trigger, or "at <instant>" for a one-off. The format of
+// the instant matches the canonical "2006-01-02 15:04 MST" display layout.
+func (t Trigger) Summary() string {
+	if t.IsCron() {
+		if t.TZ != "" {
+			return fmt.Sprintf("cron %q %s", t.Cron, t.TZ)
+		}
+		return fmt.Sprintf("cron %q", t.Cron)
+	}
+	if t.At.IsZero() {
+		return "at -"
+	}
+	return "at " + t.At.Format("2006-01-02 15:04 MST")
+}
+
+// ParseAtTime turns a clock time (and optional date) in loc into a concrete
+// instant. Without a date it uses today in loc; if that instant has already
+// passed it rolls to the next day, so "at 15:00" means the next 15:00. A
+// supplied date is honored verbatim (no rollover). Returns neutral errors
+// without flag names; callers that surface CLI flags wrap the errors themselves.
+func ParseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time) (time.Time, error) {
+	hm, err := time.Parse("15:04", timeStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("schedule: invalid time %q: want HH:MM", timeStr)
+	}
+	if dateStr != "" {
+		d, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("schedule: invalid date %q: want YYYY-MM-DD", dateStr)
+		}
+		return time.Date(d.Year(), d.Month(), d.Day(), hm.Hour(), hm.Minute(), 0, 0, loc), nil
+	}
+	nowLoc := now.In(loc)
+	at := time.Date(nowLoc.Year(), nowLoc.Month(), nowLoc.Day(), hm.Hour(), hm.Minute(), 0, 0, loc)
+	if !at.After(now) {
+		at = at.AddDate(0, 0, 1)
+	}
+	return at, nil
+}
+
 // Record is a single persisted schedule.
 type Record struct {
 	// ID is the stable on-disk identity ("<workflow_id>_<kind>_<suffix>").

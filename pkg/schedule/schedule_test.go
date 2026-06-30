@@ -185,3 +185,92 @@ func TestEffectiveOverlapDefaultsToSkip(t *testing.T) {
 		t.Fatalf("EffectiveOverlap = %q, want %q", got, schedule.OverlapSkip)
 	}
 }
+
+func TestParseAtTimeRollsOverToNextDay(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 6, 28, 16, 0, 0, 0, loc) // 16:00, after 15:00
+
+	at, err := schedule.ParseAtTime("15:00", "", loc, now)
+	if err != nil {
+		t.Fatalf("ParseAtTime: %v", err)
+	}
+	want := time.Date(2026, 6, 29, 15, 0, 0, 0, loc)
+	if !at.Equal(want) {
+		t.Fatalf("at = %v, want %v (next day)", at, want)
+	}
+}
+
+func TestParseAtTimeHonorsExplicitDate(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 6, 28, 16, 0, 0, 0, loc)
+
+	at, err := schedule.ParseAtTime("09:30", "2026-07-01", loc, now)
+	if err != nil {
+		t.Fatalf("ParseAtTime: %v", err)
+	}
+	want := time.Date(2026, 7, 1, 9, 30, 0, 0, loc)
+	if !at.Equal(want) {
+		t.Fatalf("at = %v, want %v", at, want)
+	}
+}
+
+func TestParseAtTimeRejectsInvalidInput(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 6, 28, 16, 0, 0, 0, loc)
+
+	cases := []struct {
+		name    string
+		timeStr string
+		dateStr string
+	}{
+		{"non-numeric time", "noon", ""},
+		{"out-of-range time", "25:00", ""},
+		{"date-shaped time", "2026-07-01", ""},
+		{"malformed date", "09:30", "07/01/2026"},
+		{"out-of-range date", "09:30", "2026-13-40"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := schedule.ParseAtTime(tc.timeStr, tc.dateStr, loc, now)
+			if err == nil {
+				t.Fatalf("ParseAtTime(%q, %q) = nil error, want rejection", tc.timeStr, tc.dateStr)
+			}
+		})
+	}
+}
+
+func TestTriggerSummary(t *testing.T) {
+	cases := []struct {
+		name string
+		tr   schedule.Trigger
+		want string
+	}{
+		{
+			"cron no tz",
+			schedule.Trigger{Cron: "0 15 * * *"},
+			`cron "0 15 * * *"`,
+		},
+		{
+			"cron with tz",
+			schedule.Trigger{Cron: "0 15 * * *", TZ: "Europe/Berlin"},
+			`cron "0 15 * * *" Europe/Berlin`,
+		},
+		{
+			"at instant",
+			schedule.Trigger{At: time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)},
+			"at 2026-06-28 15:00 UTC",
+		},
+		{
+			"at zero",
+			schedule.Trigger{},
+			"at -",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.tr.Summary(); got != tc.want {
+				t.Fatalf("Summary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

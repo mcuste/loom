@@ -113,28 +113,19 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	return addAndReport(w, rec)
 }
 
-// parseAtTime turns a clock time (and optional date) in loc into a concrete
-// instant. Without a date it uses today; if that instant has already passed it
-// rolls to the next day, so "at 15:00" means the next 15:00. A supplied date is
-// honored verbatim (no rollover) so an explicit past date surfaces as such.
+// parseAtTime wraps schedule.ParseAtTime with flag-name framing so CLI error
+// messages name the offending flag (--time / --date) rather than using neutral
+// domain errors.
 func parseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time) (time.Time, error) {
-	hm, err := time.Parse("15:04", timeStr)
-	if err != nil {
+	if _, err := time.Parse("15:04", timeStr); err != nil {
 		return time.Time{}, fmt.Errorf("invalid --time %q: want HH:MM", timeStr)
 	}
 	if dateStr != "" {
-		d, err := time.Parse("2006-01-02", dateStr)
-		if err != nil {
+		if _, err := time.Parse("2006-01-02", dateStr); err != nil {
 			return time.Time{}, fmt.Errorf("invalid --date %q: want YYYY-MM-DD", dateStr)
 		}
-		return time.Date(d.Year(), d.Month(), d.Day(), hm.Hour(), hm.Minute(), 0, 0, loc), nil
 	}
-	nowLoc := now.In(loc)
-	at := time.Date(nowLoc.Year(), nowLoc.Month(), nowLoc.Day(), hm.Hour(), hm.Minute(), 0, 0, loc)
-	if !at.After(now) {
-		at = at.AddDate(0, 0, 1)
-	}
-	return at, nil
+	return schedule.ParseAtTime(timeStr, dateStr, loc, now)
 }
 
 // loadAndResolve loads the workflow and resolves its params, returning the
@@ -169,6 +160,6 @@ func addAndReport(w io.Writer, rec schedule.Record) error {
 		return err
 	}
 	_, err = fmt.Fprintf(w, "scheduled %s (%s), next fire %s\n",
-		stored.ID, triggerSummary(stored.Trigger), formatFireTime(stored.NextFire))
+		stored.ID, stored.Trigger.Summary(), formatFireTime(stored.NextFire))
 	return err
 }
