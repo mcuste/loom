@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/adhocore/gronx"
+
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // Overlap is the policy for a fire that arrives while the schedule's previous
@@ -91,17 +93,28 @@ func (t Trigger) Summary() string {
 // ParseAtTime turns a clock time (and optional date) in loc into a concrete
 // instant. Without a date it uses today in loc; if that instant has already
 // passed it rolls to the next day, so "at 15:00" means the next 15:00. A
-// supplied date is honored verbatim (no rollover). Returns neutral errors
-// without flag names; callers that surface CLI flags wrap the errors themselves.
-func ParseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time) (time.Time, error) {
+// supplied date is honored verbatim (no rollover).
+//
+// The optional labels argument customises the field names used in error
+// messages: labels[0] replaces "time" (e.g. "--time") and labels[1] replaces
+// "date" (e.g. "--date"). Callers that surface CLI flag names pass them here
+// so format errors name the offending flag directly.
+func ParseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time, labels ...string) (time.Time, error) {
+	timeLabel, dateLabel := "time", "date"
+	if len(labels) > 0 && labels[0] != "" {
+		timeLabel = labels[0]
+	}
+	if len(labels) > 1 && labels[1] != "" {
+		dateLabel = labels[1]
+	}
 	hm, err := time.Parse("15:04", timeStr)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("schedule: invalid time %q: want HH:MM", timeStr)
+		return time.Time{}, fmt.Errorf("schedule: invalid %s %q: want HH:MM", timeLabel, timeStr)
 	}
 	if dateStr != "" {
 		d, err := time.Parse("2006-01-02", dateStr)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("schedule: invalid date %q: want YYYY-MM-DD", dateStr)
+			return time.Time{}, fmt.Errorf("schedule: invalid %s %q: want YYYY-MM-DD", dateLabel, dateStr)
 		}
 		return time.Date(d.Year(), d.Month(), d.Day(), hm.Hour(), hm.Minute(), 0, 0, loc), nil
 	}
@@ -333,6 +346,104 @@ func List(root, workflowFilter string) ([]Record, error) {
 		return recs[i].CreatedAt.After(recs[j].CreatedAt)
 	})
 	return recs, nil
+}
+
+// NewRecord builds a Record with the trigger-independent defaults shared by
+// every schedule creation path: WorkflowID, Ref, Path, Params, Enabled=true,
+// and Catchup. The caller sets Trigger (and, for inline records, ID; for cron
+// records, Overlap) before persisting. path must already be absolute; the
+// caller resolves it via filepath.Abs.
+func NewRecord(workflowID, ref, path string, params map[string]string, catchup bool) Record {
+	return Record{
+		WorkflowID: workflowID,
+		Ref:        ref,
+		Path:       path,
+		Params:     params,
+		Enabled:    true,
+		Catchup:    catchup,
+	}
+}
+
+// inlineIDSuffix marks schedule IDs that originate from a workflow's inline
+// `schedule:` block. It is the single authority for the naming convention so
+// a re-sync upserts the same record and a dropped block can find and remove
+// its prior record.
+const inlineIDSuffix = "_inline"
+
+// SyncAction describes the outcome of a [SyncInline] call.
+type SyncAction int
+
+const (
+	// SyncNoOp means the workflow has no inline schedule and none was stored.
+	SyncNoOp SyncAction = iota
+	// SyncAdded means a new inline schedule record was created.
+	SyncAdded
+	// SyncUpdated means an existing inline schedule record was updated in place.
+	SyncUpdated
+	// SyncRemoved means a previously synced inline schedule was deleted because
+	// the workflow's `schedule:` block was dropped.
+	SyncRemoved
+)
+
+// SyncResult is the outcome of a [SyncInline] call.
+type SyncResult struct {
+	// Action classifies what happened.
+	Action SyncAction
+	// ID is the schedule id that was affected. Empty for SyncNoOp.
+	ID string
+	// NextFire is the next fire instant for SyncAdded and SyncUpdated.
+	// Zero for SyncRemoved and SyncNoOp.
+	NextFire time.Time
+}
+
+// SyncInline upserts or removes the inline schedule for wf and returns a
+// SyncResult describing the change. path must be the absolute workflow file
+// path. ref is the display name recorded on the schedule record and shown in
+// messages.
+//
+// Field-preservation rule on update: CreatedAt, LastFire, LastRunID, and
+// Enabled from the existing record survive the re-sync; NextFire is
+// recomputed from the (possibly updated) cron expression.
+func SyncInline(home string, wf *workflow.Workflow, path, ref string) (SyncResult, error) {
+	id := string(wf.ID) + inlineIDSuffix
+	existing, getErr := Get(home, id)
+
+	if wf.Schedule == nil {
+		if getErr == nil {
+			if err := Remove(home, id); err != nil {
+				return SyncResult{}, err
+			}
+			return SyncResult{Action: SyncRemoved, ID: id}, nil
+		}
+		return SyncResult{Action: SyncNoOp}, nil
+	}
+
+	rec := NewRecord(string(wf.ID), ref, path, nil, false)
+	rec.ID = id
+	rec.Trigger = Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ}
+	if err := Validate(rec); err != nil {
+		return SyncResult{}, err
+	}
+	if getErr == nil {
+		rec.CreatedAt = existing.CreatedAt
+		rec.LastFire = existing.LastFire
+		rec.LastRunID = existing.LastRunID
+		rec.Enabled = existing.Enabled
+		next, err := rec.NextFireAfter(time.Now())
+		if err != nil {
+			return SyncResult{}, err
+		}
+		rec.NextFire = next
+		if err := Update(home, rec); err != nil {
+			return SyncResult{}, err
+		}
+		return SyncResult{Action: SyncUpdated, ID: id, NextFire: rec.NextFire}, nil
+	}
+	stored, err := Add(home, rec, Config{})
+	if err != nil {
+		return SyncResult{}, err
+	}
+	return SyncResult{Action: SyncAdded, ID: stored.ID, NextFire: stored.NextFire}, nil
 }
 
 // write atomically persists rec to <root>/schedules/<id>.json.

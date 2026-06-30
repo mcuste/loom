@@ -56,21 +56,6 @@ type atOpts struct {
 	dateStr string
 }
 
-// baseRecord builds the trigger-independent fields shared by `schedule cron`,
-// `schedule at`, and `schedule sync` (inline blocks). The caller sets Trigger
-// (and, for cron, Overlap; for inline, ID) on the returned record before
-// persisting it.
-func baseRecord(wf *workflow.Workflow, ref, path string, params map[string]string, catchup bool) schedule.Record {
-	return schedule.Record{
-		WorkflowID: string(wf.ID),
-		Ref:        ref,
-		Path:       absPath(path),
-		Params:     params,
-		Enabled:    true,
-		Catchup:    catchup,
-	}
-}
-
 // doScheduleCron validates the workflow and params, then persists a recurring
 // schedule. Validation happens now so a bad workflow, missing required param,
 // or malformed cron expression fails at the prompt, not at 15:00.
@@ -83,7 +68,7 @@ func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
 	if err != nil {
 		return err
 	}
-	rec := baseRecord(wf, ref, path, params, o.catchup)
+	rec := schedule.NewRecord(string(wf.ID), ref, absPath(path), params, o.catchup)
 	rec.Trigger = schedule.Trigger{Cron: o.expr, TZ: o.tz}
 	rec.Overlap = overlap
 	return addAndReport(w, rec)
@@ -108,24 +93,15 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	if err != nil {
 		return err
 	}
-	rec := baseRecord(wf, ref, path, params, o.catchup)
+	rec := schedule.NewRecord(string(wf.ID), ref, absPath(path), params, o.catchup)
 	rec.Trigger = schedule.Trigger{At: at, TZ: o.tz}
 	return addAndReport(w, rec)
 }
 
-// parseAtTime wraps schedule.ParseAtTime with flag-name framing so CLI error
-// messages name the offending flag (--time / --date) rather than using neutral
-// domain errors.
+// parseAtTime passes --time and --date as field labels to schedule.ParseAtTime
+// so format errors name the offending flag rather than a generic field name.
 func parseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time) (time.Time, error) {
-	if _, err := time.Parse("15:04", timeStr); err != nil {
-		return time.Time{}, fmt.Errorf("invalid --time %q: want HH:MM", timeStr)
-	}
-	if dateStr != "" {
-		if _, err := time.Parse("2006-01-02", dateStr); err != nil {
-			return time.Time{}, fmt.Errorf("invalid --date %q: want YYYY-MM-DD", dateStr)
-		}
-	}
-	return schedule.ParseAtTime(timeStr, dateStr, loc, now)
+	return schedule.ParseAtTime(timeStr, dateStr, loc, now, "--time", "--date")
 }
 
 // loadAndResolve loads the workflow and resolves its params, returning the

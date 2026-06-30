@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // fixedClock returns a deterministic timestamp so tests can pin CreatedAt and
@@ -236,6 +237,153 @@ func TestParseAtTimeRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("ParseAtTime(%q, %q) = nil error, want rejection", tc.timeStr, tc.dateStr)
 			}
 		})
+	}
+}
+
+func TestNewRecordDefaults(t *testing.T) {
+	rec := schedule.NewRecord("mywf", "mywf", "/abs/mywf.yaml", map[string]string{"k": "v"}, true)
+	if rec.WorkflowID != "mywf" {
+		t.Errorf("WorkflowID = %q, want %q", rec.WorkflowID, "mywf")
+	}
+	if rec.Ref != "mywf" {
+		t.Errorf("Ref = %q, want %q", rec.Ref, "mywf")
+	}
+	if rec.Path != "/abs/mywf.yaml" {
+		t.Errorf("Path = %q, want %q", rec.Path, "/abs/mywf.yaml")
+	}
+	if !rec.Enabled {
+		t.Error("Enabled = false, want true")
+	}
+	if !rec.Catchup {
+		t.Error("Catchup = false, want true")
+	}
+	if rec.Params["k"] != "v" {
+		t.Errorf("Params[k] = %q, want %q", rec.Params["k"], "v")
+	}
+}
+
+// inlineWF builds a minimal Workflow with an inline schedule for sync tests.
+func inlineWF(id, cron string) *workflow.Workflow {
+	return &workflow.Workflow{
+		ID:       workflow.WorkflowID(id),
+		Schedule: &workflow.Schedule{Cron: cron, TZ: "UTC"},
+	}
+}
+
+// bareWF builds a minimal Workflow with no inline schedule.
+func bareWF(id string) *workflow.Workflow {
+	return &workflow.Workflow{ID: workflow.WorkflowID(id)}
+}
+
+func TestSyncInlineAdds(t *testing.T) {
+	home := t.TempDir()
+	wf := inlineWF("mywf", "0 2 * * *")
+
+	res, err := schedule.SyncInline(home, wf, "/abs/mywf.yaml", "mywf")
+	if err != nil {
+		t.Fatalf("SyncInline: %v", err)
+	}
+	if res.Action != schedule.SyncAdded {
+		t.Fatalf("Action = %v, want SyncAdded", res.Action)
+	}
+	if res.ID != "mywf_inline" {
+		t.Fatalf("ID = %q, want %q", res.ID, "mywf_inline")
+	}
+	if res.NextFire.IsZero() {
+		t.Error("NextFire is zero after add")
+	}
+	rec, err := schedule.Get(home, "mywf_inline")
+	if err != nil {
+		t.Fatalf("Get after add: %v", err)
+	}
+	if !rec.Enabled {
+		t.Error("added record not enabled")
+	}
+}
+
+func TestSyncInlineUpdatePreservesFields(t *testing.T) {
+	home := t.TempDir()
+	wf := inlineWF("mywf", "0 2 * * *")
+
+	// First sync creates the record.
+	if _, err := schedule.SyncInline(home, wf, "/abs/mywf.yaml", "mywf"); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	before, err := schedule.Get(home, "mywf_inline")
+	if err != nil {
+		t.Fatalf("Get after add: %v", err)
+	}
+	// Simulate a fire event and a manual disable.
+	before.LastFire = time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC)
+	before.LastRunID = "run_abc"
+	before.Enabled = false
+	if err := schedule.Update(home, before); err != nil {
+		t.Fatalf("Update for setup: %v", err)
+	}
+
+	// Re-sync must preserve those fields.
+	res, err := schedule.SyncInline(home, wf, "/abs/mywf.yaml", "mywf")
+	if err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+	if res.Action != schedule.SyncUpdated {
+		t.Fatalf("Action = %v, want SyncUpdated", res.Action)
+	}
+	after, err := schedule.Get(home, "mywf_inline")
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if !after.LastFire.Equal(before.LastFire) {
+		t.Errorf("LastFire = %v, want %v (not preserved)", after.LastFire, before.LastFire)
+	}
+	if after.LastRunID != "run_abc" {
+		t.Errorf("LastRunID = %q, want %q (not preserved)", after.LastRunID, "run_abc")
+	}
+	if after.Enabled {
+		t.Error("Enabled = true, want false (not preserved)")
+	}
+	if !after.CreatedAt.Equal(before.CreatedAt) {
+		t.Errorf("CreatedAt changed: got %v, want %v", after.CreatedAt, before.CreatedAt)
+	}
+}
+
+func TestSyncInlineDropRemoves(t *testing.T) {
+	home := t.TempDir()
+
+	// Add a record first.
+	if _, err := schedule.SyncInline(home, inlineWF("mywf", "0 2 * * *"), "/abs/mywf.yaml", "mywf"); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	// Sync a workflow without a schedule block; should remove the record.
+	res, err := schedule.SyncInline(home, bareWF("mywf"), "/abs/mywf.yaml", "mywf")
+	if err != nil {
+		t.Fatalf("drop sync: %v", err)
+	}
+	if res.Action != schedule.SyncRemoved {
+		t.Fatalf("Action = %v, want SyncRemoved", res.Action)
+	}
+	if res.ID != "mywf_inline" {
+		t.Errorf("ID = %q, want %q", res.ID, "mywf_inline")
+	}
+	if _, err := schedule.Get(home, "mywf_inline"); err == nil {
+		t.Error("record still present after remove")
+	}
+}
+
+func TestSyncInlineNoBlockNoop(t *testing.T) {
+	home := t.TempDir()
+
+	// Workflow with no schedule block and no prior stored record: no-op.
+	res, err := schedule.SyncInline(home, bareWF("mywf"), "/abs/mywf.yaml", "mywf")
+	if err != nil {
+		t.Fatalf("SyncInline noop: %v", err)
+	}
+	if res.Action != schedule.SyncNoOp {
+		t.Fatalf("Action = %v, want SyncNoOp", res.Action)
+	}
+	if res.ID != "" {
+		t.Errorf("ID = %q, want empty for noop", res.ID)
 	}
 }
 
