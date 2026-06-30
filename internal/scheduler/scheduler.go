@@ -1,4 +1,8 @@
-package main
+// Package scheduler implements the daemon loop that fires scheduled workflows.
+// The Loader dependency is the only seam between the scheduler and the CLI
+// layer: the scheduler knows only how to fire and track runs; loading and
+// validating a workflow file is delegated to the caller.
+package scheduler
 
 import (
 	"context"
@@ -8,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // pollCap bounds how long the daemon sleeps between scans even when the next
@@ -19,31 +24,42 @@ const pollCap = 60 * time.Second
 // queued run) does not spin the loop.
 const minWait = time.Second
 
+// Loader reads, parses, and validates a workflow from disk. It is the only
+// dependency the scheduler borrows from the CLI layer. ref is the on-disk path
+// stored in the schedule record. The returned manifest bytes are stored
+// verbatim by the run store; path is the resolved absolute path.
+type Loader func(ref string) (*workflow.Workflow, []byte, string, error)
+
 // daemon owns the scheduler loop. now is injectable so tests drive the firing
-// decision deterministically; running tracks in-flight fires per schedule id so
-// the overlap policy can skip or serialize them.
+// decision deterministically; running tracks in-flight fires per schedule id
+// so the overlap policy can skip or serialize them.
 type daemon struct {
 	home    string
 	out     io.Writer
 	now     func() time.Time
 	running *runningSet
+	load    Loader
 }
 
-func newDaemon(home string, out io.Writer) *daemon {
+// New returns a daemon ready to run. load is called on each fire to read and
+// validate the workflow; home is the loom data directory that owns the
+// schedules and run records.
+func New(home string, out io.Writer, load Loader) *daemon {
 	return &daemon{
 		home:    home,
 		out:     out,
 		now:     time.Now,
 		running: newRunningSet(),
+		load:    load,
 	}
 }
 
-// run drives the scan/sleep loop until ctx is cancelled. The first scan applies
-// catch-up handling for ticks missed while the daemon was down. results carries
-// completions back so the loop can clear the running flag and persist
-// LastFire/LastRunID without racing the scan's NextFire writes.
-func (d *daemon) run(ctx context.Context) error {
-	d.logf("loom daemon started; schedules under %s", filepath.Join(d.home, "schedules"))
+// Run drives the scan/sleep loop until ctx is cancelled. The first scan
+// applies catch-up handling for ticks missed while the daemon was down.
+// results carries completions back so the loop can clear the running flag and
+// persist LastFire/LastRunID without racing the scan's NextFire writes.
+func (d *daemon) Run(ctx context.Context) error {
+	d.logf("loom daemon started; schedules under %s", d.schedulesDir())
 	results := make(chan fireResult, 16)
 	firstScan := true
 	for {
@@ -93,11 +109,11 @@ func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
 	return soonest
 }
 
-// processRecord evaluates one enabled schedule and acts on the firing decision:
-// it drops a missed one-off, fires (or holds) a due schedule, or persists a
-// freshly computed NextFire for one not yet due. It returns this record's
-// contribution to the scan's soonest-NextFire, or the zero time when it
-// contributes none (a decision error or a dropped one-off).
+// processRecord evaluates one enabled schedule and acts on the firing
+// decision: it drops a missed one-off, fires (or holds) a due schedule, or
+// persists a freshly computed NextFire for one not yet due. It returns this
+// record's contribution to the scan's soonest-NextFire, or the zero time when
+// it contributes none (a decision error or a dropped one-off).
 func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan bool, results chan<- fireResult) time.Time {
 	fire, remove, next, err := decideFire(rec, now, firstScan)
 	if err != nil {
@@ -119,8 +135,8 @@ func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan boo
 		}
 		return next
 	}
-	// Not due yet: persist the (possibly freshly computed) NextFire so the table
-	// and the next scan agree.
+	// Not due yet: persist the (possibly freshly computed) NextFire so the
+	// table and the next scan agree.
 	if !next.Equal(rec.NextFire) {
 		rec.NextFire = next
 		d.updateRecord(rec)
@@ -128,9 +144,10 @@ func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan boo
 	return next
 }
 
-// startFire applies the overlap policy and, if clear to run, marks the schedule
-// running, persists the post-fire record state, and launches the run. It
-// returns false when the queue policy must hold the fire for a later scan.
+// startFire applies the overlap policy and, if clear to run, marks the
+// schedule running, persists the post-fire record state, and launches the
+// run. It returns false when the queue policy must hold the fire for a later
+// scan.
 func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next time.Time, results chan<- fireResult) bool {
 	switch rec.EffectiveOverlap() {
 	case schedule.OverlapSkip:
@@ -160,9 +177,9 @@ func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next
 	return true
 }
 
-// complete clears the running flag and folds the run id back into the schedule
-// record (for a surviving cron schedule). One-offs were already removed in
-// startFire, so a missing record here is expected and ignored.
+// complete clears the running flag and folds the run id back into the
+// schedule record (for a surviving cron schedule). One-offs were already
+// removed in startFire, so a missing record here is expected and ignored.
 func (d *daemon) complete(res fireResult) {
 	d.running.clear(res.scheduleID)
 	if res.oneOff {
@@ -203,4 +220,14 @@ func (d *daemon) removeRecord(id string) {
 func (d *daemon) logf(format string, a ...any) {
 	ts := d.now().UTC().Format("2006-01-02 15:04:05")
 	_, _ = fmt.Fprintf(d.out, "%s  %s\n", ts, fmt.Sprintf(format, a...))
+}
+
+// schedulesDir returns the on-disk directory that holds schedule records.
+func (d *daemon) schedulesDir() string {
+	return filepath.Join(d.home, "schedules")
+}
+
+// scheduleLogDir returns the per-schedule log directory.
+func (d *daemon) scheduleLogDir(id string) string {
+	return filepath.Join(d.home, "schedules", "logs", id)
 }

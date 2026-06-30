@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -72,7 +72,7 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	recPath := filepath.Join(home, "runs", string(wf.ID), "latest.json")
+	recPath := store.WorkflowLatestPath(home, string(wf.ID))
 	rec, err := store.Load(recPath)
 	if err != nil {
 		return err
@@ -133,11 +133,11 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// Seed every ok task from the record unfiltered; resolveSeed is the single
 	// authority that drops ids no longer present in the current workflow (the
 	// executor ignores Seed keys with no matching task).
-	plan := seedPlanFromRecord(rec)
+	plan := runner.SeedPlanFromRecord(rec)
 
 	// Run the shared check phase, annotating the plan with the seeded tasks,
 	// then execute. The record's params are the lower-precedence tier under any
 	// CLI overrides.
-	seeded := resolveSeed(wf, plan).set
-	return renderCheckRun(w, runRequest{wf: wf, manifest: manifest, home: home, plan: plan}, paramInputs{cli: paramArgs, file: rec.Params}, seeded)
+	seeded := runner.SeededSet(wf, plan)
+	return renderCheckRun(w, runner.Request{Wf: wf, Manifest: manifest, Home: home, Plan: plan}, paramInputs{cli: paramArgs, file: rec.Params}, seeded)
 }

@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/mcuste/loom/internal/scheduler"
 )
 
 func newDaemonCmd() *cobra.Command {
@@ -23,8 +25,8 @@ func newDaemonCmd() *cobra.Command {
 			}
 			ctx, stop := interruptContext()
 			defer stop()
-			d := newDaemon(home, cmd.OutOrStdout())
-			return d.run(ctx)
+			d := scheduler.New(home, cmd.OutOrStdout(), loadWorkflow)
+			return d.Run(ctx)
 		},
 	}
 	cmd.AddCommand(newDaemonInstallCmd())

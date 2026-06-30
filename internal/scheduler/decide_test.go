@@ -1,4 +1,4 @@
-package main
+package scheduler
 
 import (
 	"testing"
@@ -74,8 +74,8 @@ func TestDecideFireCronZeroNextFire(t *testing.T) {
 	}
 }
 
-// TestDecideFireCronBadExpr pins that an unparseable cron expression surfaces as
-// an error from decideFire (via NextFireAfter) rather than a silent no-fire.
+// TestDecideFireCronBadExpr pins that an unparseable cron expression surfaces
+// as an error from decideFire (via NextFireAfter) rather than a silent no-fire.
 func TestDecideFireCronBadExpr(t *testing.T) {
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 	rec := schedule.Record{
@@ -118,8 +118,8 @@ func TestDecideFireOneOff(t *testing.T) {
 }
 
 // TestEarliest pins the zero-time-as-unset rule: a real instant always wins
-// over the zero time regardless of argument order, and of two real instants the
-// earlier one is returned.
+// over the zero time regardless of argument order, and of two real instants
+// the earlier one is returned.
 func TestEarliest(t *testing.T) {
 	early := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 	late := early.Add(time.Hour)

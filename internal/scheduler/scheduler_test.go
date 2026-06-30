@@ -1,36 +1,35 @@
-package main
+package scheduler
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/store"
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// fixedClock returns a deterministic clock so the daemon's firing decision is
-// reproducible without depending on wall time.
-func fixedClock(ts string) func() time.Time {
-	t, err := time.Parse(time.RFC3339, ts)
-	if err != nil {
-		panic(err)
-	}
-	return func() time.Time { return t }
-}
+// shellWorkflow is a minimal workflow that runs a shell command, so no model
+// call is needed to exercise the daemon's fire path.
+const shellWorkflow = `
+name: shellwf
+tasks:
+  - id: a
+    command: echo hi
+`
 
-// counterRand returns a deterministic six-hex suffix for schedule ids.
-func counterRand(initial uint32) func() (string, error) {
-	var n atomic.Uint32
-	n.Store(initial)
-	return func() (string, error) {
-		v := n.Add(1) - 1
-		return fmt.Sprintf("%06x", v), nil
+// testLoader reads and parses a workflow from disk. Unlike the CLI's
+// loadWorkflow, it skips sub-workflow linking (not needed for the shell
+// workflows the daemon tests use) and accepts an absolute path directly.
+func testLoader(ref string) (*workflow.Workflow, []byte, string, error) {
+	wf, manifest, err := workflow.ReadAndParse(ref)
+	if err != nil {
+		return nil, nil, "", err
 	}
+	return wf, manifest, ref, nil
 }
 
 // TestDaemonScanFiresDueSchedule wires scan -> execute -> complete end to end
@@ -51,7 +50,7 @@ func TestDaemonScanFiresDueSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
@@ -98,8 +97,9 @@ func TestDaemonScanFiresDueSchedule(t *testing.T) {
 	}
 }
 
-// TestDaemonScanSkipsWhenRunning pins the overlap=skip policy: a schedule whose
-// previous run is still in flight does not fire again and advances past the tick.
+// TestDaemonScanSkipsWhenRunning pins the overlap=skip policy: a schedule
+// whose previous run is still in flight does not fire again and advances past
+// the tick.
 func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 	home := t.TempDir()
 	path := writeWorkflow(t, shellWorkflow)
@@ -115,7 +115,7 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // pretend a prior run is still going
 
@@ -134,9 +134,10 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 	}
 }
 
-// TestDaemonScanQueueHoldsThenFires pins the overlap=queue policy: a fire whose
-// previous run is still in flight is HELD (not launched, NextFire left untouched
-// so it stays due) and then fires on the next scan once the in-flight run clears.
+// TestDaemonScanQueueHoldsThenFires pins the overlap=queue policy: a fire
+// whose previous run is still in flight is HELD (not launched, NextFire left
+// untouched so it stays due) and then fires on the next scan once the
+// in-flight run clears.
 func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	home := t.TempDir()
 	path := writeWorkflow(t, shellWorkflow)
@@ -153,15 +154,15 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	}
 	dueAt, _ := schedule.Get(home, added.ID)
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going
 
 	results := make(chan fireResult, 1)
 	d.scan(false, results)
 
-	// Held: the queue policy launches no `go execute` while the prior run is in
-	// flight, so the empty run index is deterministic the moment scan returns.
+	// Held: the queue policy launches no `go execute` while the prior run is
+	// in flight, so the empty run index is deterministic the moment scan returns.
 	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 0 {
 		t.Fatalf("got %d runs, want 0 (held)", len(runs))
 	}
@@ -183,8 +184,9 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	}
 }
 
-// TestDaemonScanAllowFiresWhileRunning pins the overlap=allow policy: a fire is
-// launched even though a previous run for the same schedule is still in flight.
+// TestDaemonScanAllowFiresWhileRunning pins the overlap=allow policy: a fire
+// is launched even though a previous run for the same schedule is still in
+// flight.
 func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 	home := t.TempDir()
 	path := writeWorkflow(t, shellWorkflow)
@@ -200,7 +202,7 @@ func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going; allow ignores it
 
@@ -217,9 +219,9 @@ func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 	}
 }
 
-// TestDaemonScanSkipsDisabledSchedule pins that scan ignores a disabled record:
-// a due tick on a disabled schedule launches no fire and writes no run, even
-// though its cron time has passed.
+// TestDaemonScanSkipsDisabledSchedule pins that scan ignores a disabled
+// record: a due tick on a disabled schedule launches no fire and writes no
+// run, even though its cron time has passed.
 func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
 	home := t.TempDir()
 	path := writeWorkflow(t, shellWorkflow)
@@ -234,7 +236,7 @@ func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
@@ -248,8 +250,9 @@ func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
 }
 
 // TestDaemonRunLoopFiresThenStopsOnCancel drives the real scan/sleep loop (not
-// scan/complete in isolation): it scans a due schedule, fires it in a goroutine,
-// folds the run id back through complete, and returns nil when ctx is cancelled.
+// scan/complete in isolation): it scans a due schedule, fires it in a
+// goroutine, folds the run id back through complete, and returns nil when ctx
+// is cancelled.
 func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
 	home := t.TempDir()
 	path := writeWorkflow(t, shellWorkflow)
@@ -265,12 +268,12 @@ func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- d.run(ctx) }()
+	go func() { done <- d.Run(ctx) }()
 
 	// The loop fires the due schedule and folds the run id back via complete.
 	// Wait on that observable record state rather than a fixed sleep.
@@ -283,39 +286,13 @@ func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("run returned %v, want nil after ctx cancel", err)
+			t.Fatalf("Run returned %v, want nil after ctx cancel", err)
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("run did not return after ctx cancel")
+		t.Fatal("Run did not return after ctx cancel")
 	}
 
 	if runs, _ := store.ListRuns(home, "shellwf"); len(runs) != 1 {
 		t.Fatalf("got %d runs, want 1 from the loop's fire", len(runs))
-	}
-}
-
-// waitForCondition polls cond until it holds or a 30s deadline elapses, failing
-// the test on timeout. Used to synchronize on observable store/schedule state
-// written by the daemon's background goroutines without a fixed sleep.
-func waitForCondition(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("condition not met within 30s")
-}
-
-func awaitResult(t *testing.T, results <-chan fireResult) fireResult {
-	t.Helper()
-	select {
-	case res := <-results:
-		return res
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for fire result")
-		return fireResult{}
 	}
 }

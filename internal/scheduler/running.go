@@ -1,11 +1,11 @@
-package main
+package scheduler
 
 import "sync"
 
 // runningSet tracks the schedule ids with a fire in flight, so the daemon's
 // overlap policy can skip or serialize them. It is the daemon's only shared
-// mutable state across the scan loop and the goroutines launched by execute, so
-// it carries its own mutex rather than leaning on the daemon's.
+// mutable state across the scan loop and the goroutines launched by execute,
+// so it carries its own mutex rather than leaning on the daemon's.
 type runningSet struct {
 	mu sync.Mutex
 	m  map[string]bool

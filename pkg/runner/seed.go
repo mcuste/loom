@@ -1,4 +1,8 @@
-package main
+// Package runner is the unified workflow-run engine. It is the single place
+// that owns the store open/close lifecycle, seeded-task stamping, writes_state
+// fold-back, executor hook joining, and exit-code seeding. cmd/loom and the
+// daemon both call runner.Run; neither needs to know the internals.
+package runner
 
 import (
 	"github.com/mcuste/loom/pkg/executor"
@@ -6,14 +10,14 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// seedPlan carries the optional seeded tasks threaded into the unified run
+// SeedPlan carries the optional seeded tasks threaded into the unified run
 // pipeline. Each entry holds the per-task material a resume carries over from a
 // prior run: the stored output (fed to executor.Options.Seed and used to
 // annotate the printed plan) plus the metadata the store needs to stamp a
-// synthetic ok record before the executor starts. A zero seedPlan (nil entries)
+// synthetic ok record before the executor starts. A zero SeedPlan (nil entries)
 // marks a plain run, where the Seeded line and the seed-stamping are both
 // suppressed.
-type seedPlan struct {
+type SeedPlan struct {
 	entries []seedEntry
 }
 
@@ -29,12 +33,12 @@ type seedEntry struct {
 	exitCode int
 }
 
-// seedPlanFromRecord builds the carry-over plan from a prior run's ok tasks.
+// SeedPlanFromRecord builds the carry-over plan from a prior run's ok tasks.
 // It is the one seedEntry-building site: every ok task in the record becomes an
 // entry unfiltered, leaving resolveSeed as the single authority that later drops
 // ids no longer present in the current workflow.
-func seedPlanFromRecord(rec *store.RunRecord) seedPlan {
-	var plan seedPlan
+func SeedPlanFromRecord(rec *store.RunRecord) SeedPlan {
+	var plan SeedPlan
 	for _, t := range rec.Tasks {
 		if t.Status != store.StatusOK {
 			continue
@@ -61,7 +65,7 @@ type resolvedSeed struct {
 	entries map[workflow.TaskID]seedEntry
 }
 
-// resolveSeed reduces a seedPlan to the seed material the run will actually
+// resolveSeed reduces a SeedPlan to the seed material the run will actually
 // honor, dropping ids no longer present in the current workflow. It is the
 // single filtering authority: an id that no longer resolves cannot be re-gated,
 // stamped, or skipped, so dropping it here keeps the plan annotation, the
@@ -69,7 +73,7 @@ type resolvedSeed struct {
 // executor ignores Seed keys with no matching task, so callers hand resolveSeed
 // every prior-run task unfiltered and let it decide. A zero plan yields a zero
 // resolvedSeed.
-func resolveSeed(wf *workflow.Workflow, plan seedPlan) resolvedSeed {
+func resolveSeed(wf *workflow.Workflow, plan SeedPlan) resolvedSeed {
 	if len(plan.entries) == 0 {
 		return resolvedSeed{}
 	}
@@ -87,6 +91,13 @@ func resolveSeed(wf *workflow.Workflow, plan seedPlan) resolvedSeed {
 		rs.set[s.id] = true
 	}
 	return rs
+}
+
+// SeededSet returns the set of task IDs that Run will skip when executing with
+// plan, so cmd callers can annotate the execution-plan display before calling
+// Run.
+func SeededSet(wf *workflow.Workflow, plan SeedPlan) map[workflow.TaskID]bool {
+	return resolveSeed(wf, plan).set
 }
 
 // stampSeeded records each seeded task into the new run record as an already-ok

@@ -1,11 +1,15 @@
-package main
+package scheduler
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -27,7 +31,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	res := fireResult{scheduleID: rec.ID, oneOff: !rec.Trigger.IsCron(), fireTime: fireTime}
 	defer func() { results <- res }()
 
-	wf, manifest, _, err := loadWorkflow(rec.Path)
+	wf, manifest, _, err := d.load(rec.Path)
 	if err != nil {
 		res.err = fmt.Errorf("load %s: %w", rec.Path, err)
 		d.logf("schedule %s: %v", rec.ID, res.err)
@@ -48,14 +52,20 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	}
 	defer func() { _ = lf.Close() }()
 
-	cr := &captureRenderer{Renderer: tui.New(lf)}
-	defer func() { _ = cr.Close() }()
-	prov := provenance{scheduleID: rec.ID, triggeredBy: "schedule"}
-	runErr := runWorkflow(cr, lf, runRequest{wf: wf, manifest: manifest, resolved: resolved, home: d.home, prov: prov})
-	res.runID = runIDFromPath(cr.runFile)
-	res.err = runErr
-	if runErr != nil {
-		d.logf("schedule %s: run failed (see %s): %v", rec.ID, logPath, runErr)
+	r := tui.New(lf)
+	defer func() { _ = r.Close() }()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	prov := runner.Provenance{ScheduleID: rec.ID, TriggeredBy: "schedule"}
+	res.runID, res.err = runner.Run(ctx, r, lf, runner.Request{
+		Wf:       wf,
+		Manifest: manifest,
+		Resolved: resolved,
+		Home:     d.home,
+		Prov:     prov,
+	})
+	if res.err != nil {
+		d.logf("schedule %s: run failed (see %s): %v", rec.ID, logPath, res.err)
 	} else {
 		d.logf("schedule %s: run %s complete (log %s)", rec.ID, res.runID, logPath)
 	}
@@ -64,7 +74,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 // openLog creates (and returns) the per-fire log file under
 // <home>/schedules/logs/<id>/<fire-timestamp>.log.
 func (d *daemon) openLog(id string, fireTime time.Time) (string, *os.File, error) {
-	dir := filepath.Join(d.home, "schedules", "logs", id)
+	dir := d.scheduleLogDir(id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("create log dir: %w", err)
 	}

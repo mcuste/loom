@@ -1,4 +1,4 @@
-package main
+package scheduler
 
 import (
 	"io"
@@ -39,7 +39,7 @@ func TestDaemonExecuteUnloadableWorkflowRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
@@ -86,7 +86,7 @@ func TestDaemonExecuteMissingRequiredParamRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := newDaemon(home, io.Discard)
+	d := New(home, io.Discard, testLoader)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)

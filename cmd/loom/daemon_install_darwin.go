@@ -50,7 +50,7 @@ func installDaemon(w io.Writer, execPath, home string, manual bool) error {
 	}
 	dir := filepath.Join(userHome, "Library", "LaunchAgents")
 	path := filepath.Join(dir, launchdPlistName) // launchd loads by absolute path
-	logPath := filepath.Join(home, "schedules", "daemon.log")
+	logPath := scheduleDaemonLog(home)
 	spec := unitSpec{
 		dir:         dir,
 		filename:    launchdPlistName,
