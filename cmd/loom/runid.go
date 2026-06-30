@@ -11,6 +11,16 @@ import (
 	"github.com/mcuste/loom/pkg/store"
 )
 
+// runIDFromPath extracts the run id from a run-record path (its basename minus
+// the .json extension). Returns "" for an empty path.
+func runIDFromPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	base := filepath.Base(p)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 // findRunRecord resolves a user-supplied run id to a path under
 // $LOOM_HOME/runs, across every workflow directory. The literal "latest"
 // follows the most-recently-updated latest.json symlink. Any other value

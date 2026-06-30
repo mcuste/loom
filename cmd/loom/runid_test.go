@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+// TestRunIDFromPath pins that the function strips the directory and .json
+// extension from a run-record path, and returns "" for an empty input.
+func TestRunIDFromPath(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"/home/runs/deploy/20260623T100000Z-0afad3.json", "20260623T100000Z-0afad3"},
+		{"20260623T100000Z-0afad3.json", "20260623T100000Z-0afad3"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := runIDFromPath(tc.in); got != tc.want {
+			t.Errorf("runIDFromPath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestFindRunRecord_ResolvesShortSuffixAndPrefix pins that the run-id lookup
 // accepts the full id, the short hex suffix shown in the runs table, and a
 // leading timestamp prefix, so users can paste what the UI displays.

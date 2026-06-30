@@ -1,9 +1,6 @@
 package main
 
 import (
-	"path/filepath"
-	"strings"
-
 	"github.com/mcuste/loom/pkg/tui"
 )
 
@@ -18,14 +15,4 @@ type captureRenderer struct {
 func (c *captureRenderer) Header(meta tui.RunMeta) error {
 	c.runFile = meta.RunFile
 	return c.Renderer.Header(meta)
-}
-
-// runIDFromPath extracts the run id from a run-record path (its basename minus
-// the .json extension). Returns "" for an empty path.
-func runIDFromPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	base := filepath.Base(p)
-	return strings.TrimSuffix(base, filepath.Ext(base))
 }
