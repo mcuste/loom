@@ -4,8 +4,6 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
-
-	"github.com/mcuste/loom/pkg/workflow"
 )
 
 func newCheckCmd() *cobra.Command {
@@ -25,17 +23,8 @@ func newCheckCmd() *cobra.Command {
 // doCheck runs the shared validation phase only: validate and print the plan,
 // then stop without executing.
 func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
-	path, err = resolveWorkflowRef(path)
+	wf, _, _, err := loadWorkflow(path)
 	if err != nil {
-		return err
-	}
-	wf, err := workflow.ParseFile(path)
-	if err != nil {
-		return err
-	}
-	// ParseFile validated the top-level routing; Link re-runs it after
-	// linking so any sub-workflow children are checked too.
-	if err := workflow.Link(wf, path, resolveSubWorkflowRef); err != nil {
 		return err
 	}
 	r, finish := newRenderer(w)

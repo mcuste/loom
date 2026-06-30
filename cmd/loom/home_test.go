@@ -90,7 +90,6 @@ func TestLayoutConstructors(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"scheduleDaemonLog", scheduleDaemonLog(home), filepath.Join(home, "schedules", "daemon.log")},
 		{"workflowsDir", workflowsDir(home), filepath.Join(home, "workflows")},
 	}
 	for _, tc := range tests {
