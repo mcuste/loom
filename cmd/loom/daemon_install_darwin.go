@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
+
+// launchdPlistName is the on-disk filename of the launchd agent; the enable
+// step loads it by absolute path while installUnit writes it by name, so both
+// must reference the same literal.
+const launchdPlistName = "ai.loom.daemon.plist"
 
 // launchdPlist is the launchd agent template. RunAtLoad starts the daemon on
 // login and KeepAlive restarts it if it exits, so the schedule loop survives
@@ -37,35 +41,23 @@ const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
 
 // installDaemon writes a launchd agent that supervises `loom daemon`. Unless
 // manual is set it also loads the agent so the daemon starts immediately;
-// otherwise it prints the command to load it.
+// otherwise it prints the command to load it. It builds the launchd unitSpec and
+// defers the shared write/enable flow to installUnit.
 func installDaemon(w io.Writer, execPath, home string, manual bool) error {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve user home: %w", err)
 	}
 	dir := filepath.Join(userHome, "Library", "LaunchAgents")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
-	}
+	path := filepath.Join(dir, launchdPlistName) // launchd loads by absolute path
 	logPath := filepath.Join(home, "schedules", "daemon.log")
-	path := filepath.Join(dir, "ai.loom.daemon.plist")
-	content := fmt.Sprintf(launchdPlist, execPath, home, logPath, logPath)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	spec := unitSpec{
+		dir:         dir,
+		filename:    launchdPlistName,
+		content:     fmt.Sprintf(launchdPlist, execPath, home, logPath, logPath),
+		enableSteps: [][]string{{"launchctl", "load", path}},
+		noun:        "launchd agent",
+		successMsg:  "loaded launchd agent; the daemon is now running and will start at login\n",
 	}
-	if manual {
-		_, err = fmt.Fprintf(w, "wrote launchd agent %s\n\nenable it with:\n  launchctl load %s\n", path, path)
-		return err
-	}
-	if _, err := fmt.Fprintf(w, "wrote launchd agent %s\n", path); err != nil {
-		return err
-	}
-	cmd := exec.Command("launchctl", "load", path)
-	cmd.Stdout = w
-	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("launchctl load %s: %w (re-run with --manual to load it yourself)", path, err)
-	}
-	_, err = fmt.Fprintf(w, "loaded launchd agent; the daemon is now running and will start at login\n")
-	return err
+	return installUnit(w, spec, manual, execRunner)
 }
