@@ -64,11 +64,11 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	}
 	// The YAML path arg is relative to the CURRENT cwd, so read and parse the
 	// manifest BEFORE any chdir; otherwise a relative path would resolve against
-	// the recorded dir and miss the file the user pointed at. readAndParse inlines
+	// the recorded dir and miss the file the user pointed at. ReadAndParse inlines
 	// `prompt_file:` refs relative to the workflow's directory (still the current
 	// cwd here) so the resumed run stores and replays the same self-contained
 	// manifest as a fresh run.
-	wf, manifest, err := readAndParse(path)
+	wf, manifest, err := workflow.ReadAndParse(path)
 	if err != nil {
 		return err
 	}
@@ -133,19 +133,7 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// Seed every ok task from the record unfiltered; resolveSeed is the single
 	// authority that drops ids no longer present in the current workflow (the
 	// executor ignores Seed keys with no matching task).
-	var plan seedPlan
-	for _, t := range rec.Tasks {
-		if t.Status != store.StatusOK {
-			continue
-		}
-		plan.entries = append(plan.entries, seedEntry{
-			id:       workflow.TaskID(t.ID),
-			prompt:   t.Prompt,
-			command:  t.Command,
-			output:   t.Output,
-			exitCode: t.ExitCode,
-		})
-	}
+	plan := seedPlanFromRecord(rec)
 
 	// Run the shared check phase, annotating the plan with the seeded tasks,
 	// then execute. The record's params are the lower-precedence tier under any

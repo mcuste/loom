@@ -153,26 +153,22 @@ tasks:
 	}
 }
 
-// TestParseSubWorkflowRejectsRuntimeFields pins that runtime/model/effort are
-// rejected on a sub-workflow task: it has no runtime of its own (the child
-// brings its own), so these knobs are meaningless, exactly as for a shell task.
-func TestParseSubWorkflowRejectsRuntimeFields(t *testing.T) {
-	cases := []struct {
-		name  string
-		field string
-	}{
-		{"runtime", "    runtime: test-rt\n"},
-		{"model", "    model: m1\n"},
-		{"effort", "    effort: low\n"},
+// TestParseSubWorkflowAllowsRuntimeFields pins that runtime/model/effort are
+// accepted on a sub-workflow task and recorded on the wrapper Task: they are an
+// override of the linked child's workflow-level defaults, applied at link time,
+// not a meaningless knob.
+func TestParseSubWorkflowAllowsRuntimeFields(t *testing.T) {
+	src := "name: parent\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    workflow: release\n    runtime: other-rt\n    model: m2\n    effort: low\n"
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse error = %v, want runtime/model/effort accepted on a sub-workflow task", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			src := "name: parent\nruntime: test-rt\nmodel: m1\ntasks:\n  - id: a\n    workflow: release\n" + tc.field
-			_, err := workflow.Parse([]byte(src))
-			if !errors.Is(err, workflow.ErrSubWorkflowWithRuntime) {
-				t.Fatalf("Parse error = %v, want ErrSubWorkflowWithRuntime for %s on a sub-workflow task", err, tc.name)
-			}
-		})
+	task := wf.ByID("a")
+	if task == nil {
+		t.Fatal("wf.ByID(a) = nil; want the sub-workflow task")
+	}
+	if task.Runtime != "other-rt" || task.Model != "m2" || task.Effort != "low" {
+		t.Errorf("override = (%q, %q, %q), want (other-rt, m2, low)", task.Runtime, task.Model, task.Effort)
 	}
 }
 

@@ -138,8 +138,7 @@ func runWorkflow(r tui.Renderer, w io.Writer, req runRequest) error {
 	}
 
 	x := &runExec{r: r, w: w, req: req, state: state}
-	_, runErr := x.execute(ctx, cwd, rs)
-	return runErr
+	return x.execute(ctx, cwd, rs)
 }
 
 // runExec bundles the context that travels unchanged through the run pipeline's
@@ -159,8 +158,7 @@ type runExec struct {
 // tasks, runs the executor, prints the summary, and folds `writes_state`
 // outputs into state. cwd is the invocation directory the caller resolved (the
 // one genuinely new root at this layer); rs is the seed material the run honors.
-// The returned report is nil only when the store could not be opened.
-func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (rep *executor.Report, runErr error) {
+func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (runErr error) {
 	wf := x.req.wf
 	run, err := store.Open(wf.ID, x.req.manifest, store.Config{
 		Root:        x.req.home,
@@ -171,14 +169,15 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (rep
 		TriggeredBy: x.req.prov.triggeredBy,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Close is idempotent and must run even if the executor panics, so defer
-	// it. rep and runErr are read at defer time, after the executor returns;
-	// the closure captures the named returns by reference. The store's Close
-	// error is reported but does not mask runErr. The deferred Fprintf has no
-	// error channel, so its own write error is intentionally discarded.
+	// it. rep and runErr are read at defer time, after the executor returns:
+	// rep is a local the closure captures, runErr the named return. The store's
+	// Close error is reported but does not mask runErr. The deferred Fprintf has
+	// no error channel, so its own write error is intentionally discarded.
+	var rep *executor.Report
 	defer func() {
 		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
 			reportStoreErr(x.w, closeErr)
@@ -195,7 +194,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (rep
 		Seeded:  len(rs.set),
 		Total:   expected,
 	}); err != nil {
-		return nil, err
+		return err
 	}
 
 	// One store-hooks instance drives both the seeded-task stamping and the
@@ -209,7 +208,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (rep
 		sh,
 	), executor.Options{Params: x.req.resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: x.state})
 	runErr = x.finalize(rep, expected, runErr)
-	return rep, runErr
+	return runErr
 }
 
 // finalize renders the run summary and folds `writes_state` outputs back into

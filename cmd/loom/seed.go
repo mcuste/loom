@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -26,6 +27,27 @@ type seedEntry struct {
 	command  string
 	output   string
 	exitCode int
+}
+
+// seedPlanFromRecord builds the carry-over plan from a prior run's ok tasks.
+// It is the one seedEntry-building site: every ok task in the record becomes an
+// entry unfiltered, leaving resolveSeed as the single authority that later drops
+// ids no longer present in the current workflow.
+func seedPlanFromRecord(rec *store.RunRecord) seedPlan {
+	var plan seedPlan
+	for _, t := range rec.Tasks {
+		if t.Status != store.StatusOK {
+			continue
+		}
+		plan.entries = append(plan.entries, seedEntry{
+			id:       workflow.TaskID(t.ID),
+			prompt:   t.Prompt,
+			command:  t.Command,
+			output:   t.Output,
+			exitCode: t.ExitCode,
+		})
+	}
+	return plan
 }
 
 // resolvedSeed is the seed material a run actually honors, all of it filtered to

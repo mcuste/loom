@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -35,24 +34,19 @@ func linkSubWorkflows(wf *workflow.Workflow, selfPath string, chain []string) er
 		if err != nil {
 			return fmt.Errorf("task %q: %w", t.ID, err)
 		}
-		raw, err := os.ReadFile(childPath)
+		// A child loads exactly as a top-level workflow does: its prompt_file refs
+		// and relative script paths resolve beside the CHILD yaml. ReadAndParse is
+		// the shared primitive for that read->inline->anchor->parse sequence.
+		child, _, err := workflow.ReadAndParse(childPath)
 		if err != nil {
-			return fmt.Errorf("task %q: read sub-workflow %q: %w", t.ID, t.Workflow, err)
+			return fmt.Errorf("task %q: %w", t.ID, err)
 		}
-		// prompt_file refs and relative script paths in the child resolve beside
-		// the CHILD yaml, exactly as ParseFile anchors a top-level workflow.
-		inlined, err := workflow.InlinePromptFiles(raw, filepath.Dir(childPath))
-		if err != nil {
-			return fmt.Errorf("task %q: %s: %w", t.ID, childPath, err)
-		}
-		inlined, err = workflow.AnchorScriptPaths(inlined, filepath.Dir(childPath))
-		if err != nil {
-			return fmt.Errorf("task %q: %s: %w", t.ID, childPath, err)
-		}
-		child, err := workflow.Parse(inlined)
-		if err != nil {
-			return fmt.Errorf("task %q: %s: %w", t.ID, childPath, err)
-		}
+		// A task-level runtime/model/effort on the wrapper overrides the child's
+		// workflow-level defaults, so a parent can run a shared child cheaper (e.g.
+		// on a smaller model) without forking it. The child's per-task settings
+		// still win via Effective; ValidateRouting (run after linking) re-validates
+		// the child against the overridden defaults.
+		applyChildOverrides(child, t)
 		if err := linkSubWorkflows(child, childPath, chain); err != nil {
 			return fmt.Errorf("task %q: %w", t.ID, err)
 		}
@@ -62,6 +56,22 @@ func linkSubWorkflows(wf *workflow.Workflow, selfPath string, chain []string) er
 		wf.Subs[t.ID] = child
 	}
 	return nil
+}
+
+// applyChildOverrides copies any runtime/model/effort set on the wrapper task t
+// onto child's workflow-level defaults, so child tasks that do not pin their own
+// inherit the override via Workflow.Effective. An unset field on t leaves the
+// child's own default in place.
+func applyChildOverrides(child *workflow.Workflow, t *workflow.Task) {
+	if t.Runtime != "" {
+		child.Runtime = t.Runtime
+	}
+	if t.Model != "" {
+		child.Model = t.Model
+	}
+	if t.Effort != "" {
+		child.Effort = t.Effort
+	}
 }
 
 // resolveSubWorkflowRef maps a task's `workflow:` ref to a file path. A registry

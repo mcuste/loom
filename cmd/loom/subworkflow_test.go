@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,47 @@ tasks:
 	}
 }
 
+// TestLinkSubWorkflows_ModelOverride pins that runtime/model/effort set on a
+// sub-workflow task override the linked child's workflow-level defaults: a child
+// task that pins none of its own resolves to the override via Effective, so a
+// parent can run a shared child on a cheaper model without forking it.
+func TestLinkSubWorkflows_ModelOverride(t *testing.T) {
+	loomHomeForTest(t)
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yaml", `name: child
+runtime: cmd-echo
+model: opus
+effort: high
+tasks:
+  - id: body
+    prompt: hi
+`)
+	parentPath := writeFile(t, dir, "parent.yaml", `name: parent
+tasks:
+  - id: cut
+    workflow: ./child.yaml
+    model: sonnet
+`)
+	wf, err := workflow.ParseFile(parentPath)
+	if err != nil {
+		t.Fatalf("ParseFile parent: %v", err)
+	}
+	if err := linkSubWorkflows(wf, parentPath, nil); err != nil {
+		t.Fatalf("linkSubWorkflows: %v", err)
+	}
+	child := wf.Subs["cut"]
+	if child == nil {
+		t.Fatal("wf.Subs[cut] = nil; want the linked child")
+	}
+	_, model, effort := child.Effective(child.ByID("body"))
+	if model != "sonnet" {
+		t.Errorf("child body model = %q, want the overridden %q", model, "sonnet")
+	}
+	if effort != "high" {
+		t.Errorf("child body effort = %q, want the child's own %q (no override given)", effort, "high")
+	}
+}
+
 // TestLinkSubWorkflows_Cycle pins that a link cycle (A links B, B links A) is
 // detected and reported rather than recursing forever.
 func TestLinkSubWorkflows_Cycle(t *testing.T) {
@@ -157,6 +199,93 @@ tasks:
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "cycle") {
 		t.Errorf("error %q does not mention a cycle", err.Error())
+	}
+}
+
+// TestLinkSubWorkflows_UnreadableChildError characterizes the load-error message
+// when a child path resolves to no file: linkSubWorkflows wraps the underlying
+// read failure with the offending task id, and the wrapped os error stays
+// reachable via errors.Is. (After unifying on readAndParse the message no longer
+// carries the bespoke "read sub-workflow" phrasing.)
+func TestLinkSubWorkflows_UnreadableChildError(t *testing.T) {
+	loomHomeForTest(t)
+	dir := t.TempDir()
+	parentPath := writeFile(t, dir, "parent.yaml", `name: parent
+tasks:
+  - id: cut
+    workflow: ./does-not-exist.yaml
+`)
+	wf, err := workflow.ParseFile(parentPath)
+	if err != nil {
+		t.Fatalf("ParseFile parent: %v", err)
+	}
+	err = linkSubWorkflows(wf, parentPath, nil)
+	if err == nil {
+		t.Fatal("linkSubWorkflows returned nil error for an unreadable child; want error")
+	}
+	if !strings.Contains(err.Error(), `task "cut"`) {
+		t.Errorf("error %q does not name the offending task", err.Error())
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error %q does not wrap os.ErrNotExist", err.Error())
+	}
+}
+
+// TestLinkSubWorkflows_BadChildPromptFileError characterizes the load-error
+// message when a child's `prompt_file:` cannot be read: the failure is wrapped
+// with the task id, the child path, and stays reachable as a PromptFileError.
+func TestLinkSubWorkflows_BadChildPromptFileError(t *testing.T) {
+	loomHomeForTest(t)
+	dir := t.TempDir()
+	childPath := writeFile(t, dir, "child.yaml", `name: child
+tasks:
+  - id: body
+    prompt_file: missing.md
+`)
+	parentPath := writeFile(t, dir, "parent.yaml", `name: parent
+tasks:
+  - id: cut
+    workflow: ./child.yaml
+`)
+	wf, err := workflow.ParseFile(parentPath)
+	if err != nil {
+		t.Fatalf("ParseFile parent: %v", err)
+	}
+	err = linkSubWorkflows(wf, parentPath, nil)
+	if err == nil {
+		t.Fatal("linkSubWorkflows returned nil error for a bad child prompt_file; want error")
+	}
+	if !strings.Contains(err.Error(), `task "cut"`) || !strings.Contains(err.Error(), childPath) {
+		t.Errorf("error %q does not name the offending task and child path", err.Error())
+	}
+	var pfErr *workflow.PromptFileError
+	if !errors.As(err, &pfErr) {
+		t.Errorf("error %q is not a PromptFileError", err.Error())
+	}
+}
+
+// TestLinkSubWorkflows_MalformedChildError characterizes the load-error message
+// when a child fails to parse: the parse failure is wrapped with the task id and
+// the child path.
+func TestLinkSubWorkflows_MalformedChildError(t *testing.T) {
+	loomHomeForTest(t)
+	dir := t.TempDir()
+	childPath := writeFile(t, dir, "child.yaml", "name: child\ntasks: [: not valid yaml\n")
+	parentPath := writeFile(t, dir, "parent.yaml", `name: parent
+tasks:
+  - id: cut
+    workflow: ./child.yaml
+`)
+	wf, err := workflow.ParseFile(parentPath)
+	if err != nil {
+		t.Fatalf("ParseFile parent: %v", err)
+	}
+	err = linkSubWorkflows(wf, parentPath, nil)
+	if err == nil {
+		t.Fatal("linkSubWorkflows returned nil error for a malformed child; want error")
+	}
+	if !strings.Contains(err.Error(), `task "cut"`) || !strings.Contains(err.Error(), childPath) {
+		t.Errorf("error %q does not name the offending task and child path", err.Error())
 	}
 }
 

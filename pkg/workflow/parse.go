@@ -285,9 +285,11 @@ func Parse(data []byte) (*Workflow, error) {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSystemPrompt)
 			}
 		case rt.Workflow != "":
-			if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
-				return nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithRuntime)
-			}
+			// runtime/model/effort on a sub-workflow task are not rejected: they
+			// override the linked child's workflow-level defaults at link time (see
+			// linkSubWorkflows), so a parent can run a shared child cheaper without
+			// forking it. system_prompt stays rejected: the child's tasks carry their
+			// own, and there is no single task here for one to apply to.
 			if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
 				return nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithSystemPrompt)
 			}
@@ -493,30 +495,48 @@ func (w *Workflow) ValidateRouting() error {
 	return nil
 }
 
-// ParseFile reads path and parses it as a workflow YAML.
-func ParseFile(path string) (*Workflow, error) {
+// ReadAndParse is the canonical "load a workflow file" primitive: it reads path,
+// inlines its `prompt_file:`/`system_prompt_file:` references and anchors its
+// relative `script:` paths relative to the YAML's own directory, then parses the
+// resulting self-contained bytes. It returns both the parsed workflow and the
+// inlined manifest (the bytes a caller persists), and deliberately stops before
+// the registry-dependent routing check so it stays a pure function of the file
+// content. [ParseFile] layers ValidateRouting on top; callers that need the
+// manifest (e.g. before a chdir) use ReadAndParse directly.
+func ReadAndParse(path string) (*Workflow, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Inline any `prompt_file:` references relative to the YAML's own directory
 	// before Parse, so Parse only ever sees inline `prompt:` bodies.
-	inlined, err := InlinePromptFiles(data, filepath.Dir(path))
+	manifest, err := InlinePromptFiles(data, filepath.Dir(path))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
-	inlined, err = AnchorScriptPaths(inlined, filepath.Dir(path))
+	// Anchor relative `script:` paths so the self-contained manifest resolves the
+	// same script regardless of the cwd at run, resume, or daemon-reload time.
+	manifest, err = AnchorScriptPaths(manifest, filepath.Dir(path))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
-	wf, err := Parse(inlined)
+	wf, err := Parse(manifest)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return wf, manifest, nil
+}
+
+// ParseFile reads path and parses it as a workflow YAML.
+func ParseFile(path string) (*Workflow, error) {
+	wf, _, err := ReadAndParse(path)
+	if err != nil {
+		return nil, err
 	}
 	// ParseFile loads a workflow for execution, so it runs the registry-dependent
-	// routing check that Parse deliberately omits. Sub-workflow children are not
-	// linked yet here; the caller re-runs ValidateRouting after linking to cover
-	// them via the w.Subs recursion.
+	// routing check that ReadAndParse deliberately omits. Sub-workflow children
+	// are not linked yet here; the caller re-runs ValidateRouting after linking to
+	// cover them via the w.Subs recursion.
 	if err := wf.ValidateRouting(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -1083,11 +1103,6 @@ var (
 	// `for_each:` block. The two are sibling scoped-block forms; a task is at
 	// most one of them.
 	ErrLoopAndForEachSet = errors.New("task sets both loop and for_each")
-	// ErrSubWorkflowWithRuntime reports a sub-workflow task (one with `workflow:`)
-	// that also sets task-level `runtime:`, `model:`, or `effort:`. The linked
-	// child brings its own runtime; these knobs are meaningless on the wrapper,
-	// exactly as for a shell task.
-	ErrSubWorkflowWithRuntime = errors.New("sub-workflow task must not set runtime, model, or effort")
 	// ErrScriptTaskWithRuntime reports a script task (one with `script:`) that
 	// also sets task-level `runtime:`, `model:`, or `effort:`. A script runs a
 	// file directly and is not sent to a model, exactly like a shell task.
