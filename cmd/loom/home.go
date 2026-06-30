@@ -32,3 +32,15 @@ func loomHome() (string, error) {
 	}
 	return dir, nil
 }
+
+// scheduleDaemonLog returns the daemon's stdout/stderr log path:
+// <home>/schedules/daemon.log.
+func scheduleDaemonLog(home string) string {
+	return filepath.Join(home, "schedules", "daemon.log")
+}
+
+// workflowsDir returns the global workflow registry directory:
+// <home>/workflows.
+func workflowsDir(home string) string {
+	return filepath.Join(home, "workflows")
+}

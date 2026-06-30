@@ -1,4 +1,4 @@
-package main
+package registry
 
 import (
 	"os"
@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// TestIsGitRoot pins that isGitRoot treats both a `.git` directory (normal repo)
-// and a `.git` file (worktree/submodule) as a root, and a dir with no `.git` as
-// not a root. The file case guards the documented worktree behavior so a refactor
-// to Stat+IsDir cannot silently break git-worktree users.
+// TestIsGitRoot pins that isGitRoot treats both a .git directory (normal repo)
+// and a .git file (worktree/submodule) as a root, and a dir with no .git as
+// not a root. The file case guards the documented worktree behavior so a
+// refactor to Stat+IsDir cannot silently break git-worktree users.
 func TestIsGitRoot(t *testing.T) {
 	t.Run("dir is root", func(t *testing.T) {
 		dir := t.TempDir()

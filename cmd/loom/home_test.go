@@ -79,3 +79,23 @@ func TestLoomHome_FallsBackToUserHomeDir(t *testing.T) {
 		t.Fatalf("fallback home dir not created: %v", err)
 	}
 }
+
+// TestLayoutConstructors pins that the path-constructor functions derive the
+// expected subdirectory layout from a home path, so a future rename of any
+// literal only requires changing home.go.
+func TestLayoutConstructors(t *testing.T) {
+	home := filepath.Join(string(filepath.Separator), "data", "loom")
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"scheduleDaemonLog", scheduleDaemonLog(home), filepath.Join(home, "schedules", "daemon.log")},
+		{"workflowsDir", workflowsDir(home), filepath.Join(home, "workflows")},
+	}
+	for _, tc := range tests {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}

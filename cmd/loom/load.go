@@ -36,11 +36,5 @@ func loadWorkflow(ref string) (*workflow.Workflow, []byte, string, error) {
 // registry-free, so ValidateRouting runs here once children are linked; it
 // recurses into wf.Subs.
 func linkAndValidate(wf *workflow.Workflow, selfPath string) error {
-	if err := linkSubWorkflows(wf, selfPath, nil); err != nil {
-		return err
-	}
-	if err := checkSubWorkflows(wf); err != nil {
-		return err
-	}
-	return wf.ValidateRouting()
+	return workflow.Link(wf, selfPath, resolveSubWorkflowRef)
 }
