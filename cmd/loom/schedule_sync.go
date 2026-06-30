@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/tui"
 )
 
 // doScheduleSync reconciles inline schedules. With a workflow argument it syncs
@@ -72,7 +73,7 @@ func syncOne(home, loadRef, displayName string) (string, error) {
 	}
 	switch res.Action {
 	case schedule.SyncAdded:
-		return fmt.Sprintf("added inline schedule %s, next fire %s", res.ID, formatFireTime(res.NextFire)), nil
+		return fmt.Sprintf("added inline schedule %s, next fire %s", res.ID, tui.FormatFireTime(res.NextFire)), nil
 	case schedule.SyncUpdated:
 		return fmt.Sprintf("updated inline schedule %s", res.ID), nil
 	case schedule.SyncRemoved:

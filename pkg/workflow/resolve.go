@@ -187,7 +187,7 @@ func ResolveParams(wf *Workflow, cli, file map[string]string) (ParamValues, erro
 	for _, p := range wf.Params {
 		if _, ok := out[p.Name]; !ok {
 			if p.Required {
-				return nil, &MissingRequiredParamError{Name: p.Name}
+				return nil, &MissingRequiredParamError{Name: p.Name, Partial: out}
 			}
 		}
 	}
@@ -229,8 +229,14 @@ func ParseParamArgs(args []string) (map[string]string, error) {
 }
 
 // MissingRequiredParamError reports a required param that received no value
-// from CLI, file, or default.
-type MissingRequiredParamError struct{ Name ParamName }
+// from CLI, file, or default. Partial holds the param bag as it stood at the
+// point of failure: defaults merged with file and CLI values, minus the absent
+// required key. Callers that need a best-effort bag (e.g. advisory plan
+// display) read Partial rather than rebuilding the merge themselves.
+type MissingRequiredParamError struct {
+	Name    ParamName
+	Partial ParamValues
+}
 
 func (e *MissingRequiredParamError) Error() string {
 	return fmt.Sprintf("param %q: required value not supplied", e.Name)

@@ -213,6 +213,29 @@ func TestWorkflowsLsMergesLocalAndGlobal(t *testing.T) {
 	}
 }
 
+// TestWorkflowsLsDescriptionColumn pins that the description column shows a
+// workflow's first-line description, truncated at 60 runes, and that a valid
+// description does appear while a description exceeding the width is cut.
+func TestWorkflowsLsDescriptionColumn(t *testing.T) {
+	home := loomHomeForTest(t)
+	longDesc := strings.Repeat("x", 65) // exceeds the 60-rune descWidth
+	writeRegistryWorkflow(t, home, "desctest.yaml", registryBodyWithDesc(longDesc))
+
+	out := runWorkflowsLs(t)
+
+	if !strings.Contains(out, "desctest") {
+		t.Errorf("workflow name should appear in listing; got:\n%s", out)
+	}
+	// Long description must be truncated to 60 runes with trailing "...".
+	truncated := strings.Repeat("x", 57) + "..."
+	if !strings.Contains(out, truncated) {
+		t.Errorf("description should be truncated at 60 runes with '...'; got:\n%s", out)
+	}
+	if strings.Contains(out, longDesc) {
+		t.Errorf("untruncated long description should not appear; got:\n%s", out)
+	}
+}
+
 // TestCompleteWorkflowRefMergesLocalAndGlobal pins that shell completion offers
 // the merged local+global name set, with a local name shadowing the global one.
 func TestCompleteWorkflowRefMergesLocalAndGlobal(t *testing.T) {

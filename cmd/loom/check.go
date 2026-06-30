@@ -78,28 +78,15 @@ func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, 
 		if werr := r.Warn(fmt.Sprintf("required param %q not supplied", miss.Name)); werr != nil {
 			return nil, werr
 		}
-		// Rebuild a partial bag so MISSING entries still surface in the printed
-		// plan rather than the section truncating silently.
-		resolved = partialResolved(wf, cliParams)
+		// Use the partial bag carried by the error so MISSING entries still
+		// surface in the printed plan rather than the section truncating silently.
+		// The merge order is authoritative in ResolveParams; no local rebuild needed.
+		resolved = miss.Partial
 	}
 	if err := r.Plan(wf, resolved, cliParams, seeded); err != nil {
 		return nil, err
 	}
 	return resolved, nil
-}
-
-// partialResolved keeps the merge order identical to ResolveParams.
-func partialResolved(wf *workflow.Workflow, cli map[string]string) workflow.ParamValues {
-	out := make(workflow.ParamValues, len(wf.Params))
-	for _, p := range wf.Params {
-		if p.HasDefault {
-			out[p.Name] = p.Default
-		}
-	}
-	for k, v := range cli {
-		out[workflow.ParamName(k)] = v
-	}
-	return out
 }
 
 // doCheck runs the shared validation phase only: validate and print the plan,

@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 	"io"
-	"text/tabwriter"
 
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/tui"
 )
 
 func doScheduleList(w io.Writer, workflowFilter string) error {
@@ -17,17 +17,7 @@ func doScheduleList(w io.Writer, workflowFilter string) error {
 	if err != nil {
 		return err
 	}
-	if len(recs) == 0 {
-		_, err := fmt.Fprintln(w, "no schedules")
-		return err
-	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT FIRE\tENABLED\tOVERLAP")
-	for _, r := range recs {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.ID, r.WorkflowID, r.Trigger.Summary(), formatFireTime(r.NextFire), pick(r.Enabled, "yes", "no"), r.EffectiveOverlap())
-	}
-	return tw.Flush()
+	return tui.SchedulesTable(w, recs)
 }
 
 func doScheduleRemove(w io.Writer, id string) error {
@@ -55,6 +45,10 @@ func doScheduleToggle(w io.Writer, id string, enabled bool) error {
 	if err := schedule.Update(home, rec); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s %s\n", pick(enabled, "enabled", "disabled"), id)
+	label := "disabled"
+	if enabled {
+		label = "enabled"
+	}
+	_, err = fmt.Fprintf(w, "%s %s\n", label, id)
 	return err
 }

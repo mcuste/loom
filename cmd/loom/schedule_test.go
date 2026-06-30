@@ -134,7 +134,9 @@ func TestScheduleListRendersTableAndEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schedule ls: %v (%s)", err, out)
 	}
-	for _, want := range []string{"ID", "WORKFLOW", "TRIGGER", "OVERLAP", id, "shellwf", "0 15 * * *"} {
+	// Data routing: the record id, workflow name, and cron expression reach
+	// stdout. Column header names are pinned in pkg/tui/tables_test.go.
+	for _, want := range []string{id, "shellwf", "0 15 * * *"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ls output missing %q:\n%s", want, out)
 		}

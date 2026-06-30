@@ -1,14 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"io"
-	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
-	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/tui"
 )
 
 // completeWorkflowRef is the shell-completion function for the workflow
@@ -58,10 +55,6 @@ func newWorkflowsListCmd() *cobra.Command {
 	return cmd
 }
 
-// descWidth caps the description column so a long first line does not push the
-// resolved path far off to the right.
-const descWidth = 60
-
 // doWorkflowsList prints every registry workflow in three space-aligned columns
 // (name, a best-effort truncated description, and the resolved file path so a
 // shadowed name shows which root won), sorted by name. A parse error or absent
@@ -72,37 +65,9 @@ func doWorkflowsList(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	for _, r := range refs {
-		desc := ""
-		if wf, perr := workflow.ParseFile(r.path); perr == nil {
-			desc = truncate(firstLine(wf.Description), descWidth)
-		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", r.name, desc, r.path); err != nil {
-			return err
-		}
+	tuiRefs := make([]tui.WorkflowRef, len(refs))
+	for i, r := range refs {
+		tuiRefs[i] = tui.WorkflowRef{Name: r.name, Path: r.path}
 	}
-	return tw.Flush()
-}
-
-// truncate shortens s to at most max runes, appending "..." when it cuts, so a
-// long description stays within its column without splitting a multibyte rune.
-func truncate(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	if max <= 3 {
-		return string(r[:max])
-	}
-	return string(r[:max-3]) + "..."
-}
-
-// firstLine returns s up to its first newline, trimmed, so a multi-line
-// description collapses to a single listing column.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
+	return tui.WorkflowsTable(w, tuiRefs)
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 	"github.com/spf13/cobra"
 )
@@ -136,6 +137,6 @@ func addAndReport(w io.Writer, rec schedule.Record) error {
 		return err
 	}
 	_, err = fmt.Fprintf(w, "scheduled %s (%s), next fire %s\n",
-		stored.ID, stored.Trigger.Summary(), formatFireTime(stored.NextFire))
+		stored.ID, stored.Trigger.Summary(), tui.FormatFireTime(stored.NextFire))
 	return err
 }

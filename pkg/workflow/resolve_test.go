@@ -242,6 +242,63 @@ func TestResolveMissingRequired(t *testing.T) {
 	}
 }
 
+// TestResolveMissingRequiredPartialBag pins that MissingRequiredParamError
+// carries a Partial bag built with the same merge order as a successful
+// ResolveParams call: declared defaults < file < CLI. The absent required key
+// must be absent from Partial while all other resolved values must be present.
+func TestResolveMissingRequiredPartialBag(t *testing.T) {
+	wf := resolveWF(
+		workflow.Param{Name: "env", Required: true},
+		workflow.Param{Name: "tag", Default: "latest", HasDefault: true},
+		workflow.Param{Name: "region", Default: "us-east-1", HasDefault: true},
+	)
+	// CLI overrides region; env is required but not supplied.
+	_, err := workflow.ResolveParams(wf,
+		map[string]string{"region": "eu-west-1"},
+		nil,
+	)
+	var miss *workflow.MissingRequiredParamError
+	if !errors.As(err, &miss) {
+		t.Fatalf("expected MissingRequiredParamError; got %v", err)
+	}
+	if miss.Name != "env" {
+		t.Errorf("Name = %q, want env", miss.Name)
+	}
+	// env must be absent (it was never resolved).
+	if _, ok := miss.Partial["env"]; ok {
+		t.Errorf("Partial must not contain the missing required key %q", "env")
+	}
+	// tag comes from the declared default.
+	if miss.Partial["tag"] != "latest" {
+		t.Errorf("Partial[tag] = %q, want latest (from default)", miss.Partial["tag"])
+	}
+	// region comes from CLI, overriding the default.
+	if miss.Partial["region"] != "eu-west-1" {
+		t.Errorf("Partial[region] = %q, want eu-west-1 (CLI wins over default)", miss.Partial["region"])
+	}
+}
+
+// TestResolveMissingRequiredPartialFileTier pins that the file tier is included
+// in Partial with correct precedence (CLI > file > default).
+func TestResolveMissingRequiredPartialFileTier(t *testing.T) {
+	wf := resolveWF(
+		workflow.Param{Name: "env", Required: true},
+		workflow.Param{Name: "tag", Default: "default-tag", HasDefault: true},
+	)
+	_, err := workflow.ResolveParams(wf,
+		nil,
+		map[string]string{"tag": "file-tag"},
+	)
+	var miss *workflow.MissingRequiredParamError
+	if !errors.As(err, &miss) {
+		t.Fatalf("expected MissingRequiredParamError; got %v", err)
+	}
+	// file beats default.
+	if miss.Partial["tag"] != "file-tag" {
+		t.Errorf("Partial[tag] = %q, want file-tag (file beats default)", miss.Partial["tag"])
+	}
+}
+
 func TestResolveUnknownCLIKey(t *testing.T) {
 	wf := resolveWF(workflow.Param{Name: "env", Default: "dev", HasDefault: true})
 	_, err := workflow.ResolveParams(wf, map[string]string{"ghost": "x"}, nil)
