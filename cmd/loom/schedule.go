@@ -36,11 +36,11 @@ func newScheduleCronCmd() *cobra.Command {
 			return doScheduleCron(cmd.OutOrStdout(), args[0], o)
 		},
 	}
-	addParamFlags(cmd, &o.paramArgs)
+	addTriggerFlags(cmd, &o.triggerCommon,
+		"IANA timezone the expression is evaluated in (default: daemon local time)",
+		"fire once on daemon startup if a scheduled tick was missed")
 	cmd.Flags().StringVar(&o.expr, "expr", "", "cron expression, e.g. \"0 15 * * *\" (required)")
-	cmd.Flags().StringVar(&o.tz, "tz", "", "IANA timezone the expression is evaluated in (default: daemon local time)")
 	cmd.Flags().StringVar(&o.overlap, "overlap", "skip", "policy when a prior run is still in flight: skip|queue|allow")
-	cmd.Flags().BoolVar(&o.catchup, "catchup", false, "fire once on daemon startup if a scheduled tick was missed")
 	_ = cmd.MarkFlagRequired("expr")
 	return cmd
 }
@@ -56,11 +56,11 @@ func newScheduleAtCmd() *cobra.Command {
 			return doScheduleAt(cmd.OutOrStdout(), args[0], o)
 		},
 	}
-	addParamFlags(cmd, &o.paramArgs)
+	addTriggerFlags(cmd, &o.triggerCommon,
+		"IANA timezone the time is interpreted in (default: daemon local time)",
+		"run even if the daemon was down when the instant passed")
 	cmd.Flags().StringVar(&o.timeStr, "time", "", "clock time HH:MM (required)")
 	cmd.Flags().StringVar(&o.dateStr, "date", "", "calendar date YYYY-MM-DD (default: today, or tomorrow if the time already passed)")
-	cmd.Flags().StringVar(&o.tz, "tz", "", "IANA timezone the time is interpreted in (default: daemon local time)")
-	cmd.Flags().BoolVar(&o.catchup, "catchup", false, "run even if the daemon was down when the instant passed")
 	_ = cmd.MarkFlagRequired("time")
 	return cmd
 }
