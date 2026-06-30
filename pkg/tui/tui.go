@@ -131,6 +131,9 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 	ew.printf("Runtime  : %s\n", orDash(string(wf.Runtime)))
 	ew.printf("Model    : %s\n", orDash(string(wf.Model)))
 	ew.printf("Effort   : %s\n", orDash(string(wf.Effort)))
+	if wf.WorkingDir != "" {
+		ew.printf("WorkDir  : %s\n", wf.WorkingDir)
+	}
 	if wf.SystemPrompt != "" {
 		ew.printf("System   : %s\n", wf.SystemPrompt)
 	}

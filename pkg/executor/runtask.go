@@ -79,6 +79,12 @@ type runState struct {
 	loopVar string
 	// loopVal is the current element bound to loopVar for this iteration.
 	loopVal string
+	// workDir is the cwd every task process in this run is launched in (the LLM
+	// runtime, shell, and script alike), resolved once in Run from the workflow's
+	// working_dir. "" inherits loom's process cwd. Constant for the whole run, so
+	// the `inner := *st` struct copy in the loop-iteration derivations carries it
+	// unchanged.
+	workDir string
 }
 
 // forLoopIteration derives a runState for one scoped-loop pass: it shares the
@@ -344,6 +350,9 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 				State:          opts.State,
 				Cache:          opts.Cache,
 				RetryBaseDelay: opts.RetryBaseDelay,
+				// The parent's effective cwd is the child's inherited fallback; the
+				// child's own working_dir (if any) overrides it inside Run.
+				WorkDir: st.workDir,
 			})
 			if err != nil {
 				return TaskResult{TaskID: t.ID}, err
@@ -367,7 +376,7 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		env := taskEnv(st.outputs, opts.Params, opts.State, st.prev, st.exitCodes, st.loopVar, st.loopVal)
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			return runShell(ctx, t, body, env)
+			return runShell(ctx, t, body, env, st.workDir)
 		})
 	case workflow.BodyScript:
 		if hooks.OnStart != nil {
@@ -382,7 +391,7 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		env := taskEnv(st.outputs, opts.Params, opts.State, st.prev, st.exitCodes, st.loopVar, st.loopVal)
 		st.mu.Unlock()
 		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			return runScript(ctx, t, path, args, env)
+			return runScript(ctx, t, path, args, env, st.workDir)
 		})
 	case workflow.BodyPrompt:
 		rt, model, effort := wf.Effective(t)
@@ -399,7 +408,7 @@ func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *
 		st.mu.Unlock()
 		send := func() (TaskResult, error) {
 			return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-				r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt)
+				r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt, st.workDir)
 				if err != nil {
 					return r, err
 				}

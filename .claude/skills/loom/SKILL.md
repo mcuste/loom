@@ -36,6 +36,7 @@ runtime: claude-code       # default for tasks: claude-code | codex
 model: sonnet              # default: haiku | sonnet | opus
 effort: medium             # default: low | medium | high | max (claude-code)
 system_prompt: ...         # optional default; per-task overridable
+working_dir: ../repo       # optional cwd for every task (LLM/shell/script); relative anchors to the YAML dir, children inherit it
 output: <task_id>          # which task is the result when this wf is linked as a sub-workflow
 schedule:                  # optional inline cron; `loom schedule sync` reconciles it into the store
   cron: "0 2 * * *"        #   required when schedule: is present

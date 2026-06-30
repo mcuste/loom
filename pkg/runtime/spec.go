@@ -97,6 +97,9 @@ func (s Spec) Run(ctx context.Context, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("%s: incomplete Spec: Args and Decode must be non-nil", s.Name)
 	}
 	cmd := exec.CommandContext(ctx, s.BinaryName, s.Args(req)...)
+	// An empty Dir leaves the child in loom's process cwd (the prior behavior);
+	// a set WorkingDir runs the runtime against the workflow's resolved cwd.
+	cmd.Dir = req.WorkingDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

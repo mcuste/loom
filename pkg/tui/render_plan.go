@@ -73,6 +73,9 @@ func richHeaderCard(wf *workflow.Workflow) string {
 		labelStyle.Render("model"), orDash(string(wf.Model)),
 		labelStyle.Render("effort"), orDash(string(wf.Effort)),
 	))
+	if wf.WorkingDir != "" {
+		rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("workdir"), wf.WorkingDir))
+	}
 	if wf.SystemPrompt != "" {
 		rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("system"), wf.SystemPrompt))
 	}

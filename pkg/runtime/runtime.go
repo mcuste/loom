@@ -55,6 +55,10 @@ type Request struct {
 	Model        Model
 	Effort       Effort
 	SystemPrompt string
+	// WorkingDir is the directory the runtime's child process runs in. Empty
+	// means inherit loom's process cwd. The executor fills it from the
+	// workflow's resolved working_dir.
+	WorkingDir string
 }
 
 // Runner is the contract every registered runtime satisfies. It validates a

@@ -156,6 +156,14 @@ type Workflow struct {
 	// not set their own `cache:` value. false means tasks are not memoized
 	// unless they opt in individually.
 	Cache bool
+	// WorkingDir is the directory every task's child process runs in: the cwd of
+	// the LLM runtime, shell, and script processes alike. A relative value is
+	// anchored to the workflow file's own directory at load time (see
+	// AnchorWorkingDir), so the self-contained manifest runs the same regardless
+	// of the cwd at run, resume, or daemon-reload time. Empty means inherit
+	// loom's process cwd (the prior behavior). A linked sub-workflow inherits its
+	// parent's effective directory unless it sets its own.
+	WorkingDir string
 	// Output names the task whose output is this workflow's result string when
 	// run as a sub-workflow. The zero value selects the lone sink (a task with
 	// no dependents) by default; see OutputTask.

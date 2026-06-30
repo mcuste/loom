@@ -167,6 +167,12 @@ type Options struct {
 	// executor replays a stored output on a hit and records a fresh one on a
 	// miss. nil disables memoization. Shell tasks are never memoized.
 	Cache Cache
+	// WorkDir is the cwd inherited by this run's task processes when the workflow
+	// itself does not set `working_dir`. Run prefers wf.WorkingDir over it, so it
+	// matters chiefly for a linked sub-workflow: the parent passes its effective
+	// directory here and the child inherits it unless it declares its own. Empty
+	// means inherit loom's process cwd.
+	WorkDir string
 }
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
@@ -228,6 +234,14 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	// cost is recorded before the next task's check runs, bounding the overshoot
 	// to the single task that crosses the limit (matching the serial semantics).
 	// budgetReady wakes a waiter once the in-flight task records its cost.
+	// The workflow's own working_dir wins; opts.WorkDir is the inherited fallback
+	// a parent passes to a linked child, so a child without its own working_dir
+	// runs in the parent's effective directory.
+	workDir := opts.WorkDir
+	if wf.WorkingDir != "" {
+		workDir = wf.WorkingDir
+	}
+
 	st := &runState{
 		rep:            rep,
 		outputs:        rep.Outputs,
@@ -238,6 +252,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		mu:             &mu,
 		budgetInFlight: new(bool),
 		budgetReady:    sync.NewCond(&mu),
+		workDir:        workDir,
 	}
 
 	// Each scoped loop collapses its body into a single synthetic node in the
@@ -309,13 +324,14 @@ func runCached(cache Cache, t *workflow.Task, rt runtime.Name, model runtime.Mod
 // runLLM executes one LLM task against its resolved runner. The substituted
 // prompt and system prompt are passed in by the dispatcher so this helper has
 // no awareness of the surrounding workflow.
-func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime.Runner, model runtime.Model, effort runtime.Effort, sysPrompt string) (TaskResult, error) {
+func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime.Runner, model runtime.Model, effort runtime.Effort, sysPrompt, workDir string) (TaskResult, error) {
 	req := runtime.Request{
 		TaskID:       string(t.ID),
 		Prompt:       prompt,
 		Model:        model,
 		Effort:       effort,
 		SystemPrompt: sysPrompt,
+		WorkingDir:   workDir,
 	}
 
 	start := time.Now()
@@ -358,10 +374,11 @@ func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime
 // tolerates that code, in which case the task succeeds with its stdout output
 // and the code captured for `{{id.exit}}`. The exit code is recorded on the
 // result either way, so a failure still surfaces it to the store and TUI.
-func runShell(ctx context.Context, t *workflow.Task, line string, env []string) (TaskResult, error) {
+func runShell(ctx context.Context, t *workflow.Task, line string, env []string, workDir string) (TaskResult, error) {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", "-c", line)
 	cmd.Env = env
+	cmd.Dir = workDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -399,10 +416,11 @@ func runShell(ctx context.Context, t *workflow.Task, line string, env []string) 
 // missing, not executable, or not found on PATH) and a run cancellation are
 // returned as errors, since neither yields a real script exit code. stderr is
 // written through to the parent so a script's diagnostics remain visible.
-func runScript(ctx context.Context, t *workflow.Task, path string, args, env []string) (TaskResult, error) {
+func runScript(ctx context.Context, t *workflow.Task, path string, args, env []string, workDir string) (TaskResult, error) {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = env
+	cmd.Dir = workDir
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	res := TaskResult{

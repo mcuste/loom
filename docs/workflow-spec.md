@@ -38,6 +38,7 @@ runtime: claude-code         # optional default for tasks
 model: sonnet                # optional default for tasks
 effort: medium               # optional default for tasks
 system_prompt: ...           # optional, appended to every LLM task
+working_dir: ../repo         # optional cwd for every task; see Working directory
 cache: false                 # optional workflow-wide memoization default
 budget:                      # optional cumulative cost ceiling
   max_cost_usd: 2.50
@@ -565,6 +566,33 @@ tasks:
 — their effects and stdout may depend on the filesystem and environment.
 Caching is most valuable while iterating on a multi-task workflow: unchanged
 upstream tasks replay for free.
+
+---
+
+## Working directory
+
+`working_dir` sets the directory every task's child process runs in — the cwd of
+the LLM runtime, `command` shell, and `script` processes alike. Without it, tasks
+inherit whatever cwd `loom` itself was launched from, which under the scheduler
+daemon is unspecified (a launchd agent defaults to `/`). Set it whenever a
+workflow operates on a specific repo or tree rather than on its own cwd.
+
+```yaml
+name: repo_maintenance
+working_dir: ../..           # relative to THIS file's directory
+```
+
+- **Anchoring.** A relative value resolves against the workflow file's own
+  directory and is baked absolute into the stored manifest (like a relative
+  `script:` path), so a fresh run, a resume, and a daemon reload all agree on the
+  directory regardless of the process cwd. An absolute path is used as-is; a
+  value containing `{{...}}` is left untouched and resolved after substitution.
+- **Sub-workflows inherit it.** A linked `workflow:` child runs its tasks in the
+  parent's effective directory unless the child sets its own `working_dir`.
+- **Empty** (the default) preserves the prior behavior: inherit `loom`'s cwd.
+
+This is the clean way to pin a scheduled workflow to a repo: the workflow names
+where it runs, so it no longer matters where the daemon's cwd happens to be.
 
 ---
 

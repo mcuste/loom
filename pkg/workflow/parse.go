@@ -140,6 +140,7 @@ func Parse(data []byte) (*Workflow, error) {
 		Effort:       runtime.Effort(raw.Effort),
 		SystemPrompt: raw.SystemPrompt,
 		Cache:        raw.Cache,
+		WorkingDir:   raw.WorkingDir,
 		Params:       params,
 		Tasks:        make([]Task, 0, len(raw.Tasks)),
 		byID:         make(map[TaskID]int, len(raw.Tasks)),
@@ -520,6 +521,13 @@ func ReadAndParse(path string) (*Workflow, []byte, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
+	// Anchor a relative `working_dir:` the same way, so the persisted manifest
+	// names an absolute cwd and a stored-manifest resume (which Parses the bytes
+	// with no baseDir) agrees on where tasks run.
+	manifest, err = AnchorWorkingDir(manifest, filepath.Dir(path))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
 	wf, err := Parse(manifest)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
@@ -655,6 +663,59 @@ func anchorScriptNodes(n *yaml.Node, baseDir string) {
 	for _, c := range n.Content {
 		anchorScriptNodes(c, baseDir)
 	}
+}
+
+// AnchorWorkingDir rewrites a relative top-level `working_dir:` to an absolute
+// path anchored at baseDir, so the cwd tasks run in is fixed at load time rather
+// than resolved against the process cwd at exec time. It is the working_dir
+// analogue of AnchorScriptPaths: the rewrite is baked into the returned bytes so
+// the persisted manifest stays self-contained and a stored-manifest resume
+// (which has no baseDir) agrees on the directory.
+//
+// Only the document's root mapping is considered, since working_dir is a
+// workflow-level key; a `working_dir` nested in a task mapping is left for
+// Parse's known-fields check to reject. An absolute value is left as-is, and a
+// value carrying a `{{...}}` template is left untouched so a dynamically built
+// path resolves after substitution rather than having baseDir prepended to a
+// half-formed value. It short-circuits with no YAML round-trip when the raw
+// bytes contain no `working_dir` token.
+func AnchorWorkingDir(data []byte, baseDir string) ([]byte, error) {
+	if !bytes.Contains(data, []byte("working_dir")) {
+		return data, nil
+	}
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	root := &doc
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return data, nil
+		}
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return data, nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		k, v := root.Content[i], root.Content[i+1]
+		if k.Kind != yaml.ScalarNode || k.Value != "working_dir" || v.Kind != yaml.ScalarNode {
+			continue
+		}
+		if s := v.Value; s != "" && !filepath.IsAbs(s) && !strings.Contains(s, "{{") {
+			v.Value = filepath.Join(absBase, s)
+		}
+		break
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	return out, nil
 }
 
 // inlineSystemPromptFile rewrites a top-level `system_prompt_file:` key into an
@@ -941,6 +1002,10 @@ type rawWorkflow struct {
 	// absent `cache:` key decodes to false, which is exactly the "off unless a
 	// task opts in" default.
 	Cache bool `yaml:"cache"`
+	// WorkingDir is the cwd every task's child process runs in. A relative value
+	// is anchored to the workflow file's directory by AnchorWorkingDir before
+	// Parse, so by the time it lands here it is already absolute (or empty).
+	WorkingDir string `yaml:"working_dir"`
 	// Output names the task whose output is this workflow's result string when it
 	// is run as a sub-workflow. Empty selects the lone sink by default; see
 	// Workflow.OutputTask. Validated to name a known task.
