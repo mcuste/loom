@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package daemoninstall
 
 import (
 	"fmt"
@@ -23,12 +23,11 @@ Restart=always
 WantedBy=default.target
 `
 
-// installDaemon writes a systemd user unit that supervises `loom daemon`.
-// Unless manual is set it also reloads systemd and enables the unit so the
-// daemon starts immediately; otherwise it prints the commands to enable it. It
-// builds the systemd unitSpec and defers the shared write/enable flow to
-// installUnit.
-func installDaemon(w io.Writer, execPath, home string, manual bool) error {
+// Install writes a systemd user unit that supervises `loom daemon`. Unless
+// manual is set it also reloads systemd and enables the unit so the daemon
+// starts immediately; otherwise it prints the commands to enable it. It builds
+// the systemd unitSpec and defers the shared write/enable flow to installUnit.
+func Install(w io.Writer, execPath, home string, manual bool) error {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve user home: %w", err)

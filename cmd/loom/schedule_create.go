@@ -69,9 +69,8 @@ func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewRecord(string(wf.ID), ref, absPath(path), params, o.catchup)
-	rec.Trigger = schedule.Trigger{Cron: o.expr, TZ: o.tz}
-	rec.Overlap = overlap
+	rec := schedule.NewCronRecord(string(wf.ID), ref, absPath(path), params, o.catchup,
+		schedule.Trigger{Cron: o.expr, TZ: o.tz}, overlap)
 	return addAndReport(w, rec)
 }
 
@@ -94,8 +93,8 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewRecord(string(wf.ID), ref, absPath(path), params, o.catchup)
-	rec.Trigger = schedule.Trigger{At: at, TZ: o.tz}
+	rec := schedule.NewAtRecord(string(wf.ID), ref, absPath(path), params, o.catchup,
+		schedule.Trigger{At: at, TZ: o.tz})
 	return addAndReport(w, rec)
 }
 

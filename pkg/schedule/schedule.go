@@ -364,6 +364,26 @@ func NewRecord(workflowID, ref, path string, params map[string]string, catchup b
 	}
 }
 
+// NewCronRecord builds a fully-initialized Record for a recurring cron
+// schedule. It extends [NewRecord] by setting Trigger and Overlap so the
+// caller does not mutate fields after construction. path must already be
+// absolute.
+func NewCronRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger, overlap Overlap) Record {
+	rec := NewRecord(workflowID, ref, path, params, catchup)
+	rec.Trigger = trigger
+	rec.Overlap = overlap
+	return rec
+}
+
+// NewAtRecord builds a fully-initialized Record for a one-off schedule. It
+// extends [NewRecord] by setting Trigger so the caller does not mutate fields
+// after construction. path must already be absolute.
+func NewAtRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger) Record {
+	rec := NewRecord(workflowID, ref, path, params, catchup)
+	rec.Trigger = trigger
+	return rec
+}
+
 // inlineIDSuffix marks schedule IDs that originate from a workflow's inline
 // `schedule:` block. It is the single authority for the naming convention so
 // a re-sync upserts the same record and a dropped block can find and remove

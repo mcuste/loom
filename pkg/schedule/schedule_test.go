@@ -262,6 +262,41 @@ func TestNewRecordDefaults(t *testing.T) {
 	}
 }
 
+func TestNewCronRecordSetsTriggerAndOverlap(t *testing.T) {
+	tr := schedule.Trigger{Cron: "0 9 * * 1", TZ: "UTC"}
+	rec := schedule.NewCronRecord("deploy", "deploy", "/abs/deploy.yaml", nil, false, tr, schedule.OverlapQueue)
+	if rec.Trigger.Cron != "0 9 * * 1" {
+		t.Errorf("Trigger.Cron = %q, want %q", rec.Trigger.Cron, "0 9 * * 1")
+	}
+	if rec.Trigger.TZ != "UTC" {
+		t.Errorf("Trigger.TZ = %q, want %q", rec.Trigger.TZ, "UTC")
+	}
+	if rec.Overlap != schedule.OverlapQueue {
+		t.Errorf("Overlap = %q, want %q", rec.Overlap, schedule.OverlapQueue)
+	}
+	if !rec.Enabled {
+		t.Error("Enabled = false, want true")
+	}
+}
+
+func TestNewAtRecordSetsTrigger(t *testing.T) {
+	at := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	tr := schedule.Trigger{At: at, TZ: "UTC"}
+	rec := schedule.NewAtRecord("deploy", "deploy", "/abs/deploy.yaml", nil, true, tr)
+	if !rec.Trigger.At.Equal(at) {
+		t.Errorf("Trigger.At = %v, want %v", rec.Trigger.At, at)
+	}
+	if rec.Trigger.TZ != "UTC" {
+		t.Errorf("Trigger.TZ = %q, want %q", rec.Trigger.TZ, "UTC")
+	}
+	if rec.Overlap != "" {
+		t.Errorf("Overlap = %q, want empty (default skip)", rec.Overlap)
+	}
+	if !rec.Catchup {
+		t.Error("Catchup = false, want true")
+	}
+}
+
 // inlineWF builds a minimal Workflow with an inline schedule for sync tests.
 func inlineWF(id, cron string) *workflow.Workflow {
 	return &workflow.Workflow{

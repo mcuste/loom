@@ -1,4 +1,4 @@
-package main
+package daemoninstall
 
 import (
 	"bytes"
@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// testSpec builds a unitSpec writing into dir with two enable steps, used by the
-// installUnit characterization tests below.
+// testSpec builds a unitSpec writing into dir with two enable steps, used by
+// the installUnit characterization tests below.
 func testSpec(dir string) unitSpec {
 	return unitSpec{
 		dir:      dir,
@@ -26,9 +26,9 @@ func testSpec(dir string) unitSpec {
 	}
 }
 
-// TestInstallUnit_Manual pins the manual flow: installUnit writes the unit file
-// (content, 0644) and prints the enable steps for the user, without invoking the
-// runner.
+// TestInstallUnit_Manual pins the manual flow: installUnit writes the unit
+// file (content, 0644) and prints the enable steps for the user, without
+// invoking the runner.
 func TestInstallUnit_Manual(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "user")
 	spec := testSpec(dir)

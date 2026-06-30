@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package daemoninstall
 
 import (
 	"fmt"
@@ -39,18 +39,18 @@ const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 `
 
-// installDaemon writes a launchd agent that supervises `loom daemon`. Unless
-// manual is set it also loads the agent so the daemon starts immediately;
-// otherwise it prints the command to load it. It builds the launchd unitSpec and
-// defers the shared write/enable flow to installUnit.
-func installDaemon(w io.Writer, execPath, home string, manual bool) error {
+// Install writes a launchd agent that supervises `loom daemon`. Unless manual
+// is set it also loads the agent so the daemon starts immediately; otherwise
+// it prints the command to load it. It builds the launchd unitSpec and defers
+// the shared write/enable flow to installUnit.
+func Install(w io.Writer, execPath, home string, manual bool) error {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve user home: %w", err)
 	}
 	dir := filepath.Join(userHome, "Library", "LaunchAgents")
 	path := filepath.Join(dir, launchdPlistName) // launchd loads by absolute path
-	logPath := scheduleDaemonLog(home)
+	logPath := filepath.Join(home, "schedules", "daemon.log")
 	spec := unitSpec{
 		dir:         dir,
 		filename:    launchdPlistName,

@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mcuste/loom/internal/daemoninstall"
 	"github.com/mcuste/loom/internal/scheduler"
 )
 
@@ -52,7 +53,7 @@ func newDaemonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return installDaemon(cmd.OutOrStdout(), exec, home, manual)
+			return daemoninstall.Install(cmd.OutOrStdout(), exec, home, manual)
 		},
 	}
 	cmd.Flags().BoolVar(&manual, "manual", false, "only write the unit file; print the commands to enable it yourself instead of running them")
