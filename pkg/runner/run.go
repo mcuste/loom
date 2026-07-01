@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -28,6 +29,7 @@ type Request struct {
 	Wf       *workflow.Workflow
 	Manifest []byte
 	Resolved workflow.ParamValues
+	Catalog  runtime.Catalog
 	Home     string
 	Cwd      string
 	Plan     SeedPlan
@@ -154,7 +156,13 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
 		x.obs.Hooks(),
 		sh,
-	), executor.Options{Params: x.req.Resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: x.state})
+	), executor.Options{
+		Params:        x.req.Resolved,
+		Seed:          rs.seed,
+		SeedExitCodes: seedExit,
+		State:         x.state,
+		Catalog:       x.req.Catalog,
+	})
 	runErr = x.finalize(rep, expected, runErr)
 	return runID, runErr
 }

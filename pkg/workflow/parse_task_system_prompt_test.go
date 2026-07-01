@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -181,51 +180,5 @@ tasks:
 	}
 	if !strings.Contains(err.Error(), "must be inlined") {
 		t.Errorf("error %q does not mention inlining requirement", err)
-	}
-}
-
-// TestValidateRoutingTaskSystemPromptUnsupported pins that a task overriding
-// system_prompt under a runtime that does not accept system prompts is rejected
-// by ValidateRouting (even when the workflow-level system prompt is empty).
-func TestValidateRoutingTaskSystemPromptUnsupported(t *testing.T) {
-	src := `
-name: wf
-runtime: test-no-sys
-model: m1
-tasks:
-  - id: a
-    system_prompt: override
-    prompt: go
-`
-	wf, err := workflow.Parse([]byte(src))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if err := wf.ValidateRouting(); !errors.Is(err, runtime.ErrUnsupportedSystemPrompt) {
-		t.Fatalf("ValidateRouting err = %v, want ErrUnsupportedSystemPrompt", err)
-	}
-}
-
-// TestValidateRoutingTaskSystemPromptAcceptedViaRuntimeOverride pins the inverse:
-// a task on a non-accepting workflow runtime may set system_prompt when it also
-// overrides the runtime to one that accepts it, since routing validates the
-// effective runtime against the effective system prompt.
-func TestValidateRoutingTaskSystemPromptAcceptedViaRuntimeOverride(t *testing.T) {
-	src := `
-name: wf
-runtime: test-no-sys
-model: m1
-tasks:
-  - id: a
-    runtime: test-rt
-    system_prompt: override
-    prompt: go
-`
-	wf, err := workflow.Parse([]byte(src))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if err := wf.ValidateRouting(); err != nil {
-		t.Fatalf("ValidateRouting rejected an accepting per-task runtime+system_prompt: %v", err)
 	}
 }

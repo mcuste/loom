@@ -15,18 +15,15 @@ type SubRefResolver func(ref, parentDir string) (string, error)
 
 // Link resolves and links every `workflow:` task in wf (recursively),
 // statically validates each linked child's `with:` bindings and required
-// params, and runs ValidateRouting across the fully-linked tree. selfPath is
-// wf's own resolved file path; resolve is called for every sub-workflow ref
+// params, and leaves runtime-aware routing validation to the caller. selfPath
+// is wf's own resolved file path; resolve is called for every sub-workflow ref
 // encountered during linking. It is the integration step between Parse
 // (filesystem-free) and execution.
 func Link(wf *Workflow, selfPath string, resolve SubRefResolver) error {
 	if err := linkSubWorkflows(wf, selfPath, nil, resolve); err != nil {
 		return err
 	}
-	if err := checkSubWorkflows(wf); err != nil {
-		return err
-	}
-	return wf.ValidateRouting()
+	return checkSubWorkflows(wf)
 }
 
 // linkSubWorkflows resolves every `workflow:` task in wf (recursively),
@@ -64,7 +61,7 @@ func linkSubWorkflows(wf *Workflow, selfPath string, chain []string, resolve Sub
 		// A task-level runtime/model/effort on the wrapper overrides the child's
 		// workflow-level defaults, so a parent can run a shared child cheaper (e.g.
 		// on a smaller model) without forking it. The child's per-task settings
-		// still win via Effective; ValidateRouting (run after linking) re-validates
+		// still win via Effective; the caller's routing-validation pass re-validates
 		// the child against the overridden defaults.
 		applyChildOverrides(child, t)
 		if err := linkSubWorkflows(child, childPath, chain, resolve); err != nil {

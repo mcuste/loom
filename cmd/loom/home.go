@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/mcuste/loom/pkg/runtime"
 )
 
 // loomHome resolves loom's global on-disk data directory: $LOOM_HOME when set,
@@ -44,6 +46,7 @@ func workflowsDir(home string) string {
 // receives a single explicit input rather than re-deriving loomHome
 // independently.
 type cliEnv struct {
-	home string
-	cwd  string
+	home    string
+	cwd     string
+	catalog runtime.Catalog
 }

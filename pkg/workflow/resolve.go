@@ -64,6 +64,13 @@ func wholeParamPlaceholder(s string) (ParamName, bool) {
 	return ParamName(m[1]), true
 }
 
+// PlaceholderParamName reports whether s is exactly a `{{params.name}}`
+// placeholder and, when it is, returns the captured param name.
+func PlaceholderParamName(s string) (string, bool) {
+	name, ok := wholeParamPlaceholder(s)
+	return string(name), ok
+}
+
 // StartMeta returns the runtime, model, and effort a task reports to a hook's
 // OnStart when it begins. A prompt (LLM) task carries its [Workflow.Effective]
 // triple; shell, script, and sub-workflow tasks have no runtime of their own (a

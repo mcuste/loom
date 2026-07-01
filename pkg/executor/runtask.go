@@ -327,11 +327,7 @@ func dispatchScript(ctx context.Context, _ *workflow.Workflow, t *workflow.Task,
 // substitutes the prompt, and calls the LLM (with cache and schema validation).
 func dispatchLLM(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
 	rt, model, effort := wf.EffectiveWithParams(t, opts.Params)
-	resolver := opts.Resolver
-	if resolver == nil {
-		resolver = RunnerResolverFunc(runtime.Lookup)
-	}
-	runner, ok := resolver.Resolve(rt)
+	runner, ok := resolveRunner(opts, rt)
 	if !ok {
 		return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 	}
@@ -365,4 +361,14 @@ func dispatchLLM(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, s
 		res, runErr = send()
 	}
 	return res, runErr, nil
+}
+
+func resolveRunner(opts Options, name runtime.Name) (runtime.Runner, bool) {
+	if opts.Catalog != nil {
+		return opts.Catalog.Resolve(name)
+	}
+	if opts.Resolver != nil {
+		return opts.Resolver.Resolve(name)
+	}
+	return runtime.Default().Resolve(name)
 }

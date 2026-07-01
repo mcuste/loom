@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/schedule"
 )
 
@@ -26,6 +27,7 @@ const minWait = time.Second
 type daemon struct {
 	home    string
 	cwd     string
+	catalog runtime.Catalog
 	out     io.Writer
 	now     func() time.Time
 	running *runningSet
@@ -33,10 +35,11 @@ type daemon struct {
 
 // New returns a daemon ready to run. home is the loom data directory that owns
 // the schedules and run records; cwd is the daemon process working directory.
-func New(home, cwd string, out io.Writer) *daemon {
+func New(home, cwd string, catalog runtime.Catalog, out io.Writer) *daemon {
 	return &daemon{
 		home:    home,
 		cwd:     cwd,
+		catalog: catalog,
 		out:     out,
 		now:     time.Now,
 		running: newRunningSet(),

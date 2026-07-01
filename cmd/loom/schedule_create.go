@@ -5,9 +5,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/workflowcheck"
 	"github.com/mcuste/loom/pkg/workflowload"
 	"github.com/spf13/cobra"
 )
@@ -50,12 +52,12 @@ type atOpts struct {
 // doScheduleCron validates the workflow and params, then persists a recurring
 // schedule. Validation happens now so a bad workflow, missing required param,
 // or malformed cron expression fails at the prompt, not at 15:00.
-func doScheduleCron(w io.Writer, home, cwd, ref string, o cronOpts) error {
+func doScheduleCron(w io.Writer, home, cwd string, catalog runtime.Catalog, ref string, o cronOpts) error {
 	overlap, err := schedule.ParseOverlap(o.overlap)
 	if err != nil {
 		return err
 	}
-	wf, path, params, err := loadAndResolve(home, cwd, ref, o.paramArgs)
+	wf, path, params, err := loadAndResolve(home, cwd, catalog, ref, o.paramArgs)
 	if err != nil {
 		return err
 	}
@@ -66,7 +68,7 @@ func doScheduleCron(w io.Writer, home, cwd, ref string, o cronOpts) error {
 
 // doScheduleAt validates the workflow and params, parses the one-off instant in
 // the chosen timezone, and persists a one-off schedule.
-func doScheduleAt(w io.Writer, home, cwd, ref string, o atOpts) error {
+func doScheduleAt(w io.Writer, home, cwd string, catalog runtime.Catalog, ref string, o atOpts) error {
 	loc := time.Local
 	if o.tz != "" {
 		l, err := time.LoadLocation(o.tz)
@@ -79,7 +81,7 @@ func doScheduleAt(w io.Writer, home, cwd, ref string, o atOpts) error {
 	if err != nil {
 		return err
 	}
-	wf, path, params, err := loadAndResolve(home, cwd, ref, o.paramArgs)
+	wf, path, params, err := loadAndResolve(home, cwd, catalog, ref, o.paramArgs)
 	if err != nil {
 		return err
 	}
@@ -92,7 +94,7 @@ func doScheduleAt(w io.Writer, home, cwd, ref string, o atOpts) error {
 // CLI-supplied param map (not the defaults) so the daemon resolves fresh
 // against the then-current workflow at fire time. ResolveAndValidateParams is
 // still called here to reject missing required params and bad routing up front.
-func loadAndResolve(home, cwd, ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
+func loadAndResolve(home, cwd string, catalog runtime.Catalog, ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
 	wf, _, path, err := workflowload.Load(home, cwd, ref)
 	if err != nil {
 		return nil, "", nil, err
@@ -101,7 +103,7 @@ func loadAndResolve(home, cwd, ref string, paramArgs []string) (*workflow.Workfl
 	if err != nil {
 		return nil, "", nil, err
 	}
-	if _, err := workflow.ResolveAndValidateParams(wf, cliParams, nil); err != nil {
+	if _, err := workflowcheck.ResolveAndValidateParams(wf, cliParams, nil, catalog); err != nil {
 		return nil, "", nil, err
 	}
 	if len(cliParams) == 0 {

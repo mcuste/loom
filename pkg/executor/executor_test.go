@@ -346,6 +346,30 @@ func TestRunUnknownRuntime(t *testing.T) {
 	}
 }
 
+func TestRunUsesExplicitCatalog(t *testing.T) {
+	reg := &runtime.Registry{}
+	reg.Register("exec-catalog-only", echoRuntime{})
+	wf := &workflow.Workflow{
+		ID:      "wf",
+		Runtime: "exec-catalog-only",
+		Model:   "m1",
+		Tasks: []workflow.Task{
+			{ID: "a", Prompt: "x"},
+		},
+	}
+
+	rep, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{Catalog: reg})
+	if err != nil {
+		t.Fatalf("Run with explicit catalog: %v", err)
+	}
+	if rep.Outputs["a"] != "x" {
+		t.Fatalf("Outputs[a] = %q, want x", rep.Outputs["a"])
+	}
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, executor.Options{Catalog: runtime.Default()}); !errors.Is(err, runtime.ErrUnknownRuntime) {
+		t.Fatalf("Run with default registry err = %v, want ErrUnknownRuntime", err)
+	}
+}
+
 // TestRunSubstitutesParams verifies that {{params.name}} placeholders in task
 // prompts are substituted with opts.Params values before the runtime sees them.
 func TestRunSubstitutesParams(t *testing.T) {

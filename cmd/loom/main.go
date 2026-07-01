@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/spf13/cobra"
 
 	// Side-effect imports register runtimes with the runtime package.
@@ -34,7 +35,7 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
-	env := &cliEnv{}
+	env := &cliEnv{catalog: runtime.Default()}
 	root := &cobra.Command{
 		Use:          "loom",
 		Short:        "Validate and run workflow YAML files",

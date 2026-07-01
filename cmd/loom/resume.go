@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/pkg/runner"
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 	"github.com/mcuste/loom/pkg/workflowload"
@@ -20,7 +21,7 @@ func newResumeCmd(env *cliEnv) *cobra.Command {
 		Short: "Resume a previous workflow run, skipping tasks that already completed",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doResume(cmd.OutOrStdout(), env.home, args[0], paramArgs)
+			return doResume(cmd.OutOrStdout(), env.home, env.catalog, args[0], paramArgs)
 		},
 	}
 	addParamFlags(cmd, &paramArgs)
@@ -33,7 +34,7 @@ func newResumeCmd(env *cliEnv) *cobra.Command {
 // record carries the directory the original run was invoked from, this chdirs
 // into it before re-running so the resumed run's shell tasks and relative paths
 // resolve against the original dir rather than the resume's launch dir.
-func doResume(w io.Writer, home, runID string, paramArgs []string) error {
+func doResume(w io.Writer, home string, catalog runtime.Catalog, runID string, paramArgs []string) error {
 	rec, err := store.LoadByRunID(home, runID)
 	if err != nil {
 		return err
@@ -41,13 +42,13 @@ func doResume(w io.Writer, home, runID string, paramArgs []string) error {
 	// The original workflow file path is not stored in the record, so the parent
 	// links with an empty selfPath: path refs resolve relative to the restored
 	// cwd and the parent has no on-disk identity for cycle detection.
-	return runFromRecord(w, home, "", []byte(rec.Manifest), rec, paramArgs)
+	return runFromRecord(w, home, catalog, "", []byte(rec.Manifest), rec, paramArgs)
 }
 
 // doRunResumeLatest is the --resume-latest entry point for `loom run`. The
 // workflow body comes from the YAML on disk; the record only supplies the
 // seeded outputs and the original params.
-func doRunResumeLatest(w io.Writer, home, cwd, path string, paramArgs []string) error {
+func doRunResumeLatest(w io.Writer, home, cwd string, catalog runtime.Catalog, path string, paramArgs []string) error {
 	// Resolve and load before any chdir, so --resume-latest still targets the
 	// file the user pointed at rather than the recorded run dir.
 	wf, manifest, path, err := workflowload.Load(home, cwd, path)
@@ -59,7 +60,7 @@ func doRunResumeLatest(w io.Writer, home, cwd, path string, paramArgs []string) 
 	if err != nil {
 		return err
 	}
-	return runFromRecord(w, home, path, manifest, rec, paramArgs)
+	return runFromRecord(w, home, catalog, path, manifest, rec, paramArgs)
 }
 
 // chdirToRecorded changes into cwd (the directory the original run was invoked
@@ -121,7 +122,7 @@ func linkResumedWorkflow(home, cwd, selfPath string, wf *workflow.Workflow) erro
 // (they cannot be re-gated and must not contaminate the executor's task
 // count). The record's params are the lower-precedence tier under any CLI
 // overrides.
-func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
+func runFromRecord(w io.Writer, home string, catalog runtime.Catalog, selfPath string, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
 	req, err := prepareResumedRequest(w, selfPath, manifest, rec)
 	if err != nil {
 		return err
@@ -141,5 +142,6 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// CLI overrides.
 	seeded := runner.SeededSetFromRequest(req)
 	req.Home = home
+	req.Catalog = catalog
 	return renderCheckRun(w, req, paramInputs{cli: paramArgs, file: rec.Params}, seeded)
 }

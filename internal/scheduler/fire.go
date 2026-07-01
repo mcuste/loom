@@ -14,6 +14,7 @@ import (
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/workflowcheck"
 	"github.com/mcuste/loom/pkg/workflowload"
 )
 
@@ -39,7 +40,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 		d.logf("schedule %s: %v", rec.ID, res.err)
 		return
 	}
-	resolved, err := workflow.ResolveAndValidateParams(wf, rec.Params, nil)
+	resolved, err := workflowcheck.ResolveAndValidateParams(wf, rec.Params, nil, d.catalog)
 	if err != nil {
 		if isParamResolutionError(err) {
 			res.err = fmt.Errorf("resolve params: %w", err)
@@ -74,6 +75,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 		Wf:       wf,
 		Manifest: manifest,
 		Resolved: resolved,
+		Catalog:  d.catalog,
 		Home:     d.home,
 		Cwd:      cwd,
 		Prov:     prov,

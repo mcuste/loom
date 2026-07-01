@@ -22,7 +22,7 @@ func newDaemonCmd(env *cliEnv) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, stop := interruptContext()
 			defer stop()
-			d := scheduler.New(env.home, env.cwd, cmd.OutOrStdout())
+			d := scheduler.New(env.home, env.cwd, env.catalog, cmd.OutOrStdout())
 			return d.Run(ctx)
 		},
 	}

@@ -7,8 +7,10 @@ import (
 	"os"
 
 	"github.com/mcuste/loom/pkg/runner"
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/workflowcheck"
 )
 
 // newRenderer creates a renderer over w and returns it alongside a closer to
@@ -48,7 +50,7 @@ type paramInputs struct {
 // same case is a hard failure. seeded annotates the plan with carried-over
 // tasks on resume. It returns the resolved params for the caller to execute
 // with.
-func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, advisory bool, seeded map[workflow.TaskID]bool) (workflow.ParamValues, error) {
+func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, catalog runtime.Validator, advisory bool, seeded map[workflow.TaskID]bool) (workflow.ParamValues, error) {
 	cliParams, err := workflow.ParseParamArgs(params.cli)
 	if err != nil {
 		return nil, err
@@ -69,7 +71,7 @@ func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, 
 		// The merge order is authoritative in ResolveParams; no local rebuild needed.
 		resolved = miss.Partial
 	}
-	if err := wf.ValidateRoutingWithParams(resolved, advisory); err != nil {
+	if err := workflowcheck.Validate(wf, resolved, catalog, advisory); err != nil {
 		return nil, err
 	}
 	if err := r.Plan(wf, resolved, cliParams, seeded); err != nil {
@@ -99,7 +101,7 @@ func renderCheckRun(w io.Writer, req runner.Request, params paramInputs, seeded 
 	}
 	r, finish := newRenderer(w)
 	defer finish(&err)
-	resolved, err := validateAndPlan(r, req.Wf, params, false, seeded)
+	resolved, err := validateAndPlan(r, req.Wf, params, req.Catalog, false, seeded)
 	if err != nil {
 		return err
 	}

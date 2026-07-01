@@ -13,6 +13,23 @@ type Registry struct {
 	runners map[Name]Runner
 }
 
+// Resolver maps a runtime name to the Runner that executes it.
+type Resolver interface {
+	Resolve(name Name) (Runner, bool)
+}
+
+// Validator checks whether a runtime accepts a request.
+type Validator interface {
+	Validate(name Name, req Request) error
+}
+
+// Catalog is the combined lookup + validation seam threaded through the run
+// pipeline. *Registry satisfies it directly.
+type Catalog interface {
+	Resolver
+	Validator
+}
+
 // Default returns the process-wide runtime registry. The global Register,
 // Lookup, Registered, and Validate package-level functions delegate to it.
 func Default() *Registry { return &defaultReg }
@@ -47,8 +64,8 @@ func (reg *Registry) Lookup(name Name) (Runner, bool) {
 	return r, ok
 }
 
-// Resolve satisfies [executor.RunnerResolver] so a *Registry can be injected
-// directly into executor.Options.Resolver without an adapter.
+// Resolve satisfies [Resolver] so a *Registry can be injected directly into
+// callers that only need runtime lookup.
 func (reg *Registry) Resolve(name Name) (Runner, bool) {
 	return reg.Lookup(name)
 }

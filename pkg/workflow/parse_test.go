@@ -332,36 +332,6 @@ tasks:
 			wantErr: &workflow.UnknownPlaceholderError{},
 		},
 		{
-			name:    "unsupported model from workflow default",
-			src:     "name: wf\nruntime: test-rt\nmodel: m9\ntasks:\n  - id: a\n    prompt: x\n",
-			wantErr: runtime.ErrUnsupportedModel,
-		},
-		{
-			name:    "missing model after no resolution",
-			src:     "name: wf\nruntime: test-rt\ntasks:\n  - id: a\n    prompt: x\n",
-			wantErr: runtime.ErrMissingModel,
-		},
-		{
-			name:    "unsupported effort",
-			src:     "name: wf\nruntime: test-rt\nmodel: m1\neffort: medium\ntasks:\n  - id: a\n    prompt: x\n",
-			wantErr: runtime.ErrUnsupportedEffort,
-		},
-		{
-			name:    "unsupported system prompt",
-			src:     "name: wf\nruntime: test-no-sys\nmodel: m1\nsystem_prompt: hi\ntasks:\n  - id: a\n    prompt: x\n",
-			wantErr: runtime.ErrUnsupportedSystemPrompt,
-		},
-		{
-			name:    "missing runtime",
-			src:     "name: wf\nmodel: m1\ntasks:\n  - id: a\n    prompt: x\n",
-			wantErr: runtime.ErrMissingRuntime,
-		},
-		{
-			name:    "unknown runtime",
-			src:     "name: wf\nruntime: nope\nmodel: m1\ntasks:\n  - id: a\n    prompt: x\n",
-			wantErr: runtime.ErrUnknownRuntime,
-		},
-		{
 			name:    "unknown top-level field",
 			src:     "name: wf\nruntime: test-rt\nmodel: m1\ninputs: [topic]\ntasks:\n  - id: a\n    prompt: x\n",
 			wantErr: nil, // checked separately below
@@ -375,13 +345,7 @@ tasks:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Parse is registry-free; routing errors (runtime/model/effort/system
-			// prompt) surface from the explicit ValidateRouting step, so the table
-			// runs both and reports the first error either produces.
-			wf, err := workflow.Parse([]byte(tc.src))
-			if err == nil {
-				err = wf.ValidateRouting()
-			}
+			_, err := workflow.Parse([]byte(tc.src))
 			if err == nil {
 				t.Fatalf("Parse returned nil error, want error")
 			}
@@ -544,34 +508,6 @@ tasks:
 	}
 	if p := wf.Param("nope"); p != nil {
 		t.Errorf("Param(nope) = %+v, want nil", p)
-	}
-}
-
-func TestValidateRoutingResolvesParamFields(t *testing.T) {
-	src := `
-name: wf
-runtime: test-rt
-model: "{{params.model}}"
-effort: "{{params.effort}}"
-params:
-  - name: model
-    default: m2
-  - name: effort
-    default: high
-tasks:
-  - id: a
-    prompt: x
-`
-	wf, err := workflow.Parse([]byte(src))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	params, err := workflow.ResolveParams(wf, nil, nil)
-	if err != nil {
-		t.Fatalf("ResolveParams: %v", err)
-	}
-	if err := wf.ValidateRoutingWithParams(params, false); err != nil {
-		t.Fatalf("ValidateRoutingWithParams: %v", err)
 	}
 }
 

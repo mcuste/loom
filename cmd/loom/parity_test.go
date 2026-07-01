@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/mcuste/loom/pkg/runtime"
 )
 
 // parityBar is the 40-rune rule the summary block draws above and below the
@@ -23,7 +25,7 @@ func TestDoCheckParity(t *testing.T) {
 	path := writeWorkflow(t, "name: demo\ntasks:\n  - id: a\n    command: echo hi\n")
 
 	var buf bytes.Buffer
-	if err := doCheck(&buf, home, cwd, path, nil); err != nil {
+	if err := doCheck(&buf, home, cwd, runtime.Default(), path, nil); err != nil {
 		t.Fatalf("doCheck: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -51,7 +53,7 @@ func TestDoRunParity(t *testing.T) {
 	path := writeWorkflow(t, "name: demo\ntasks:\n  - id: a\n    command: echo hi\n")
 
 	var buf bytes.Buffer
-	if err := doRun(&buf, home, cwd, path, nil); err != nil {
+	if err := doRun(&buf, home, cwd, runtime.Default(), path, nil); err != nil {
 		t.Fatalf("doRun: %v\noutput:\n%s", err, buf.String())
 	}
 

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/workflowcheck"
 )
 
 // dispatchSubWorkflow dispatches a sub-workflow task: it recursively runs the linked
@@ -33,7 +35,7 @@ func dispatchSubWorkflow(ctx context.Context, wf *workflow.Workflow, t *workflow
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 		start := time.Now()
-		cp, err := workflow.ResolveAndValidateParams(child, vals, nil)
+		cp, err := workflowcheck.ResolveAndValidateParams(child, vals, nil, catalogValidator(opts))
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err
 		}
@@ -48,7 +50,9 @@ func dispatchSubWorkflow(ctx context.Context, wf *workflow.Workflow, t *workflow
 			RetryBaseDelay: opts.RetryBaseDelay,
 			// The parent's effective cwd is the child's inherited fallback; the
 			// child's own working_dir (if any) overrides it inside Run.
-			WorkDir: st.workDir,
+			WorkDir:  st.workDir,
+			Catalog:  opts.Catalog,
+			Resolver: opts.Resolver,
 		})
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err
@@ -64,4 +68,11 @@ func dispatchSubWorkflow(ctx context.Context, wf *workflow.Workflow, t *workflow
 		return r, validateSchema(t, out)
 	})
 	return res, runErr, nil
+}
+
+func catalogValidator(opts Options) runtime.Validator {
+	if opts.Catalog != nil {
+		return opts.Catalog
+	}
+	return runtime.Default()
 }

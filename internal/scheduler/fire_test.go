@@ -1,13 +1,32 @@
 package scheduler
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/store"
 )
+
+type daemonEchoRuntime struct{}
+
+func (daemonEchoRuntime) Validate(req runtime.Request) error {
+	if req.Model == "" {
+		return runtime.ErrMissingModel
+	}
+	if req.Model != "m1" {
+		return fmt.Errorf("model %q: %w", req.Model, runtime.ErrUnsupportedModel)
+	}
+	return nil
+}
+
+func (daemonEchoRuntime) Run(context.Context, runtime.Request) (runtime.Response, error) {
+	return runtime.Response{Output: "ok"}, nil
+}
 
 // requiredParamShellWorkflow declares a required param with no default, so a
 // fire that supplies no params fails at resolution before any task runs.
@@ -51,7 +70,7 @@ func TestDaemonExecuteUnloadableWorkflowRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
@@ -98,7 +117,7 @@ func TestDaemonExecuteMissingRequiredParamRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
@@ -143,7 +162,7 @@ func TestDaemonExecuteInvalidRoutingRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
@@ -170,5 +189,60 @@ func TestDaemonExecuteInvalidRoutingRecordsNoRun(t *testing.T) {
 	}
 	if got.LastRunID != "" {
 		t.Fatalf("LastRunID = %q, want empty (no run was recorded)", got.LastRunID)
+	}
+}
+
+func TestDaemonExecuteUsesExplicitCatalog(t *testing.T) {
+	home := t.TempDir()
+	path := writeWorkflow(t, `
+name: llmwf
+runtime: sched-catalog-only
+model: m1
+tasks:
+  - id: a
+    prompt: hello
+`)
+	if _, ok := runtime.Default().Resolve("sched-catalog-only"); ok {
+		t.Fatal("sched-catalog-only unexpectedly present in default registry")
+	}
+	reg := &runtime.Registry{}
+	reg.Register("sched-catalog-only", daemonEchoRuntime{})
+
+	added, err := schedule.Add(home, schedule.Record{
+		WorkflowID: "llmwf",
+		Ref:        path,
+		Path:       path,
+		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
+		Enabled:    true,
+	}, schedule.Config{Now: fixedClock("2026-06-28T10:00:30Z"), Rand: counterRand(1)})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	d := New(home, "", reg, io.Discard)
+	d.now = fixedClock("2026-06-28T10:01:05Z")
+
+	results := make(chan fireResult, 1)
+	d.scan(false, results)
+
+	res := awaitResult(t, results)
+	if res.err != nil {
+		t.Fatalf("fire error: %v", res.err)
+	}
+	d.complete(res)
+
+	runs, err := store.ListRuns(home, "llmwf")
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1", len(runs))
+	}
+	got, err := schedule.Get(home, added.ID)
+	if err != nil {
+		t.Fatalf("Get after fire: %v", err)
+	}
+	if got.LastRunID == "" {
+		t.Fatal("LastRunID empty, want recorded run id")
 	}
 }

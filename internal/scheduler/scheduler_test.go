@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/store"
 )
@@ -38,7 +39,7 @@ func TestDaemonScanFiresDueSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
@@ -103,7 +104,7 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // pretend a prior run is still going
 
@@ -142,7 +143,7 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	}
 	dueAt, _ := schedule.Get(home, added.ID)
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going
 
@@ -190,7 +191,7 @@ func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going; allow ignores it
 
@@ -224,7 +225,7 @@ func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
@@ -256,7 +257,7 @@ func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", io.Discard)
+	d := New(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	ctx, cancel := context.WithCancel(context.Background())

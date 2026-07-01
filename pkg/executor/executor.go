@@ -137,8 +137,10 @@ type Hooks struct {
 	OnFinish func(t workflow.Task, iter int, res TaskResult, err error)
 }
 
-// RunnerResolver maps a runtime name to its Runner implementation. A nil
-// Resolver in Options falls back to runtime.Lookup, the global registry.
+// RunnerResolver maps a runtime name to its Runner implementation.
+//
+// Deprecated: prefer runtime.Catalog via Options.Catalog so validation and
+// dispatch use the same explicit runtime set.
 type RunnerResolver interface {
 	Resolve(name runtime.Name) (runtime.Runner, bool)
 }
@@ -186,8 +188,13 @@ type Options struct {
 	// directory here and the child inherits it unless it declares its own. Empty
 	// means inherit loom's process cwd.
 	WorkDir string
-	// Resolver maps a runtime name to its Runner. When nil, defaults to
-	// runtime.Lookup (the process-wide registry).
+	// Catalog is the explicit runtime set used for both dispatch and child
+	// workflow routing validation. When nil, Run falls back to the process-wide
+	// default registry for compatibility.
+	Catalog runtime.Catalog
+	// Resolver maps a runtime name to its Runner.
+	//
+	// Deprecated: prefer Catalog. When both are set, Catalog wins.
 	Resolver RunnerResolver
 }
 
