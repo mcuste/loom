@@ -46,21 +46,53 @@ import (
 
 // Parse decodes a workflow YAML document and returns the validated Workflow.
 func Parse(data []byte) (*Workflow, error) {
+	raw, id, err := decodeRawWorkflow(data)
+	if err != nil {
+		return nil, err
+	}
+
+	topTasks, rawLoops, err := prepareRawLoops(id, raw.Tasks)
+	if err != nil {
+		return nil, err
+	}
+
+	wf, paramSet, paramIdx, err := newWorkflowSkeleton(raw, id)
+	if err != nil {
+		return nil, err
+	}
+
+	allTasks, st, memberByLoop, err := prepareLoopedTasks(topTasks, rawLoops, wf, paramSet, paramIdx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := buildAllTasks(st, allTasks); err != nil {
+		return nil, err
+	}
+
+	return finalizeWorkflow(raw, wf, paramSet, memberByLoop)
+}
+
+func decodeRawWorkflow(data []byte) (rawWorkflow, WorkflowID, error) {
 	var raw rawWorkflow
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("yaml: %w", err)
+		return rawWorkflow{}, "", fmt.Errorf("yaml: %w", err)
 	}
 
 	id, err := NewWorkflowID(raw.Name)
 	if err != nil {
-		return nil, err
+		return rawWorkflow{}, "", err
 	}
 
-	topTasks, rawLoops, err := splitLoopWrappers(raw.Tasks)
+	return raw, id, nil
+}
+
+func prepareRawLoops(id WorkflowID, rawTasks []rawTask) ([]rawTask, []rawLoop, error) {
+	topTasks, rawLoops, err := splitLoopWrappers(rawTasks)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Only a workflow with nothing to run at all is rejected. A loop is an
@@ -69,12 +101,16 @@ func Parse(data []byte) (*Workflow, error) {
 	// loops-only workflow is valid; it is rejected only when no loops accompany
 	// the empty top-level set.
 	if len(topTasks) == 0 && len(rawLoops) == 0 {
-		return nil, fmt.Errorf("workflow %q: %w", id, ErrNoTasks)
+		return nil, nil, fmt.Errorf("workflow %q: %w", id, ErrNoTasks)
 	}
 
+	return topTasks, rawLoops, nil
+}
+
+func newWorkflowSkeleton(raw rawWorkflow, id WorkflowID) (*Workflow, map[ParamName]struct{}, map[ParamName]int, error) {
 	params, paramIdx, err := parseParams(raw.Params)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	wf := &Workflow{
@@ -99,27 +135,31 @@ func Parse(data []byte) (*Workflow, error) {
 		paramSet[n] = struct{}{}
 	}
 	if err := validateRoutingField("", "runtime", raw.Runtime, paramSet); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateRoutingField("", "model", raw.Model, paramSet); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateRoutingField("", "effort", raw.Effort, paramSet); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
+	return wf, paramSet, paramIdx, nil
+}
+
+func prepareLoopedTasks(topTasks []rawTask, rawLoops []rawLoop, wf *Workflow, paramSet map[ParamName]struct{}, paramIdx map[ParamName]int) ([]loopTask, *parseState, map[LoopID]map[TaskID]bool, error) {
 	allTasks, ids, err := flattenLoopTasks(topTasks, rawLoops)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	if err := validateLoopNamespace(rawLoops, ids, paramIdx); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	loops, memberByLoop, err := buildLoopGroups(rawLoops, ids, paramSet)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	wf.Loops = loops
 
@@ -139,12 +179,20 @@ func Parse(data []byte) (*Workflow, error) {
 		asByLoop:     asByLoop,
 		memberByLoop: memberByLoop,
 	}
+
+	return allTasks, st, memberByLoop, nil
+}
+
+func buildAllTasks(st *parseState, allTasks []loopTask) error {
 	for _, lt := range allTasks {
 		if err := buildTask(st, lt); err != nil {
-			return nil, err
+			return err
 		}
 	}
+	return nil
+}
 
+func finalizeWorkflow(raw rawWorkflow, wf *Workflow, paramSet map[ParamName]struct{}, memberByLoop map[LoopID]map[TaskID]bool) (*Workflow, error) {
 	if raw.Output != "" {
 		ot := TaskID(raw.Output)
 		if _, ok := wf.byID[ot]; !ok {
