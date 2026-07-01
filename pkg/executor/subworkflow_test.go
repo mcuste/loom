@@ -3,6 +3,8 @@ package executor_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/executor"
@@ -282,5 +284,54 @@ func TestRunSubWorkflowRejectsBadRouting(t *testing.T) {
 	}
 	if !errors.Is(err, runtime.ErrMissingRuntime) {
 		t.Fatalf("err = %v, want missing runtime", err)
+	}
+}
+
+// TestRunSubWorkflowSuppressesChildHooks pins Phase 12's Option A contract:
+// the sub-workflow path recurses through the public Run adapter with empty
+// child hooks, so the caller observes only the parent task's lifecycle. Child
+// tasks still execute, but their start/finish events stay internal.
+func TestRunSubWorkflowSuppressesChildHooks(t *testing.T) {
+	child := releaseChild()
+	parent := &workflow.Workflow{
+		ID:      "parent",
+		Runtime: "exec-echo",
+		Model:   "m1",
+		Tasks: []workflow.Task{
+			{ID: "cut", Workflow: "release", With: []workflow.WithArg{{Name: "version", Value: "1.4.0"}}},
+		},
+		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
+	}
+
+	var (
+		mu       sync.Mutex
+		startIDs []workflow.TaskID
+		endIDs   []workflow.TaskID
+	)
+	hooks := executor.Hooks{
+		OnStart: func(t workflow.Task, _ int, _ runtime.Name, _ runtime.Model, _ runtime.Effort) {
+			mu.Lock()
+			startIDs = append(startIDs, t.ID)
+			mu.Unlock()
+		},
+		OnFinish: func(t workflow.Task, _ int, _ executor.TaskResult, _ error) {
+			mu.Lock()
+			endIDs = append(endIDs, t.ID)
+			mu.Unlock()
+		},
+	}
+
+	rep, err := executor.Run(context.Background(), parent, hooks, executor.Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Outputs["cut"] != "publish build 1.4.0" {
+		t.Fatalf("Outputs[cut] = %q, want publish build 1.4.0", rep.Outputs["cut"])
+	}
+	if !slices.Equal(startIDs, []workflow.TaskID{"cut"}) {
+		t.Fatalf("OnStart task ids = %v, want [cut] only", startIDs)
+	}
+	if !slices.Equal(endIDs, []workflow.TaskID{"cut"}) {
+		t.Fatalf("OnFinish task ids = %v, want [cut] only", endIDs)
 	}
 }
