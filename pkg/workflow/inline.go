@@ -276,15 +276,17 @@ func inlinePromptFileNodes(n *yaml.Node, baseDir string) error {
 // either, both, or neither (a `prompt_file` body alongside a `system_prompt_file`
 // override is legal), so each is handled on its own rather than short-circuiting
 // when the other is absent. A mapping without an `id` is left untouched.
-func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
-	var (
-		taskID          TaskID
-		pfKey, pfVal    *yaml.Node
-		spfKey, spfVal  *yaml.Node
-		bodyFields      []string
-		hasID           bool
-		hasSystemPrompt bool
-	)
+type taskFileRefs struct {
+	taskID          TaskID
+	pfKey, pfVal    *yaml.Node
+	spfKey, spfVal  *yaml.Node
+	bodyFields      []string
+	hasID           bool
+	hasSystemPrompt bool
+}
+
+func scanTaskFileRefs(m *yaml.Node) taskFileRefs {
+	var refs taskFileRefs
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		k, v := m.Content[i], m.Content[i+1]
 		if k.Kind != yaml.ScalarNode {
@@ -292,78 +294,96 @@ func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
 		}
 		switch k.Value {
 		case "id":
-			taskID = TaskID(v.Value)
-			hasID = true
+			refs.taskID = TaskID(v.Value)
+			refs.hasID = true
 		case "prompt_file":
-			pfKey, pfVal = k, v
-			bodyFields = append(bodyFields, k.Value)
+			refs.pfKey, refs.pfVal = k, v
+			refs.bodyFields = append(refs.bodyFields, k.Value)
 		case "loop", "for_each":
 			// Loop wrapper forms are not in bodyForms (they are split off before
 			// Parse runs the body-form check), but they are still mutually exclusive
 			// with prompt_file, so track them here.
-			bodyFields = append(bodyFields, k.Value)
+			refs.bodyFields = append(refs.bodyFields, k.Value)
 		case "system_prompt_file":
-			spfKey, spfVal = k, v
+			refs.spfKey, refs.spfVal = k, v
 		case "system_prompt":
-			hasSystemPrompt = true
+			refs.hasSystemPrompt = true
 		default:
 			if isBodyFormKey(k.Value) {
-				bodyFields = append(bodyFields, k.Value)
+				refs.bodyFields = append(refs.bodyFields, k.Value)
 			}
 		}
 	}
+	return refs
+}
+
+func inlineTaskPromptFile(refs taskFileRefs, baseDir string) error {
+	if refs.pfKey == nil {
+		return nil
+	}
+	// prompt_file is one of the mutually exclusive body forms: any sibling body
+	// key is a conflict, reported with every offending field in declaration order.
+	if len(refs.bodyFields) > 1 {
+		return &TaskBodyConflictError{Task: refs.taskID, Fields: refs.bodyFields}
+	}
+	if filepath.IsAbs(refs.pfVal.Value) {
+		return &AbsolutePromptFilePathError{Task: refs.taskID, Path: refs.pfVal.Value}
+	}
+	content, err := os.ReadFile(filepath.Join(baseDir, refs.pfVal.Value))
+	if err != nil {
+		return &PromptFileError{Task: refs.taskID, Path: refs.pfVal.Value, Err: err}
+	}
+	refs.pfKey.Value = "prompt"
+	refs.pfVal.Kind = yaml.ScalarNode
+	refs.pfVal.Tag = "!!str"
+	refs.pfVal.Style = yaml.LiteralStyle
+	refs.pfVal.Value = string(content)
+	return nil
+}
+
+func inlineTaskSystemPromptFile(refs taskFileRefs, baseDir string) error {
+	if refs.spfKey == nil {
+		return nil
+	}
+	// system_prompt_file is not a body form; it is the file-backed spelling of
+	// system_prompt and mutually exclusive with the inline key, mirroring the
+	// workflow-level rule.
+	if refs.hasSystemPrompt {
+		return fmt.Errorf("task %q: %w", refs.taskID, ErrTaskSystemPromptAndFileSet)
+	}
+	// Wrap with the task id so a multi-task workflow points at the offending
+	// task, matching the prompt_file errors above; the wrapped sentinel types
+	// stay reachable via errors.As / errors.Is.
+	if filepath.IsAbs(refs.spfVal.Value) {
+		return fmt.Errorf("task %q: %w", refs.taskID, &AbsoluteSystemPromptFilePathError{Path: refs.spfVal.Value})
+	}
+	content, err := os.ReadFile(filepath.Join(baseDir, refs.spfVal.Value))
+	if err != nil {
+		return fmt.Errorf("task %q: %w", refs.taskID, &SystemPromptFileError{Path: refs.spfVal.Value, Err: err})
+	}
+	refs.spfKey.Value = "system_prompt"
+	refs.spfVal.Kind = yaml.ScalarNode
+	refs.spfVal.Tag = "!!str"
+	refs.spfVal.Style = yaml.LiteralStyle
+	refs.spfVal.Value = string(content)
+	return nil
+}
+
+func inlinePromptFileMapping(m *yaml.Node, baseDir string) error {
+	refs := scanTaskFileRefs(m)
 	// Only task mappings legitimately carry these file refs, and every task has an
 	// `id`. A stray `prompt_file` / `system_prompt_file` in any other mapping
 	// (schema body, loop block) is left untouched for Parse's known-fields check
 	// to reject in context, rather than inlined or reported against an empty task
 	// id. The workflow-root `system_prompt_file` has no id and is handled by
 	// inlineSystemPromptFile, which runs before this walk.
-	if !hasID {
+	if !refs.hasID {
 		return nil
 	}
-	if pfKey != nil {
-		// prompt_file is one of the mutually exclusive body forms: any sibling body
-		// key is a conflict, reported with every offending field in declaration order.
-		if len(bodyFields) > 1 {
-			return &TaskBodyConflictError{Task: taskID, Fields: bodyFields}
-		}
-		if filepath.IsAbs(pfVal.Value) {
-			return &AbsolutePromptFilePathError{Task: taskID, Path: pfVal.Value}
-		}
-		content, err := os.ReadFile(filepath.Join(baseDir, pfVal.Value))
-		if err != nil {
-			return &PromptFileError{Task: taskID, Path: pfVal.Value, Err: err}
-		}
-		pfKey.Value = "prompt"
-		pfVal.Kind = yaml.ScalarNode
-		pfVal.Tag = "!!str"
-		pfVal.Style = yaml.LiteralStyle
-		pfVal.Value = string(content)
+	if err := inlineTaskPromptFile(refs, baseDir); err != nil {
+		return err
 	}
-	if spfKey != nil {
-		// system_prompt_file is not a body form; it is the file-backed spelling of
-		// system_prompt and mutually exclusive with the inline key, mirroring the
-		// workflow-level rule.
-		if hasSystemPrompt {
-			return fmt.Errorf("task %q: %w", taskID, ErrTaskSystemPromptAndFileSet)
-		}
-		// Wrap with the task id so a multi-task workflow points at the offending
-		// task, matching the prompt_file errors above; the wrapped sentinel types
-		// stay reachable via errors.As / errors.Is.
-		if filepath.IsAbs(spfVal.Value) {
-			return fmt.Errorf("task %q: %w", taskID, &AbsoluteSystemPromptFilePathError{Path: spfVal.Value})
-		}
-		content, err := os.ReadFile(filepath.Join(baseDir, spfVal.Value))
-		if err != nil {
-			return fmt.Errorf("task %q: %w", taskID, &SystemPromptFileError{Path: spfVal.Value, Err: err})
-		}
-		spfKey.Value = "system_prompt"
-		spfVal.Kind = yaml.ScalarNode
-		spfVal.Tag = "!!str"
-		spfVal.Style = yaml.LiteralStyle
-		spfVal.Value = string(content)
-	}
-	return nil
+	return inlineTaskSystemPromptFile(refs, baseDir)
 }
 
 // AbsolutePromptFilePathError reports a `prompt_file:` whose value is an
