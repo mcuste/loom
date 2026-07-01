@@ -28,6 +28,22 @@ func execRunner(w io.Writer, args []string) error {
 	return cmd.Run()
 }
 
+// daemonPATH returns the PATH baked into the supervisor unit so the daemon's
+// task processes (claude, codex, git, make) resolve the same binaries the user
+// has at install time. A launchd agent or systemd user unit otherwise runs with
+// a minimal PATH (launchd: /usr/bin:/bin:/usr/sbin:/sbin) that omits Homebrew
+// and other user bin dirs, so a scheduled `command`/`workflow` task would fail
+// with "command not found". Capturing the installing shell's PATH is the
+// least-surprising choice: install from a shell that can run the tools and the
+// daemon inherits that reach. Falls back to the launchd default when PATH is
+// somehow unset.
+func daemonPATH() string {
+	if p := os.Getenv("PATH"); p != "" {
+		return p
+	}
+	return "/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
 // unitSpec describes one platform's supervisor unit: the directory and
 // filename the unit is written to, its already-rendered content, the commands
 // that enable it, the noun used in the human-facing messages ("launchd agent",

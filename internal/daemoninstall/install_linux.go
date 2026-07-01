@@ -17,6 +17,7 @@ Description=loom workflow scheduler
 [Service]
 ExecStart=%s daemon
 Environment=LOOM_HOME=%s
+Environment=PATH=%s
 Restart=always
 
 [Install]
@@ -35,7 +36,7 @@ func Install(w io.Writer, execPath, home string, manual bool) error {
 	spec := unitSpec{
 		dir:      filepath.Join(userHome, ".config", "systemd", "user"),
 		filename: "loom-daemon.service",
-		content:  fmt.Sprintf(systemdUnit, execPath, home),
+		content:  fmt.Sprintf(systemdUnit, execPath, home, daemonPATH()),
 		enableSteps: [][]string{
 			{"systemctl", "--user", "daemon-reload"},
 			{"systemctl", "--user", "enable", "--now", "loom-daemon"},

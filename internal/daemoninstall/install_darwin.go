@@ -30,6 +30,7 @@ const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
   <key>EnvironmentVariables</key>
   <dict>
     <key>LOOM_HOME</key><string>%s</string>
+    <key>PATH</key><string>%s</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -54,7 +55,7 @@ func Install(w io.Writer, execPath, home string, manual bool) error {
 	spec := unitSpec{
 		dir:         dir,
 		filename:    launchdPlistName,
-		content:     fmt.Sprintf(launchdPlist, execPath, home, logPath, logPath),
+		content:     fmt.Sprintf(launchdPlist, execPath, home, daemonPATH(), logPath, logPath),
 		enableSteps: [][]string{{"launchctl", "load", path}},
 		noun:        "launchd agent",
 		successMsg:  "loaded launchd agent; the daemon is now running and will start at login\n",
