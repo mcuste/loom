@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -108,6 +109,33 @@ func TestSpecRun_DecodesStdout(t *testing.T) {
 	}
 	if resp.Output != "PAYLOAD-123" {
 		t.Fatalf("Run output = %q, want %q (captured stdout = %q)", resp.Output, "PAYLOAD-123", captured)
+	}
+}
+
+// TestSpecRun_WritesConfiguredStdin proves subprocess runtimes can feed request
+// material on stdin instead of argv, which is important for CLIs whose prompt
+// input is stdin-native.
+func TestSpecRun_WritesConfiguredStdin(t *testing.T) {
+	s := runtime.Spec{
+		Name:       "fake",
+		BinaryName: "sh",
+		Args: func(runtime.Request) []string {
+			return []string{"-c", "cat"}
+		},
+		Stdin: func(req runtime.Request) io.Reader {
+			return strings.NewReader(req.Prompt)
+		},
+		Decode: func(stdout []byte) (runtime.Response, error) {
+			return runtime.Response{Output: string(stdout)}, nil
+		},
+	}
+
+	resp, err := s.Run(context.Background(), runtime.Request{Prompt: "from stdin"})
+	if err != nil {
+		t.Fatalf("Run returned error %v, want nil", err)
+	}
+	if resp.Output != "from stdin" {
+		t.Fatalf("Run output = %q, want %q", resp.Output, "from stdin")
 	}
 }
 

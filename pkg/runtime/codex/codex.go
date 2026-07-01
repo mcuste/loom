@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/mcuste/loom/pkg/runtime"
 )
@@ -78,6 +80,7 @@ var spec = runtime.Spec{
 	// honored without silently changing semantics.
 	AcceptSystemPrompt: false,
 	Args:               args,
+	Stdin:              stdin,
 	Decode:             decode,
 	Price:              costUSD,
 }
@@ -92,7 +95,11 @@ func args(req runtime.Request) []string {
 	if req.Effort != "" {
 		a = append(a, "-c", "model_reasoning_effort="+string(req.Effort))
 	}
-	return append(a, req.Prompt)
+	return append(a, "-")
+}
+
+func stdin(req runtime.Request) io.Reader {
+	return strings.NewReader(req.Prompt)
 }
 
 // decode scans codex's JSONL event stream for the final agent message and turn

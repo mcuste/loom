@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -50,6 +51,9 @@ type Spec struct {
 	// non-nil before Run is called; the Request it receives has passed Validate,
 	// so Args need not re-check routing fields.
 	Args func(Request) []string
+	// Stdin maps a Request to optional subprocess stdin. nil leaves stdin
+	// disconnected, matching exec.Command's default behavior.
+	Stdin func(Request) io.Reader
 	// Decode maps captured stdout to a Response. Must be non-nil before Run is
 	// called.
 	Decode func(stdout []byte) (Response, error)
@@ -105,6 +109,9 @@ func (s Spec) Run(ctx context.Context, req Request) (Response, error) {
 	// An empty Dir leaves the child in loom's process cwd (the prior behavior);
 	// a set WorkingDir runs the runtime against the workflow's resolved cwd.
 	cmd.Dir = req.WorkingDir
+	if s.Stdin != nil {
+		cmd.Stdin = s.Stdin(req)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
