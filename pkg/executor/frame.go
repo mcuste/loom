@@ -6,15 +6,6 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// frame is the interpreter's current execution scope. Phase 5 keeps it as an
-// alias for runState so new interpreter-facing code can adopt the target
-// vocabulary without renaming stable call sites yet.
-type frame = runState
-
-// store is the current frame's output/disposition state. It remains an alias
-// for scopeState until a later phase makes the rename concrete.
-type store = scopeState
-
 func newReport(order []workflow.TaskID, opts Options) *Report {
 	return &Report{
 		Tasks:   make([]TaskResult, 0, len(order)),
@@ -58,7 +49,7 @@ func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, o
 	}
 
 	return &frame{
-		runShared: &runShared{
+		sharedFrame: &sharedFrame{
 			rep: rep,
 			scope: store{
 				outputs:   rep.Outputs,
@@ -70,7 +61,7 @@ func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, o
 			budget:  &budgetGate{ready: sync.NewCond(&mu)},
 			workDir: workDir,
 		},
-		loopCtx: loopCtx{
+		loopFrame: loopFrame{
 			gates: gates,
 		},
 	}

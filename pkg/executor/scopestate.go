@@ -7,24 +7,24 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// scopeState is the current frame store: the four run-scope maps that are
+// store is the current frame store: the four run-scope maps that are
 // always cloned and merged together: outputs, succeeded, skipped, and
-// exitCodes. Grouping them into one value eliminates the lockstep quad-clone
-// in childFrameForParallelLoopPass and the duplicate workflow.Env construction in
+// exitCodes. Grouping them into one value eliminates the lockstep quad-clone in
+// childForParallelPass and the duplicate workflow.Env construction in
 // evalWhen and loopConverged.
-type scopeState struct {
+type store struct {
 	outputs   map[workflow.TaskID]string
 	succeeded map[workflow.TaskID]bool
 	skipped   map[workflow.TaskID]bool
 	exitCodes map[workflow.TaskID]int
 }
 
-// cloneUnderLock returns a deep copy of s, acquiring mu for the duration.
+// clone returns a deep copy of s, acquiring mu for the duration.
 // The caller must NOT already hold mu.
-func (s scopeState) cloneUnderLock(mu *sync.Mutex) scopeState {
+func (s store) clone(mu *sync.Mutex) store {
 	mu.Lock()
 	defer mu.Unlock()
-	return scopeState{
+	return store{
 		outputs:   maps.Clone(s.outputs),
 		succeeded: maps.Clone(s.succeeded),
 		skipped:   maps.Clone(s.skipped),
@@ -32,9 +32,9 @@ func (s scopeState) cloneUnderLock(mu *sync.Mutex) scopeState {
 	}
 }
 
-// snapshotEnv snapshots s into a workflow.Env, acquiring mu for the duration.
+// envSnapshot snapshots s into a workflow.Env, acquiring mu for the duration.
 // The caller must NOT already hold mu.
-func (s scopeState) snapshotEnv(mu *sync.Mutex) workflow.Env {
+func (s store) envSnapshot(mu *sync.Mutex) workflow.Env {
 	mu.Lock()
 	defer mu.Unlock()
 	return workflow.Env{
@@ -47,7 +47,7 @@ func (s scopeState) snapshotEnv(mu *sync.Mutex) workflow.Env {
 
 // toEnvLocked snapshots s into a workflow.Env. The caller MUST hold the
 // associated mutex.
-func (s scopeState) toEnvLocked() workflow.Env {
+func (s store) toEnvLocked() workflow.Env {
 	return workflow.Env{
 		Outputs:   maps.Clone(s.outputs),
 		Succeeded: maps.Clone(s.succeeded),
@@ -58,7 +58,7 @@ func (s scopeState) toEnvLocked() workflow.Env {
 
 // recordSkipLocked writes the skipped disposition for id. The caller MUST
 // hold the associated mutex.
-func (s *scopeState) recordSkipLocked(id workflow.TaskID) {
+func (s *store) recordSkipLocked(id workflow.TaskID) {
 	s.outputs[id] = ""
 	s.skipped[id] = true
 	s.exitCodes[id] = 0
@@ -66,7 +66,7 @@ func (s *scopeState) recordSkipLocked(id workflow.TaskID) {
 
 // recordResultLocked writes the completed disposition for id. The caller MUST
 // hold the associated mutex.
-func (s *scopeState) recordResultLocked(id workflow.TaskID, output string, exitCode int) {
+func (s *store) recordResultLocked(id workflow.TaskID, output string, exitCode int) {
 	s.outputs[id] = output
 	s.succeeded[id] = true
 	s.exitCodes[id] = exitCode
@@ -80,7 +80,7 @@ func (s *scopeState) recordResultLocked(id workflow.TaskID, output string, exitC
 //     succeeded yet, so a later success is never clobbered.
 //
 // The caller MUST hold the associated mutex.
-func (s *scopeState) mergeParallelLocked(members []workflow.TaskID, src scopeState) {
+func (s *store) mergeParallelLocked(members []workflow.TaskID, src store) {
 	for _, m := range members {
 		switch {
 		case src.succeeded[m]:
@@ -99,7 +99,7 @@ func (s *scopeState) mergeParallelLocked(members []workflow.TaskID, src scopeSta
 // passOutputsLocked snapshots the current output of each member task into a
 // fresh map. Used by a loop pass to capture body outputs for threading into
 // the next iteration as prev. The caller MUST hold the associated mutex.
-func (s scopeState) passOutputsLocked(members []workflow.TaskID) map[workflow.TaskID]string {
+func (s store) passOutputsLocked(members []workflow.TaskID) map[workflow.TaskID]string {
 	out := make(map[workflow.TaskID]string, len(members))
 	for _, m := range members {
 		out[m] = s.outputs[m]

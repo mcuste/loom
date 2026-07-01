@@ -13,17 +13,18 @@ import (
 // current iteration's element before the normal placeholder substitution runs.
 // It is a no-op outside a for_each loop (st.loopVar == ""), where the binding
 // is empty and the body passes through unchanged.
-func bindLoopVar(body string, st *runState) string {
+func bindLoopVar(body string, st *frame) string {
 	if st.loopVar == "" {
 		return body
 	}
 	return strings.ReplaceAll(body, "{{"+st.loopVar+"}}", st.loopVal)
 }
 
-// runShared holds the report/store pair shared by every frame in one Run call.
+// sharedFrame holds the report/store pair shared by every frame in one Run
+// call.
 // Every field is read or written under mu, except workDir (immutable after
 // init).
-type runShared struct {
+type sharedFrame struct {
 	rep *Report
 	// scope is the current frame store: the four run-scope maps (outputs,
 	// succeeded, skipped, exitCodes) that are always cloned and merged together.
@@ -33,9 +34,9 @@ type runShared struct {
 	// iteration swaps in a private copy (seeded from a snapshot of the shared
 	// scope) so concurrent passes neither observe nor clobber one another's
 	// member results; the driver merges each pass's scope back afterward.
-	scope scopeState
+	scope store
 	mu    *sync.Mutex
-	// budget is a pointer so a scoped-loop iteration's derived runState (fresh
+	// budget is a pointer so a scoped-loop iteration's derived frame (fresh
 	// gates, but the same report, mutex, and budget slot) serializes
 	// budget-gated dispatch against the outer schedule rather than against a
 	// private copy of the gate.
@@ -46,11 +47,11 @@ type runShared struct {
 	workDir string
 }
 
-// loopCtx is the per-pass context carried by value to each goroutine.
+// loopFrame is the per-pass context carried by value to each goroutine.
 // None of its fields require mu: they are either immutable per-pass (iteration,
 // loopVar, loopVal, prev) or concurrency-safe by design (gates: channels, closed
 // once, never re-opened).
-type loopCtx struct {
+type loopFrame struct {
 	gates map[workflow.TaskID]chan struct{}
 	// prev maps a loop member id to its prior-iteration output, consulted for
 	// `{{prev.id}}` substitution inside a scoped-loop body. nil outside a loop
@@ -68,23 +69,22 @@ type loopCtx struct {
 	loopVal string
 }
 
-// runState is the current interpreter frame. It combines the shared run state
+// frame is the current interpreter frame. It combines the shared run state
 // with one frame's loop/pass context so executor helpers get direct field
 // access (st.mu, st.scope, st.gates, st.iteration) without changing stable
 // call sites.
-type runState struct {
-	*runShared
-	loopCtx
+type frame struct {
+	*sharedFrame
+	loopFrame
 }
 
-// childFrameForLoopPass is the interpreter-facing name for deriving a
-// sequential loop-pass frame. The child frame reuses the parent's report,
-// store, mutex, and budget gate, but swaps in pass-local gates and loop
-// bindings.
-func (st *runState) childFrameForLoopPass(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
-	return &runState{
-		runShared: st.runShared,
-		loopCtx: loopCtx{
+// childForLoopPass derives a sequential loop-pass frame. The child frame
+// reuses the parent's report, store, mutex, and budget gate, but swaps in
+// pass-local gates and loop bindings.
+func (st *frame) childForLoopPass(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *frame {
+	return &frame{
+		sharedFrame: st.sharedFrame,
+		loopFrame: loopFrame{
 			gates:     gates,
 			prev:      prev,
 			iteration: iteration,
@@ -94,21 +94,21 @@ func (st *runState) childFrameForLoopPass(gates map[workflow.TaskID]chan struct{
 	}
 }
 
-// childFrameForParallelLoopPass is the interpreter-facing name for deriving a
-// parallel for_each pass frame. The child frame snapshots the store so sibling
-// passes do not observe or clobber one another's member state, while still
-// sharing the parent report, mutex, and budget gate.
-func (st *runState) childFrameForParallelLoopPass(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
-	sh := &runShared{
+// childForParallelPass derives a parallel for_each pass frame. The child frame
+// snapshots the store so sibling passes do not observe or clobber one
+// another's member state, while still sharing the parent report, mutex, and
+// budget gate.
+func (st *frame) childForParallelPass(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *frame {
+	sh := &sharedFrame{
 		rep:     st.rep,
-		scope:   st.scope.cloneUnderLock(st.mu),
+		scope:   st.scope.clone(st.mu),
 		mu:      st.mu,
 		budget:  st.budget,
 		workDir: st.workDir,
 	}
-	return &runState{
-		runShared: sh,
-		loopCtx: loopCtx{
+	return &frame{
+		sharedFrame: sh,
+		loopFrame: loopFrame{
 			gates:     gates,
 			prev:      nil,
 			iteration: iteration,
@@ -120,7 +120,7 @@ func (st *runState) childFrameForParallelLoopPass(gates map[workflow.TaskID]chan
 
 // waitDeps blocks until every dependency gate has closed, or returns ctx.Err
 // if the run is cancelled (a sibling failed) before the deps resolve.
-func (st *runState) waitDeps(ctx context.Context, deps []workflow.TaskID) error {
+func (st *frame) waitDeps(ctx context.Context, deps []workflow.TaskID) error {
 	for _, dep := range deps {
 		select {
 		case <-st.gates[dep]:
@@ -134,15 +134,15 @@ func (st *runState) waitDeps(ctx context.Context, deps []workflow.TaskID) error 
 // evalWhen evaluates t's compiled `when:` guard against a snapshot of the
 // current outputs/succeeded/skipped state and reports whether the task should
 // run. The caller guarantees t.Cond != nil; Cond was compiled at load time.
-func (st *runState) evalWhen(t *workflow.Task) (bool, error) {
-	env := st.scope.snapshotEnv(st.mu)
+func (st *frame) evalWhen(t *workflow.Task) (bool, error) {
+	env := st.scope.envSnapshot(st.mu)
 	return t.Cond.Eval(env)
 }
 
 // admitBudget delegates to the run's [budgetGate], passing a closure that
 // reads the cumulative cost under the gate's lock. See [budgetGate.admit] for
 // the full serialization protocol.
-func (st *runState) admitBudget(ctx context.Context, wf *workflow.Workflow) (func(), error) {
+func (st *frame) admitBudget(ctx context.Context, wf *workflow.Workflow) (func(), error) {
 	return st.budget.admit(ctx, func() float64 {
 		return st.rep.Usage.TotalCostUSD
 	}, wf.Budget.MaxCostUSD)
@@ -151,7 +151,7 @@ func (st *runState) admitBudget(ctx context.Context, wf *workflow.Workflow) (fun
 // recordSkip publishes a `when:`-guarded task that was skipped: it fires
 // OnFinish with a StatusSkipped result, records empty output and the skipped
 // marker, appends the row, and closes the gate so downstream tasks proceed.
-func (st *runState) recordSkip(t *workflow.Task, hooks Hooks) {
+func (st *frame) recordSkip(t *workflow.Task, hooks Hooks) {
 	res := TaskResult{TaskID: t.ID, Status: StatusSkipped, Iteration: st.iteration}
 	if hooks.OnFinish != nil {
 		hooks.OnFinish(*t, st.iteration, res, nil)
@@ -166,7 +166,7 @@ func (st *runState) recordSkip(t *workflow.Task, hooks Hooks) {
 // recordResult publishes a task that ran to completion: it stamps StatusOK,
 // writes the output and succeeded marker, appends the row and adds its usage to
 // the report under mu, then closes the gate to release downstream waiters.
-func (st *runState) recordResult(t *workflow.Task, res TaskResult) {
+func (st *frame) recordResult(t *workflow.Task, res TaskResult) {
 	res.Status = StatusOK
 	st.mu.Lock()
 	st.scope.recordResultLocked(t.ID, res.Output, res.ExitCode)

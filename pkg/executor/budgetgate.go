@@ -16,7 +16,7 @@ import (
 type budgetGate struct {
 	inFlight bool
 	// ready wakes a waiter once the in-flight task has recorded its cost and
-	// released the slot. Its L is the run-global mutex (runShared.mu).
+	// released the slot. Its L is the run-global mutex (sharedFrame.mu).
 	ready *sync.Cond
 }
 
