@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"time"
 
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -28,7 +29,7 @@ type node struct {
 // op is the executable behavior of one task body form. Phase 6 keeps a single
 // legacy implementation that delegates to the existing dispatcher.
 type op interface {
-	eval(context.Context, *interpreter, *frame, *node) (TaskResult, error, error)
+	eval(context.Context, *interpreter, *frame, *node, time.Duration) (TaskResult, error, error)
 }
 
 type legacyOp struct{}

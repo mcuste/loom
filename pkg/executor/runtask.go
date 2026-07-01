@@ -61,17 +61,17 @@ type loopCtx struct {
 	// this scope, and 0 outside a scoped loop.
 	iteration int
 	// loopVar is the for_each loop-variable name (the loop's `as`) bound for this
-	// iteration, and "" outside a for_each loop. When set, runTask replaces the
-	// `{{loopVar}}` placeholder in a member body with loopVal before the normal
-	// substitution.
+	// iteration, and "" outside a for_each loop. When set, task evaluation
+	// replaces the `{{loopVar}}` placeholder in a member body with loopVal
+	// before the normal substitution.
 	loopVar string
 	// loopVal is the current element bound to loopVar for this iteration.
 	loopVal string
 }
 
 // runState is the current interpreter frame. It combines a pointer to the
-// shared run invariants with the per-pass context so runTask and its helpers
-// get direct field access (st.mu, st.scope, st.gates, st.iteration) without
+// shared run invariants with the per-pass context so executor helpers get
+// direct field access (st.mu, st.scope, st.gates, st.iteration) without
 // changing stable call sites.
 type runState struct {
 	*runShared
@@ -125,87 +125,10 @@ func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}
 	}
 }
 
-// runTask executes one task end to end: it waits for the task's dependency
-// gates, substitutes placeholders, evaluates the `when:` guard, enforces the
-// workflow budget gate, dispatches with retry (schema validation and cache
-// lookup/save for LLM tasks), fires hooks, and on success records the
-// output/usage and closes the task's gate.
-//
-// ctx is the errgroup-derived context: a non-nil error from runTask aborts the
-// run by leaving the gate unclosed and letting the errgroup cancel ctx, which
-// unblocks sibling goroutines at their gate waits. The returned error is
-// already wrapped with the task id.
-func runTask(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options) error {
-	baseDelay := opts.RetryBaseDelay
-	if baseDelay <= 0 {
-		baseDelay = defaultRetryBaseDelay
-	}
-
-	if err := st.waitDeps(ctx, t); err != nil {
-		return err
-	}
-
-	// Evaluate the task's `when:` guard once its dependencies have resolved. A
-	// false result skips the task: it produces empty output and StatusSkipped,
-	// but still closes its gate so downstream tasks proceed.
-	if t.Cond != nil {
-		run, err := st.evalWhen(t)
-		if err != nil {
-			return fmt.Errorf("task %q: when: %w", t.ID, err)
-		}
-		if !run {
-			st.recordSkip(t, hooks)
-			return nil
-		}
-	}
-
-	// Enforce the workflow cost budget BEFORE dispatching: once the cumulative
-	// cost of already-completed tasks exceeds the limit, abort rather than start
-	// another task. admitBudget blocks until this goroutine holds the single
-	// in-flight slot, and the deferred release frees it (after this task's cost
-	// is recorded on success, or immediately on error) to wake the next waiter.
-	if wf.Budget != nil {
-		release, err := st.admitBudget(ctx, wf)
-		if err != nil {
-			return err
-		}
-		defer release()
-	}
-
-	res, runErr, fatal := dispatch(ctx, wf, t, st, hooks, opts, baseDelay)
-	if fatal != nil {
-		// A setup error (unknown runtime, unlinked sub-workflow, invalid body) is
-		// detected before OnStart fires, so it returns terminally without an
-		// OnFinish event and is already wrapped with the task id.
-		return fatal
-	}
-
-	// Stamp the iteration before firing OnFinish so an observer reading
-	// res.Iteration inside the hook sees the loop pass, not a stale 0; the
-	// invariant on TaskResult.Iteration must already hold when the hook runs.
-	res.Iteration = st.iteration
-	if hooks.OnFinish != nil {
-		hooks.OnFinish(*t, st.iteration, res, runErr)
-	}
-	if runErr != nil {
-		// A task error aborts the run: the gate is left unclosed, errgroup
-		// cancels ctx, and downstream goroutines exit at their <-ctx.Done()
-		// wait before ever reaching their own when: evaluation. Consequently
-		// failed(id) cannot observe a runtime failure of id in a live run
-		// (it is reachable-true only for a never-succeeded, never-skipped
-		// disposition, which a future continue-on-error mode would produce).
-		// TestRun_WhenFailedDepAbortsRun pins this behavior.
-		return fmt.Errorf("task %q: %w", t.ID, runErr)
-	}
-
-	st.recordResult(t, res)
-	return nil
-}
-
-// waitDeps blocks until every gate t depends on has closed, or returns ctx.Err
+// waitDeps blocks until every dependency gate has closed, or returns ctx.Err
 // if the run is cancelled (a sibling failed) before the deps resolve.
-func (st *runState) waitDeps(ctx context.Context, t *workflow.Task) error {
-	for _, dep := range t.DependsOn {
+func (st *runState) waitDeps(ctx context.Context, deps []workflow.TaskID) error {
+	for _, dep := range deps {
 		select {
 		case <-st.gates[dep]:
 		case <-ctx.Done():
