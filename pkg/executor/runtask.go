@@ -326,7 +326,7 @@ func dispatchScript(ctx context.Context, _ *workflow.Workflow, t *workflow.Task,
 // dispatchLLM is the BodyPrompt arm of dispatch: it looks up the runtime,
 // substitutes the prompt, and calls the LLM (with cache and schema validation).
 func dispatchLLM(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
-	rt, model, effort := wf.Effective(t)
+	rt, model, effort := wf.EffectiveWithParams(t, opts.Params)
 	resolver := opts.Resolver
 	if resolver == nil {
 		resolver = RunnerResolverFunc(runtime.Lookup)

@@ -70,6 +70,9 @@ func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, 
 		// The merge order is authoritative in ResolveParams; no local rebuild needed.
 		resolved = miss.Partial
 	}
+	if err := wf.ValidateRoutingWithParams(resolved, advisory); err != nil {
+		return nil, err
+	}
 	if err := r.Plan(wf, resolved, cliParams, seeded); err != nil {
 		return nil, err
 	}

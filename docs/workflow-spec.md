@@ -70,10 +70,12 @@ loop id can never collide.
   to a model.
 - **`runtime`** (optional, enum): default runtime for tasks: `claude-code` or
   `codex`. A task with no runtime and no workflow default fails validation.
+  May also be exactly `{{params.name}}`.
 - **`model`** (optional, enum): default model. Valid values depend on the
-  runtime (see [Runtime, model, effort](#runtime-model-effort)).
+  runtime (see [Runtime, model, effort](#runtime-model-effort)). May also be
+  exactly `{{params.name}}`.
 - **`effort`** (optional, enum): default effort. Valid values depend on the
-  runtime.
+  runtime. May also be exactly `{{params.name}}`.
 - **`system_prompt`** (optional, string): appended to every LLM task's system
   prompt. May reference `{{params.x}}` and `{{state.x}}`, but **not**
   `{{task_id}}` (no task can be its dependency). The effective runtime must
@@ -94,6 +96,11 @@ loop id can never collide.
 The `runtime` / `model` / `effort` set here are **defaults**: a task inherits
 each one it does not override. Pick defaults that cover the majority of tasks
 and override only where a task needs to step up or down.
+
+Routing fields are either literal values or a whole-field param reference:
+`model: "{{params.model}}"` is valid, but `model: "gpt-{{params.tier}}"` is
+rejected. The resolved value is validated against the effective runtime before
+execution.
 
 ---
 
@@ -220,9 +227,12 @@ exit status:
   as success rather than failure. Each must be 0-255. Rejected on sub-workflow
   and loop-wrapper tasks. See [Exit codes and ok_exit](#exit-codes-and-ok_exit).
 - **`description`** (all tasks, string): plan output only; never sent to a model.
-- **`runtime`** (LLM, enum): task-level override. Rejected on command tasks.
-- **`model`** (LLM, enum): task-level override. Rejected on command tasks.
-- **`effort`** (LLM, enum): task-level override. Rejected on command tasks.
+- **`runtime`** (LLM, enum or `{{params.name}}`): task-level override. Rejected
+  on command and script tasks.
+- **`model`** (LLM, enum or `{{params.name}}`): task-level override. Rejected on
+  command and script tasks.
+- **`effort`** (LLM, enum or `{{params.name}}`): task-level override. Rejected
+  on command and script tasks.
 - **`depends_on`** (all tasks, list): explicit DAG edges. Each entry names a
   known task and appears at most once.
 - **`when`** (all tasks, string): conditional guard; the task is skipped when
@@ -382,8 +392,8 @@ Each entry:
 - **`required`** (optional): when `true`, the param must be supplied via `-p`.
   Mutually exclusive with `default`.
 
-**Every declared param must be referenced** by at least one prompt, command, or
-the `system_prompt`; an unused param fails validation.
+**Every declared param must be referenced** by at least one prompt, command,
+routing field, or the `system_prompt`; an unused param fails validation.
 
 Supply values on the CLI with repeatable `-p key=val`:
 
@@ -903,9 +913,9 @@ order. Any failure stops the check and prints a precise message.
 11. Each loop sets a valid convergence/iteration spec (a `loop:` names a member
     as its target) and a non-empty body. The body is an ordinary DAG; its
     members need not be connected.
-12. Each LLM task's effective `runtime`/`model`/`effort` is accepted by the
-    registered runtime; `system_prompt` is only set for a runtime that supports
-    it.
+12. Each LLM task's effective `runtime`/`model`/`effort`, after whole-field
+    param resolution, is accepted by the registered runtime; `system_prompt` is
+    only set for a runtime that supports it.
 
 When it prints clean, the plan shows the execution order, each task's
 runtime/model/effort, and each loop as a labeled group (its convergence target

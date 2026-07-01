@@ -118,19 +118,20 @@ func (p *plainRenderer) Warn(msg string) error {
 	return err
 }
 
-// Plan uses workflow.Effective so printed runtime/model/effort match what the
-// runtime will actually see. cli drives the per-param provenance tag (cli vs
-// default vs MISSING). When seeded is non-empty the section header separates the
-// seeded count so a resume plan shows which steps are skipped.
+// Plan uses workflow.EffectiveWithParams so printed runtime/model/effort match
+// what the runtime will actually see. cli drives the per-param provenance tag
+// (cli vs default vs MISSING). When seeded is non-empty the section header
+// separates the seeded count so a resume plan shows which steps are skipped.
 func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string, seeded map[workflow.TaskID]bool) error {
 	ew := &errWriter{w: p.w}
 	ew.printf("Workflow : %s\n", wf.ID)
 	if wf.Description != "" {
 		ew.printf("Desc     : %s\n", wf.Description)
 	}
-	ew.printf("Runtime  : %s\n", orDash(string(wf.Runtime)))
-	ew.printf("Model    : %s\n", orDash(string(wf.Model)))
-	ew.printf("Effort   : %s\n", orDash(string(wf.Effort)))
+	rt, model, effort := wf.EffectiveWithParams(&workflow.Task{}, resolved)
+	ew.printf("Runtime  : %s\n", orDash(string(rt)))
+	ew.printf("Model    : %s\n", orDash(string(model)))
+	ew.printf("Effort   : %s\n", orDash(string(effort)))
 	if wf.WorkingDir != "" {
 		ew.printf("WorkDir  : %s\n", wf.WorkingDir)
 	}
@@ -243,7 +244,7 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 			for _, id := range lg.Members {
 				t := wf.ByID(id)
 				ew.printf("      - %-*s  %s  deps=%s\n",
-					bodyWidth, id, planTaskCols(wf, t), depsList(t.DependsOn))
+					bodyWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn))
 			}
 		}
 	}
@@ -260,14 +261,14 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 		}
 		step++
 		ew.printf("  %2d. %-*s  %s  deps=%s%s\n",
-			step, idWidth, id, planTaskCols(wf, t), depsList(t.DependsOn), suffix)
+			step, idWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn), suffix)
 		if t.IsSubWorkflow() {
 			if child := wf.Subs[id]; child != nil {
 				cw := childIDWidth(child)
 				for i := range child.Tasks {
 					ct := &child.Tasks[i]
 					ew.printf("      - %-*s  %s  deps=%s\n",
-						cw, ct.ID, planTaskCols(child, ct), depsList(ct.DependsOn))
+						cw, ct.ID, planTaskCols(child, ct, nil), depsList(ct.DependsOn))
 				}
 			}
 		}
@@ -328,7 +329,7 @@ func exitNote(code int) string {
 // the id and the trailing deps): a shell task shows its command, a sub-workflow
 // task its linked ref and child-task count, an LLM task its effective
 // runtime/model/effort triple.
-func planTaskCols(wf *workflow.Workflow, t *workflow.Task) string {
+func planTaskCols(wf *workflow.Workflow, t *workflow.Task, resolved workflow.ParamValues) string {
 	switch t.BodyKind() {
 	case workflow.BodyShell:
 		cmd := t.Command
@@ -348,7 +349,7 @@ func planTaskCols(wf *workflow.Workflow, t *workflow.Task) string {
 	case workflow.BodySubWorkflow:
 		return "kind=subworkflow  " + subworkflowDescriptor(wf, t)
 	case workflow.BodyPrompt:
-		rt, m, e := wf.Effective(t)
+		rt, m, e := wf.EffectiveWithParams(t, resolved)
 		return fmt.Sprintf("runtime=%-12s  model=%-8s  effort=%-7s", orDash(string(rt)), orDash(string(m)), orDash(string(e)))
 	default:
 		// BodyInvalid: a hand-built or corrupted task that set none or more than

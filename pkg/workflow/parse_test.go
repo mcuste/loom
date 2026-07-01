@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/runtime"
@@ -543,6 +544,55 @@ tasks:
 	}
 	if p := wf.Param("nope"); p != nil {
 		t.Errorf("Param(nope) = %+v, want nil", p)
+	}
+}
+
+func TestValidateRoutingResolvesParamFields(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: "{{params.model}}"
+effort: "{{params.effort}}"
+params:
+  - name: model
+    default: m2
+  - name: effort
+    default: high
+tasks:
+  - id: a
+    prompt: x
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	params, err := workflow.ResolveParams(wf, nil, nil)
+	if err != nil {
+		t.Fatalf("ResolveParams: %v", err)
+	}
+	if err := wf.ValidateRoutingWithParams(params, false); err != nil {
+		t.Fatalf("ValidateRoutingWithParams: %v", err)
+	}
+}
+
+func TestParseRejectsPartialRoutingParamTemplate(t *testing.T) {
+	src := `
+name: wf
+runtime: test-rt
+model: "m{{params.tier}}"
+params:
+  - name: tier
+    default: "1"
+tasks:
+  - id: a
+    prompt: x
+`
+	_, err := workflow.Parse([]byte(src))
+	if err == nil {
+		t.Fatal("Parse succeeded; want partial routing template error")
+	}
+	if !strings.Contains(err.Error(), "model must be a literal or exactly {{params.name}}") {
+		t.Fatalf("Parse error = %v, want routing template message", err)
 	}
 }
 

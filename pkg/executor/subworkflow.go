@@ -37,6 +37,9 @@ func dispatchSubWorkflow(ctx context.Context, wf *workflow.Workflow, t *workflow
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err
 		}
+		if err := child.ValidateRoutingWithParams(cp, false); err != nil {
+			return TaskResult{TaskID: t.ID}, err
+		}
 		childRep, err := Run(ctx, child, Hooks{}, Options{
 			Params: cp,
 			// Child shares the parent's cross-run state so {{state.x}} placeholders in

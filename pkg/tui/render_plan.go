@@ -49,29 +49,30 @@ var (
 
 func renderRichPlan(wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string) string {
 	var b strings.Builder
-	b.WriteString(richHeaderCard(wf))
+	b.WriteString(richHeaderCard(wf, resolved))
 	b.WriteString("\n")
 	if len(wf.Params) > 0 {
 		b.WriteString("\n")
 		b.WriteString(richParams(wf, resolved, cli))
 	}
 	b.WriteString("\n")
-	b.WriteString(richWaves(wf))
+	b.WriteString(richWaves(wf, resolved))
 	return b.String()
 }
 
 // richHeaderCard boxes the workflow identity: id, description, and the
 // effective runtime/model/effort triple.
-func richHeaderCard(wf *workflow.Workflow) string {
+func richHeaderCard(wf *workflow.Workflow, resolved workflow.ParamValues) string {
 	var rows []string
 	rows = append(rows, titleStyle.Render(string(wf.ID)))
 	if wf.Description != "" {
 		rows = append(rows, wf.Description)
 	}
+	rt, model, effort := wf.EffectiveWithParams(&workflow.Task{}, resolved)
 	rows = append(rows, fmt.Sprintf("%s %s   %s %s   %s %s",
-		labelStyle.Render("runtime"), orDash(string(wf.Runtime)),
-		labelStyle.Render("model"), orDash(string(wf.Model)),
-		labelStyle.Render("effort"), orDash(string(wf.Effort)),
+		labelStyle.Render("runtime"), orDash(string(rt)),
+		labelStyle.Render("model"), orDash(string(model)),
+		labelStyle.Render("effort"), orDash(string(effort)),
 	))
 	if wf.WorkingDir != "" {
 		rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("workdir"), wf.WorkingDir))
@@ -123,7 +124,7 @@ func paramTag(source string) string {
 // deps so the real parallelism is visible at a glance. Scoped loops render as
 // their own group inline at the wave where their body first becomes runnable,
 // so the loop's position in the flow is visible rather than detached.
-func richWaves(wf *workflow.Workflow) string {
+func richWaves(wf *workflow.Workflow, resolved workflow.ParamValues) string {
 	entries := wf.AnnotatedPlan()
 
 	// Derive topByWave, loopWave (min wave per loop), idWidth, and waveCount
@@ -174,12 +175,12 @@ func richWaves(wf *workflow.Workflow) string {
 			b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", waveNo, len(topByWave[wi]), plural(len(topByWave[wi])))))
 			b.WriteString("\n")
 			for _, id := range topByWave[wi] {
-				b.WriteString(richTaskRow(wf, id, idWidth))
+				b.WriteString(richTaskRow(wf, id, idWidth, resolved))
 			}
 		}
 		for li := range wf.Loops {
 			if loopWave[wf.Loops[li].ID] == wi {
-				b.WriteString(richLoopGroup(wf, &wf.Loops[li]))
+				b.WriteString(richLoopGroup(wf, &wf.Loops[li], resolved))
 			}
 		}
 	}
@@ -192,7 +193,7 @@ func richWaves(wf *workflow.Workflow) string {
 // body task with its effective runtime/model/effort and deps, so the in-loop
 // execution shape is visible without running. Rendered inline among the waves
 // by richWaves at the loop's flow position.
-func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
+func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup, resolved workflow.ParamValues) string {
 	var b strings.Builder
 	// idWidth is derived per loop from its own members, so a wide id in one loop
 	// never pads the body columns of another.
@@ -209,7 +210,7 @@ func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
 		fmt.Fprintf(&b, "    %s %s\n", labelStyle.Render("desc"), lg.Description)
 	}
 	for _, id := range lg.Members {
-		b.WriteString(richTaskRow(wf, id, idWidth))
+		b.WriteString(richTaskRow(wf, id, idWidth, resolved))
 	}
 	return b.String()
 }
@@ -219,12 +220,12 @@ func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup) string {
 // runtime/model/effort, a sub-workflow task its linked ref and child-task count
 // followed by its resolved child tasks indented one level deeper. All surface
 // incoming deps.
-func richTaskRow(wf *workflow.Workflow, id workflow.TaskID, idWidth int) string {
+func richTaskRow(wf *workflow.Workflow, id workflow.TaskID, idWidth int, resolved workflow.ParamValues) string {
 	t := wf.ByID(id)
 	if t == nil {
 		return ""
 	}
-	row := fmt.Sprintf("    %-*s  %s  deps=%s\n", idWidth, id, planTaskCols(wf, t), depsList(t.DependsOn))
+	row := fmt.Sprintf("    %-*s  %s  deps=%s\n", idWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn))
 	if !t.IsSubWorkflow() {
 		return row
 	}
@@ -238,7 +239,7 @@ func richTaskRow(wf *workflow.Workflow, id workflow.TaskID, idWidth int) string 
 	for i := range child.Tasks {
 		ct := &child.Tasks[i]
 		fmt.Fprintf(&b, "        %-*s  %s  deps=%s\n",
-			cw, ct.ID, planTaskCols(child, ct), depsList(ct.DependsOn))
+			cw, ct.ID, planTaskCols(child, ct, nil), depsList(ct.DependsOn))
 	}
 	return b.String()
 }

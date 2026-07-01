@@ -100,7 +100,11 @@ func loadAndResolve(home, ref string, paramArgs []string) (*workflow.Workflow, s
 	if err != nil {
 		return nil, "", nil, err
 	}
-	if _, err := workflow.ResolveParams(wf, cliParams, nil); err != nil {
+	resolved, err := workflow.ResolveParams(wf, cliParams, nil)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if err := wf.ValidateRoutingWithParams(resolved, false); err != nil {
 		return nil, "", nil, err
 	}
 	if len(cliParams) == 0 {

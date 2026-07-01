@@ -66,8 +66,22 @@ func validateSystemPrompt(sp string, params map[ParamName]struct{}) error {
 	return nil
 }
 
+func validateRoutingField(tid TaskID, field, value string, params map[ParamName]struct{}) error {
+	if value == "" || !strings.Contains(value, "{{") {
+		return nil
+	}
+	name, ok := wholeParamPlaceholder(value)
+	if !ok {
+		return fmt.Errorf("%s must be a literal or exactly {{params.name}}", field)
+	}
+	if _, found := params[name]; !found {
+		return &UnknownParamError{Task: tid, Name: string(name)}
+	}
+	return nil
+}
+
 // checkUnusedParams enforces that every declared param is referenced by at
-// least one prompt or by the system_prompt.
+// least one prompt, routing field, or system_prompt.
 func checkUnusedParams(wf *Workflow) error {
 	if len(wf.Params) == 0 {
 		return nil
@@ -80,11 +94,17 @@ func checkUnusedParams(wf *Workflow) error {
 		}
 	}
 	scan(wf.SystemPrompt)
+	scan(string(wf.Runtime))
+	scan(string(wf.Model))
+	scan(string(wf.Effort))
 	for i := range wf.Tasks {
 		for _, body := range wf.Tasks[i].TextBodies() {
 			scan(body)
 		}
 		scan(wf.Tasks[i].SystemPrompt)
+		scan(string(wf.Tasks[i].Runtime))
+		scan(string(wf.Tasks[i].Model))
+		scan(string(wf.Tasks[i].Effort))
 	}
 	for _, p := range wf.Params {
 		if _, ok := used[p.Name]; !ok {

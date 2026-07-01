@@ -136,6 +136,15 @@ func buildTask(st *parseState, lt loopTask) error {
 	if schema != nil && rt.Script != "" {
 		return fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSchema)
 	}
+	if err := validateRoutingField(tid, "runtime", rt.Runtime, st.paramSet); err != nil {
+		return fmt.Errorf("task %q: %w", tid, err)
+	}
+	if err := validateRoutingField(tid, "model", rt.Model, st.paramSet); err != nil {
+		return fmt.Errorf("task %q: %w", tid, err)
+	}
+	if err := validateRoutingField(tid, "effort", rt.Effort, st.paramSet); err != nil {
+		return fmt.Errorf("task %q: %w", tid, err)
+	}
 	dc := depsCtx{tid: tid, known: st.ids, params: st.paramSet, loopVar: st.asByLoop[lt.loop]}
 	var deps []TaskID
 	if rt.Workflow != "" {

@@ -22,14 +22,14 @@
 //  6. Every {{id}} placeholder in a prompt or command is a member of that
 //     task's depends_on. Placeholders are pure templating; they never extend
 //     the dependency graph implicitly.
-//  7. Every {{params.x}} placeholder (in prompt, command, or system_prompt)
-//     references a declared param.
+//  7. Every {{params.x}} placeholder (in prompt, command, system_prompt, or a
+//     whole routing field) references a declared param.
 //  8. The task graph has no cycles.
 //  9. Every prompt, command, and system_prompt (workflow- or task-level) is
 //     free of malformed {{params.}} tokens; a system_prompt is free of
 //     task-id placeholders.
-//  10. Every declared param is referenced by at least one prompt, command, or
-//     system_prompt (workflow- or task-level).
+//  10. Every declared param is referenced by at least one prompt, command,
+//     routing field, or system_prompt (workflow- or task-level).
 //  11. The effective runtime/model/effort and system prompt per LLM task are
 //     accepted by the registered runtime spec (checked by ValidateRouting).
 //     Shell and sub-workflow tasks bypass this check.
@@ -150,6 +150,15 @@ func Parse(data []byte) (*Workflow, error) {
 	paramSet := make(map[ParamName]struct{}, len(paramIdx))
 	for n := range paramIdx {
 		paramSet[n] = struct{}{}
+	}
+	if err := validateRoutingField("", "runtime", raw.Runtime, paramSet); err != nil {
+		return nil, err
+	}
+	if err := validateRoutingField("", "model", raw.Model, paramSet); err != nil {
+		return nil, err
+	}
+	if err := validateRoutingField("", "effort", raw.Effort, paramSet); err != nil {
+		return nil, err
 	}
 
 	// allTasks is the flat union of top-level and every loop's nested tasks, in
@@ -278,12 +287,24 @@ func Parse(data []byte) (*Workflow, error) {
 // its own), so they are skipped here and reached only through the w.Subs
 // recursion.
 func (w *Workflow) ValidateRouting() error {
+	params, _ := ResolveParams(w, nil, nil)
+	return w.ValidateRoutingWithParams(params, true)
+}
+
+// ValidateRoutingWithParams checks routing after substituting whole-field
+// `{{params.name}}` values in runtime/model/effort. When allowUnresolved is
+// true, any task whose routing still depends on a missing param is skipped so
+// advisory checks can still render a plan for workflows with required params.
+func (w *Workflow) ValidateRoutingWithParams(params ParamValues, allowUnresolved bool) error {
 	for i := range w.Tasks {
 		t := &w.Tasks[i]
 		if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
 			continue
 		}
-		rt, m, e := w.Effective(t)
+		if allowUnresolved && w.routingNeedsMissingParam(t, params) {
+			continue
+		}
+		rt, m, e := w.EffectiveWithParams(t, params)
 		req := runtime.Request{
 			TaskID:       string(t.ID),
 			Prompt:       t.Prompt,
@@ -296,9 +317,27 @@ func (w *Workflow) ValidateRouting() error {
 		}
 	}
 	for _, child := range w.Subs {
-		if err := child.ValidateRouting(); err != nil {
+		childParams, _ := ResolveParams(child, nil, nil)
+		if err := child.ValidateRoutingWithParams(childParams, true); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (w *Workflow) routingNeedsMissingParam(t *Task, params ParamValues) bool {
+	for _, value := range []string{
+		string(t.Runtime), string(w.Runtime),
+		string(t.Model), string(w.Model),
+		string(t.Effort), string(w.Effort),
+	} {
+		name, ok := wholeParamPlaceholder(value)
+		if !ok {
+			continue
+		}
+		if _, found := params[name]; !found {
+			return true
+		}
+	}
+	return false
 }

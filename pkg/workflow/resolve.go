@@ -37,6 +37,33 @@ func (w *Workflow) Effective(t *Task) (runtime.Name, runtime.Model, runtime.Effo
 	return r, m, e
 }
 
+// EffectiveWithParams is Effective plus whole-field param resolution for
+// runtime/model/effort. A routing field may be either a literal value or exactly
+// `{{params.name}}`; partial templates are rejected by Parse.
+func (w *Workflow) EffectiveWithParams(t *Task, params ParamValues) (runtime.Name, runtime.Model, runtime.Effort) {
+	r, m, e := w.Effective(t)
+	return runtime.Name(resolveRoutingValue(string(r), params)),
+		runtime.Model(resolveRoutingValue(string(m), params)),
+		runtime.Effort(resolveRoutingValue(string(e), params))
+}
+
+func resolveRoutingValue(s string, params ParamValues) string {
+	if name, ok := wholeParamPlaceholder(s); ok {
+		if v, found := params[name]; found {
+			return v
+		}
+	}
+	return s
+}
+
+func wholeParamPlaceholder(s string) (ParamName, bool) {
+	m := paramPlaceholderRe.FindStringSubmatch(s)
+	if len(m) != 2 || m[0] != s {
+		return "", false
+	}
+	return ParamName(m[1]), true
+}
+
 // StartMeta returns the runtime, model, and effort a task reports to a hook's
 // OnStart when it begins. A prompt (LLM) task carries its [Workflow.Effective]
 // triple; shell, script, and sub-workflow tasks have no runtime of their own (a

@@ -42,6 +42,11 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 		d.logf("schedule %s: %v", rec.ID, res.err)
 		return
 	}
+	if err := wf.ValidateRoutingWithParams(resolved, false); err != nil {
+		res.err = fmt.Errorf("validate routing: %w", err)
+		d.logf("schedule %s: %v", rec.ID, res.err)
+		return
+	}
 
 	logPath, lf, err := d.openLog(rec.ID, fireTime)
 	if err != nil {

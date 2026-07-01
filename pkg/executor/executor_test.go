@@ -105,6 +105,27 @@ func (r *systemPromptCaptureRuntime) Run(_ context.Context, req runtime.Request)
 	return runtime.Response{Output: req.Prompt}, nil
 }
 
+type routingCaptureRuntime struct {
+	mu     sync.Mutex
+	model  runtime.Model
+	effort runtime.Effort
+}
+
+func (r *routingCaptureRuntime) Validate(req runtime.Request) error {
+	if req.Model == "" {
+		return runtime.ErrMissingModel
+	}
+	return nil
+}
+
+func (r *routingCaptureRuntime) Run(_ context.Context, req runtime.Request) (runtime.Response, error) {
+	r.mu.Lock()
+	r.model = req.Model
+	r.effort = req.Effort
+	r.mu.Unlock()
+	return runtime.Response{Output: req.Prompt}, nil
+}
+
 // barrierSeq makes each barrierRuntime registration name unique within a test
 // binary run, mirroring flakySeq: the runtime registry has no deregister and
 // panics on a duplicate name, so a per-test value needs a distinct key.
@@ -132,6 +153,14 @@ func newSysCapture(t *testing.T) (string, *systemPromptCaptureRuntime) {
 	t.Helper()
 	r := &systemPromptCaptureRuntime{}
 	name := "exec-syscapture-" + t.Name() + "-" + strconv.FormatUint(barrierSeq.Add(1), 10)
+	runtime.Register(runtime.Name(name), r)
+	return name, r
+}
+
+func newRoutingCapture(t *testing.T) (string, *routingCaptureRuntime) {
+	t.Helper()
+	r := &routingCaptureRuntime{}
+	name := "exec-routingcapture-" + t.Name() + "-" + strconv.FormatUint(barrierSeq.Add(1), 10)
 	runtime.Register(runtime.Name(name), r)
 	return name, r
 }
@@ -342,6 +371,44 @@ tasks:
 	}
 	if rep.Outputs["a"] != "target=prod" {
 		t.Errorf("Outputs[a] = %q, want %q", rep.Outputs["a"], "target=prod")
+	}
+}
+
+func TestRunSubstitutesRoutingParams(t *testing.T) {
+	rt, capture := newRoutingCapture(t)
+
+	src := `
+name: wf
+runtime: ` + rt + `
+model: "{{params.model}}"
+effort: "{{params.effort}}"
+params:
+  - name: model
+    default: m1
+  - name: effort
+    default: low
+tasks:
+  - id: a
+    prompt: "hello"
+`
+	wf, err := workflow.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	opts := executor.Options{Params: workflow.ParamValues{"model": "m2", "effort": "high"}}
+	if _, err := executor.Run(context.Background(), wf, executor.Hooks{}, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	capture.mu.Lock()
+	model, effort := capture.model, capture.effort
+	capture.mu.Unlock()
+
+	if model != "m2" {
+		t.Errorf("Model = %q, want m2", model)
+	}
+	if effort != "high" {
+		t.Errorf("Effort = %q, want high", effort)
 	}
 }
 
