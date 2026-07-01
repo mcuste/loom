@@ -116,6 +116,23 @@ func (p *plainRenderer) Warn(msg string) error {
 // separates the seeded count so a resume plan shows which steps are skipped.
 func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string, seeded map[workflow.TaskID]bool) error {
 	ew := &errWriter{w: p.w}
+	emitPlainWorkflowHeader(ew, wf, resolved)
+	emitPlainParams(ew, wf, resolved, cli)
+
+	layout := buildPlanLayout(wf, seeded)
+	emitPlainExecutionHeader(ew, layout)
+
+	for step, flow := range layout.flow {
+		if flow.loopIndex >= 0 {
+			emitPlainLoopStep(ew, wf, layout, flow.loopIndex, step+1, resolved)
+			continue
+		}
+		emitPlainTaskStep(ew, wf, layout, flow.taskID, step+1, resolved, seeded)
+	}
+	return ew.err
+}
+
+func emitPlainWorkflowHeader(ew *errWriter, wf *workflow.Workflow, resolved workflow.ParamValues) {
 	ew.printf("Workflow : %s\n", wf.ID)
 	if wf.Description != "" {
 		ew.printf("Desc     : %s\n", wf.Description)
@@ -130,143 +147,79 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 	if wf.SystemPrompt != "" {
 		ew.printf("System   : %s\n", wf.SystemPrompt)
 	}
+}
 
-	if len(wf.Params) > 0 {
-		nameWidth := 0
-		for _, prm := range wf.Params {
-			if n := len(prm.Name); n > nameWidth {
-				nameWidth = n
-			}
-		}
-		ew.printf("\nParams (%d):\n", len(wf.Params))
-		for _, prm := range wf.Params {
-			value, ok := resolved[prm.Name]
-			source := paramSource(prm, cli, ok)
-			if !ok {
-				ew.printf("  %-*s = %-12s (%s)\n", nameWidth, prm.Name, "<missing>", source)
-				continue
-			}
-			ew.printf("  %-*s = %-12s (%s)\n", nameWidth, prm.Name, quoteIfNeeded(value), source)
+func emitPlainParams(ew *errWriter, wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string) {
+	if len(wf.Params) == 0 {
+		return
+	}
+	nameWidth := 0
+	for _, prm := range wf.Params {
+		if n := len(prm.Name); n > nameWidth {
+			nameWidth = n
 		}
 	}
+	ew.printf("\nParams (%d):\n", len(wf.Params))
+	for _, prm := range wf.Params {
+		value, ok := resolved[prm.Name]
+		source := paramSource(prm, cli, ok)
+		if !ok {
+			ew.printf("  %-*s = %-12s (%s)\n", nameWidth, prm.Name, "<missing>", source)
+			continue
+		}
+		ew.printf("  %-*s = %-12s (%s)\n", nameWidth, prm.Name, quoteIfNeeded(value), source)
+	}
+}
 
-	// Top-level tasks in plan order; loop members are attributed to their loop
-	// and drawn as an inline group at the loop's flow position (see emitLoops).
-	order := make([]workflow.TaskID, 0, len(wf.Tasks))
-	for _, id := range wf.Plan() {
-		if t := wf.ByID(id); t != nil && t.Loop == "" {
-			order = append(order, id)
-		}
+func emitPlainExecutionHeader(ew *errWriter, layout planLayout) {
+	counts := fmt.Sprintf("%d task%s", layout.topLevelTaskCount, plural(layout.topLevelTaskCount))
+	if layout.loopCount > 0 {
+		counts += fmt.Sprintf(", %d loop%s", layout.loopCount, plural(layout.loopCount))
 	}
-	seedCount := 0
-	for _, id := range order {
-		if seeded[id] {
-			seedCount++
-		}
+	if layout.seededTaskCount > 0 {
+		ew.printf("\nExecution order (%s; %d seeded):\n", counts, layout.seededTaskCount)
+		return
 	}
-	counts := fmt.Sprintf("%d task%s", len(order), plural(len(order)))
-	if len(wf.Loops) > 0 {
-		counts += fmt.Sprintf(", %d loop%s", len(wf.Loops), plural(len(wf.Loops)))
-	}
-	if seedCount > 0 {
-		ew.printf("\nExecution order (%s; %d seeded):\n", counts, seedCount)
-	} else {
-		ew.printf("\nExecution order (%s):\n", counts)
-	}
+	ew.printf("\nExecution order (%s):\n", counts)
+}
 
-	// idWidth pads the id column shared by top-level tasks and loop entries (a
-	// loop is a numbered flow step too), so both align.
-	idWidth := 0
-	for _, id := range order {
-		if n := len(id); n > idWidth {
-			idWidth = n
+func emitPlainTaskStep(ew *errWriter, wf *workflow.Workflow, layout planLayout, id workflow.TaskID, step int, resolved workflow.ParamValues, seeded map[workflow.TaskID]bool) {
+	t := wf.ByID(id)
+	suffix := ""
+	if t.WritesState != "" {
+		suffix += "  writes_state=" + t.WritesState
+	}
+	if seeded[id] {
+		suffix += "  (seeded; using stored output)"
+	}
+	ew.printf("  %2d. %-*s  %s  deps=%s%s\n",
+		step, layout.flowIDWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn), suffix)
+	if !t.IsSubWorkflow() {
+		return
+	}
+	if child := wf.Subs[id]; child != nil {
+		cw := childIDWidth(child)
+		for i := range child.Tasks {
+			ct := &child.Tasks[i]
+			ew.printf("      - %-*s  %s  deps=%s\n",
+				cw, ct.ID, planTaskCols(child, ct, nil), depsList(ct.DependsOn))
 		}
 	}
-	for li := range wf.Loops {
-		if n := len(wf.Loops[li].ID); n > idWidth {
-			idWidth = n
-		}
-	}
+}
 
-	// Place each loop after the last top-level task that runs no later than the
-	// loop's first body wave; loopAfter[oi] lists loops to emit right after order
-	// index oi (-1 emits before the first task). waveOf is non-decreasing along a
-	// topological order, so the boundary is a contiguous prefix.
-	planEntries := wf.AnnotatedPlan()
-	waveOf := make(map[workflow.TaskID]int, len(planEntries))
-	loopWaveOf := make(map[workflow.LoopID]int)
-	for _, e := range planEntries {
-		waveOf[e.ID] = e.Wave
-		if e.LoopID != "" {
-			if w, ok := loopWaveOf[e.LoopID]; !ok || e.Wave < w {
-				loopWaveOf[e.LoopID] = e.Wave
-			}
-		}
+func emitPlainLoopStep(ew *errWriter, wf *workflow.Workflow, layout planLayout, loopIndex, step int, resolved workflow.ParamValues) {
+	lg := &wf.Loops[loopIndex]
+	ew.printf("  %2d. %-*s  loop  %s\n",
+		step, layout.flowIDWidth, lg.ID, loopDescriptor(*lg))
+	if lg.Description != "" {
+		ew.printf("      desc: %s\n", lg.Description)
 	}
-	loopAfter := make(map[int][]int)
-	for li := range wf.Loops {
-		lw := loopWaveOf[wf.Loops[li].ID]
-		pos := -1
-		for oi, id := range order {
-			if waveOf[id] <= lw {
-				pos = oi
-			}
-		}
-		loopAfter[pos] = append(loopAfter[pos], li)
-	}
-
-	// step numbers tasks and loops together in flow order: a loop is one
-	// numbered entry whose body members are listed, indented, beneath it.
-	step := 0
-	emitLoops := func(after int) {
-		for _, li := range loopAfter[after] {
-			lg := &wf.Loops[li]
-			step++
-			ew.printf("  %2d. %-*s  loop  %s\n",
-				step, idWidth, lg.ID, loopDescriptor(*lg))
-			if lg.Description != "" {
-				ew.printf("      desc: %s\n", lg.Description)
-			}
-			bodyWidth := 0
-			for _, id := range lg.Members {
-				if n := len(id); n > bodyWidth {
-					bodyWidth = n
-				}
-			}
-			for _, id := range lg.Members {
-				t := wf.ByID(id)
-				ew.printf("      - %-*s  %s  deps=%s\n",
-					bodyWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn))
-			}
-		}
-	}
-
-	emitLoops(-1)
-	for oi, id := range order {
+	bodyWidth := layout.loopBodyIDWidth[lg.ID]
+	for _, id := range lg.Members {
 		t := wf.ByID(id)
-		suffix := ""
-		if t.WritesState != "" {
-			suffix += "  writes_state=" + t.WritesState
-		}
-		if seeded[id] {
-			suffix += "  (seeded; using stored output)"
-		}
-		step++
-		ew.printf("  %2d. %-*s  %s  deps=%s%s\n",
-			step, idWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn), suffix)
-		if t.IsSubWorkflow() {
-			if child := wf.Subs[id]; child != nil {
-				cw := childIDWidth(child)
-				for i := range child.Tasks {
-					ct := &child.Tasks[i]
-					ew.printf("      - %-*s  %s  deps=%s\n",
-						cw, ct.ID, planTaskCols(child, ct, nil), depsList(ct.DependsOn))
-				}
-			}
-		}
-		emitLoops(oi)
+		ew.printf("      - %-*s  %s  deps=%s\n",
+			bodyWidth, id, planTaskCols(wf, t, resolved), depsList(t.DependsOn))
 	}
-	return ew.err
 }
 
 // loopConvergence renders a while loop's convergence target as

@@ -125,63 +125,25 @@ func paramTag(source string) string {
 // their own group inline at the wave where their body first becomes runnable,
 // so the loop's position in the flow is visible rather than detached.
 func richWaves(wf *workflow.Workflow, resolved workflow.ParamValues) string {
-	entries := wf.AnnotatedPlan()
-
-	// Derive topByWave, loopWave (min wave per loop), idWidth, and waveCount
-	// from the pre-computed annotated plan in a single pass.
-	waveCount := 0
-	idWidth := 0
-	loopWave := make(map[workflow.LoopID]int)
-	for _, e := range entries {
-		if e.Wave+1 > waveCount {
-			waveCount = e.Wave + 1
-		}
-		if e.LoopID == "" {
-			if n := len(e.ID); n > idWidth {
-				idWidth = n
-			}
-		} else {
-			// Track the earliest wave any member of this loop runs in so the
-			// loop group is anchored at the right position.
-			if w, ok := loopWave[e.LoopID]; !ok || e.Wave < w {
-				loopWave[e.LoopID] = e.Wave
-			}
-		}
-	}
-
-	// Filter loop members out of each wave; an original wave with no top-level
-	// task (every member pulled into a loop) is dropped and the displayed waves
-	// renumbered, but its position is still used to anchor inline loop groups.
-	topByWave := make([][]workflow.TaskID, waveCount)
-	for _, e := range entries {
-		if e.LoopID == "" {
-			topByWave[e.Wave] = append(topByWave[e.Wave], e.ID)
-		}
-	}
-	displayed := 0
-	for wi := range topByWave {
-		if len(topByWave[wi]) > 0 {
-			displayed++
-		}
-	}
+	layout := buildPlanLayout(wf, nil)
+	displayed := layout.displayedWaveCount()
 
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render(fmt.Sprintf("Execution plan (%d wave%s)", displayed, plural(displayed))))
 	b.WriteString("\n")
 	waveNo := 0
-	for wi := range topByWave {
-		if len(topByWave[wi]) > 0 {
+	for _, wave := range layout.waves {
+		if len(wave.taskIDs) > 0 {
 			waveNo++
-			b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", waveNo, len(topByWave[wi]), plural(len(topByWave[wi])))))
+			b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", waveNo, len(wave.taskIDs), plural(len(wave.taskIDs)))))
 			b.WriteString("\n")
-			for _, id := range topByWave[wi] {
-				b.WriteString(richTaskRow(wf, id, idWidth, resolved))
+			for _, id := range wave.taskIDs {
+				b.WriteString(richTaskRow(wf, id, layout.topTaskIDWidth, resolved))
 			}
 		}
-		for li := range wf.Loops {
-			if loopWave[wf.Loops[li].ID] == wi {
-				b.WriteString(richLoopGroup(wf, &wf.Loops[li], resolved))
-			}
+		for _, loopIndex := range wave.loopIndexes {
+			lg := &wf.Loops[loopIndex]
+			b.WriteString(richLoopGroup(wf, lg, layout.loopBodyIDWidth[lg.ID], resolved))
 		}
 	}
 	return b.String()
@@ -193,16 +155,8 @@ func richWaves(wf *workflow.Workflow, resolved workflow.ParamValues) string {
 // body task with its effective runtime/model/effort and deps, so the in-loop
 // execution shape is visible without running. Rendered inline among the waves
 // by richWaves at the loop's flow position.
-func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup, resolved workflow.ParamValues) string {
+func richLoopGroup(wf *workflow.Workflow, lg *workflow.LoopGroup, idWidth int, resolved workflow.ParamValues) string {
 	var b strings.Builder
-	// idWidth is derived per loop from its own members, so a wide id in one loop
-	// never pads the body columns of another.
-	idWidth := 0
-	for _, id := range lg.Members {
-		if n := len(id); n > idWidth {
-			idWidth = n
-		}
-	}
 	b.WriteString(waveStyle.Render(fmt.Sprintf("  Loop %s (%s, %d task%s)",
 		lg.ID, loopDescriptor(*lg), len(lg.Members), plural(len(lg.Members)))))
 	b.WriteString("\n")
