@@ -33,7 +33,7 @@ func newScheduleCronCmd(env *cliEnv) *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleCron(cmd.OutOrStdout(), env.home, args[0], o)
+			return doScheduleCron(cmd.OutOrStdout(), env.home, env.cwd, args[0], o)
 		},
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
@@ -53,7 +53,7 @@ func newScheduleAtCmd(env *cliEnv) *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleAt(cmd.OutOrStdout(), env.home, args[0], o)
+			return doScheduleAt(cmd.OutOrStdout(), env.home, env.cwd, args[0], o)
 		},
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
@@ -115,7 +115,7 @@ func newScheduleSyncCmd(env *cliEnv) *cobra.Command {
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleSync(cmd.OutOrStdout(), env.home, firstArg(args))
+			return doScheduleSync(cmd.OutOrStdout(), env.home, env.cwd, firstArg(args))
 		},
 	}
 	return cmd

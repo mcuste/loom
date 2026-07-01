@@ -1,7 +1,4 @@
 // Package scheduler implements the daemon loop that fires scheduled workflows.
-// The Loader dependency is the only seam between the scheduler and the CLI
-// layer: the scheduler knows only how to fire and track runs; loading and
-// validating a workflow file is delegated to the caller.
 package scheduler
 
 import (
@@ -12,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
-	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // pollCap bounds how long the daemon sleeps between scans even when the next
@@ -24,33 +20,26 @@ const pollCap = 60 * time.Second
 // queued run) does not spin the loop.
 const minWait = time.Second
 
-// Loader reads, parses, and validates a workflow from disk. It is the only
-// dependency the scheduler borrows from the CLI layer. ref is the on-disk path
-// stored in the schedule record. The returned manifest bytes are stored
-// verbatim by the run store; path is the resolved absolute path.
-type Loader func(ref string) (*workflow.Workflow, []byte, string, error)
-
 // daemon owns the scheduler loop. now is injectable so tests drive the firing
 // decision deterministically; running tracks in-flight fires per schedule id
 // so the overlap policy can skip or serialize them.
 type daemon struct {
 	home    string
+	cwd     string
 	out     io.Writer
 	now     func() time.Time
 	running *runningSet
-	load    Loader
 }
 
-// New returns a daemon ready to run. load is called on each fire to read and
-// validate the workflow; home is the loom data directory that owns the
-// schedules and run records.
-func New(home string, out io.Writer, load Loader) *daemon {
+// New returns a daemon ready to run. home is the loom data directory that owns
+// the schedules and run records; cwd is the daemon process working directory.
+func New(home, cwd string, out io.Writer) *daemon {
 	return &daemon{
 		home:    home,
+		cwd:     cwd,
 		out:     out,
 		now:     time.Now,
 		running: newRunningSet(),
-		load:    load,
 	}
 }
 

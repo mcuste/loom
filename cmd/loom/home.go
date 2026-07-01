@@ -45,4 +45,5 @@ func workflowsDir(home string) string {
 // independently.
 type cliEnv struct {
 	home string
+	cwd  string
 }

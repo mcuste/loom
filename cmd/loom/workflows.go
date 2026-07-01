@@ -2,10 +2,12 @@ package main
 
 import (
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/pkg/tui"
+	"github.com/mcuste/loom/pkg/workflowload"
 )
 
 // completeWorkflowRef is the shell-completion function for the workflow
@@ -23,7 +25,11 @@ func completeWorkflowRef(_ *cobra.Command, args []string, _ string) ([]string, c
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveDefault
 	}
-	refs, err := listRegistryWorkflows(home)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+	refs, err := workflowload.List(home, cwd)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveDefault
 	}
@@ -53,7 +59,7 @@ func newWorkflowsListCmd(env *cliEnv) *cobra.Command {
 		Short:   "List registry workflows by name",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doWorkflowsList(cmd.OutOrStdout(), env.home)
+			return doWorkflowsList(cmd.OutOrStdout(), env.home, env.cwd)
 		},
 	}
 	return cmd
@@ -64,8 +70,8 @@ func newWorkflowsListCmd(env *cliEnv) *cobra.Command {
 // shadowed name shows which root won), sorted by name. A parse error or absent
 // description leaves the description column blank; an absent registry root lists
 // nothing. Columns are aligned with a tabwriter so the output reads as a table.
-func doWorkflowsList(w io.Writer, home string) error {
-	refs, err := listRegistryWorkflows(home)
+func doWorkflowsList(w io.Writer, home, cwd string) error {
+	refs, err := workflowload.List(home, cwd)
 	if err != nil {
 		return err
 	}

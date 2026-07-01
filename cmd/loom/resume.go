@@ -10,6 +10,7 @@ import (
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/workflowload"
 )
 
 func newResumeCmd(env *cliEnv) *cobra.Command {
@@ -46,18 +47,10 @@ func doResume(w io.Writer, home, runID string, paramArgs []string) error {
 // doRunResumeLatest is the --resume-latest entry point for `loom run`. The
 // workflow body comes from the YAML on disk; the record only supplies the
 // seeded outputs and the original params.
-func doRunResumeLatest(w io.Writer, home, path string, paramArgs []string) error {
-	path, err := resolveWorkflowRef(home, path)
-	if err != nil {
-		return err
-	}
-	// The YAML path arg is relative to the CURRENT cwd, so read and parse the
-	// manifest BEFORE any chdir; otherwise a relative path would resolve against
-	// the recorded dir and miss the file the user pointed at. ReadAndParse inlines
-	// `prompt_file:` refs relative to the workflow's directory (still the current
-	// cwd here) so the resumed run stores and replays the same self-contained
-	// manifest as a fresh run.
-	wf, manifest, err := workflow.ReadAndParse(path)
+func doRunResumeLatest(w io.Writer, home, cwd, path string, paramArgs []string) error {
+	// Resolve and load before any chdir, so --resume-latest still targets the
+	// file the user pointed at rather than the recorded run dir.
+	wf, manifest, path, err := workflowload.Load(home, cwd, path)
 	if err != nil {
 		return err
 	}
@@ -117,10 +110,8 @@ func prepareResumedRequest(w io.Writer, selfPath string, manifest []byte, rec *s
 
 // linkResumedWorkflow re-resolves, links, and validates sub-workflow children
 // from disk during resume using the same CLI resolver used by fresh runs.
-func linkResumedWorkflow(home, selfPath string, wf *workflow.Workflow) error {
-	return workflow.Link(wf, selfPath, func(ref, parentDir string) (string, error) {
-		return resolveSubWorkflowRef(home, ref, parentDir)
-	})
+func linkResumedWorkflow(home, cwd, selfPath string, wf *workflow.Workflow) error {
+	return workflowload.Link(home, cwd, selfPath, wf)
 }
 
 // runFromRecord drives a resume invocation. It prepares the runner request,
@@ -141,7 +132,7 @@ func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *sto
 	// known (--resume-latest reads it from disk); for a stored-manifest resume it
 	// is empty, so path refs resolve relative to the (restored) working directory
 	// and registry-name refs through the cwd-based registry roots.
-	if err := linkResumedWorkflow(home, selfPath, req.Wf); err != nil {
+	if err := linkResumedWorkflow(home, req.Cwd, selfPath, req.Wf); err != nil {
 		return err
 	}
 

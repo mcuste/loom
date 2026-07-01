@@ -12,6 +12,7 @@ import (
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/workflow"
+	"github.com/mcuste/loom/pkg/workflowload"
 )
 
 // fireResult reports a finished fire back to the loop.
@@ -30,7 +31,7 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	res := fireResult{scheduleID: rec.ID, oneOff: !rec.Trigger.IsCron(), fireTime: fireTime}
 	defer func() { results <- res }()
 
-	wf, manifest, _, err := d.load(rec.Path)
+	wf, manifest, _, err := workflowload.Load(d.home, d.cwd, rec.Path)
 	if err != nil {
 		res.err = fmt.Errorf("load %s: %w", rec.Path, err)
 		d.logf("schedule %s: %v", rec.ID, res.err)

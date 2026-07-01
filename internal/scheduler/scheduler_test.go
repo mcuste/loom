@@ -9,7 +9,6 @@ import (
 
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/store"
-	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // shellWorkflow is a minimal workflow that runs a shell command, so no model
@@ -20,17 +19,6 @@ tasks:
   - id: a
     command: echo hi
 `
-
-// testLoader reads and parses a workflow from disk. Unlike the CLI's
-// loadWorkflow, it skips sub-workflow linking (not needed for the shell
-// workflows the daemon tests use) and accepts an absolute path directly.
-func testLoader(ref string) (*workflow.Workflow, []byte, string, error) {
-	wf, manifest, err := workflow.ReadAndParse(ref)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return wf, manifest, ref, nil
-}
 
 // TestDaemonScanFiresDueSchedule wires scan -> execute -> complete end to end
 // with a shell workflow so no model call is needed, and asserts a run record is
@@ -50,7 +38,7 @@ func TestDaemonScanFiresDueSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, io.Discard, testLoader)
+	d := New(home, "", io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
@@ -115,7 +103,7 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, io.Discard, testLoader)
+	d := New(home, "", io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // pretend a prior run is still going
 
@@ -154,7 +142,7 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	}
 	dueAt, _ := schedule.Get(home, added.ID)
 
-	d := New(home, io.Discard, testLoader)
+	d := New(home, "", io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going
 
@@ -202,7 +190,7 @@ func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, io.Discard, testLoader)
+	d := New(home, "", io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going; allow ignores it
 
@@ -236,7 +224,7 @@ func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, io.Discard, testLoader)
+	d := New(home, "", io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
@@ -268,7 +256,7 @@ func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, io.Discard, testLoader)
+	d := New(home, "", io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	ctx, cancel := context.WithCancel(context.Background())

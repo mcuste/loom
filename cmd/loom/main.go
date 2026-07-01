@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -43,7 +44,12 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("resolve working directory: %w", err)
+			}
 			env.home = h
+			env.cwd = cwd
 			return nil
 		},
 	}

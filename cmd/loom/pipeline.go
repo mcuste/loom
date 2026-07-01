@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/tui"
@@ -77,39 +76,6 @@ func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, 
 		return nil, err
 	}
 	return resolved, nil
-}
-
-// loadWorkflow resolves a workflow ref to a file, reads and inlines its
-// prompt_file references, parses it, links and statically validates its
-// sub-workflows, and runs the routing check. It is the shared prelude behind
-// `loom run` and the scheduler: a workflow that fails to load is rejected when
-// the command is issued, not at fire time. It returns the parsed workflow, the
-// inlined manifest bytes (what the store persists), and the resolved absolute
-// path the schedule records so the daemon can reload it from its own cwd.
-func loadWorkflow(home, ref string) (*workflow.Workflow, []byte, string, error) {
-	path, err := resolveWorkflowRef(home, ref)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	// Make the path absolute so the scheduler can reload the file regardless of
-	// its own working directory, and so callers do not need a separate abs step.
-	path, err = filepath.Abs(path)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("resolve workflow path %s: %w", path, err)
-	}
-	wf, manifest, err := workflow.ReadAndParse(path)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	// Resolve and link any `workflow:` children from disk, statically validate
-	// them, and run the routing check, so a bad sub-workflow ref or route fails
-	// before any model call.
-	if err := workflow.Link(wf, path, func(ref, parentDir string) (string, error) {
-		return resolveSubWorkflowRef(home, ref, parentDir)
-	}); err != nil {
-		return nil, nil, "", err
-	}
-	return wf, manifest, path, nil
 }
 
 // renderCheckRun runs the shared check phase (validate + print the plan) against

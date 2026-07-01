@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/pkg/runner"
+	"github.com/mcuste/loom/pkg/workflowload"
 )
 
 // newRunCmd is the parent for executing a workflow. Invoked with a workflow
@@ -25,9 +26,9 @@ func newRunCmd(env *cliEnv) *cobra.Command {
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if resumeLatest {
-				return doRunResumeLatest(cmd.OutOrStdout(), env.home, args[0], paramArgs)
+				return doRunResumeLatest(cmd.OutOrStdout(), env.home, env.cwd, args[0], paramArgs)
 			}
-			return doRun(cmd.OutOrStdout(), env.home, args[0], paramArgs)
+			return doRun(cmd.OutOrStdout(), env.home, env.cwd, args[0], paramArgs)
 		},
 	}
 	addParamFlags(cmd, &paramArgs)
@@ -40,8 +41,8 @@ func newRunCmd(env *cliEnv) *cobra.Command {
 // doRun runs the shared check phase (validate + print the plan) and then, only
 // if it passes, executes the whole workflow fresh. home is resolved up front (as
 // the resume paths do) so a home-resolution failure surfaces before the plan.
-func doRun(w io.Writer, home, path string, paramArgs []string) error {
-	wf, manifest, _, err := loadWorkflow(home, path)
+func doRun(w io.Writer, home, cwd, path string, paramArgs []string) error {
+	wf, manifest, _, err := workflowload.Load(home, cwd, path)
 	if err != nil {
 		return err
 	}

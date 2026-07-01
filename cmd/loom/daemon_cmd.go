@@ -8,7 +8,6 @@ import (
 
 	"github.com/mcuste/loom/internal/daemoninstall"
 	"github.com/mcuste/loom/internal/scheduler"
-	"github.com/mcuste/loom/pkg/workflow"
 )
 
 func newDaemonCmd(env *cliEnv) *cobra.Command {
@@ -23,10 +22,7 @@ func newDaemonCmd(env *cliEnv) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, stop := interruptContext()
 			defer stop()
-			loader := func(ref string) (*workflow.Workflow, []byte, string, error) {
-				return loadWorkflow(env.home, ref)
-			}
-			d := scheduler.New(env.home, cmd.OutOrStdout(), loader)
+			d := scheduler.New(env.home, env.cwd, cmd.OutOrStdout())
 			return d.Run(ctx)
 		},
 	}
