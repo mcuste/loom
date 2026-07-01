@@ -109,6 +109,7 @@ func decode(stdout []byte) (runtime.Response, error) {
 	var (
 		lastAgentMessage string
 		usage            runtime.Usage
+		completedTurn    bool
 	)
 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
 	// Individual JSONL events (especially reasoning items) can exceed the
@@ -120,7 +121,11 @@ func decode(stdout []byte) (runtime.Response, error) {
 			continue
 		}
 		var ev struct {
-			Type string `json:"type"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Error   struct {
+				Message string `json:"message"`
+			} `json:"error"`
 			Item struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -140,7 +145,16 @@ func decode(stdout []byte) (runtime.Response, error) {
 			if ev.Item.Type == "agent_message" {
 				lastAgentMessage = ev.Item.Text
 			}
+		case "turn.failed":
+			if ev.Error.Message != "" {
+				return runtime.Response{}, fmt.Errorf("turn failed: %s", ev.Error.Message)
+			}
+			if ev.Message != "" {
+				return runtime.Response{}, fmt.Errorf("turn failed: %s", ev.Message)
+			}
+			return runtime.Response{}, fmt.Errorf("turn failed")
 		case "turn.completed":
+			completedTurn = true
 			// reasoning_output_tokens is a breakdown of output_tokens per
 			// Responses API convention, so it is not added separately.
 			usage = runtime.Usage{
@@ -153,7 +167,7 @@ func decode(stdout []byte) (runtime.Response, error) {
 	if err := scanner.Err(); err != nil {
 		return runtime.Response{}, fmt.Errorf("read json stream: %w", err)
 	}
-	if lastAgentMessage == "" {
+	if lastAgentMessage == "" && !completedTurn {
 		return runtime.Response{}, fmt.Errorf("no agent_message in event stream")
 	}
 
