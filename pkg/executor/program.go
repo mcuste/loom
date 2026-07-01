@@ -2,13 +2,13 @@ package executor
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// program is executor-local IR compiled from a parsed workflow. It will become
-// the handoff between workflow loading and execution, but phase 1 keeps it as a
-// dormant structure so runtime behavior stays unchanged.
+// program is executor-local IR compiled from a parsed workflow. It carries the
+// deterministic schedule metadata the executor needs before interpretation.
 type program struct {
 	wf       *workflow.Workflow
 	order    []workflow.TaskID
@@ -31,6 +31,14 @@ type taskUnit struct {
 // program's top-level unit list because the loop drives them as a group.
 type loopUnit struct {
 	index int
+}
+
+func (u taskUnit) run(context.Context, *interpreter, *runState) error {
+	return fmt.Errorf("task unit %q has no interpreter runner", u.id)
+}
+
+func (u loopUnit) run(context.Context, *interpreter, *runState) error {
+	return fmt.Errorf("loop unit %d has no interpreter runner", u.index)
 }
 
 // interpreter is the future program runner that will evaluate a compiled

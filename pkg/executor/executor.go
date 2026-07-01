@@ -209,15 +209,15 @@ type Options struct {
 // Run returns the partial Report along with the wrapped error. Cancellation
 // of the caller's ctx propagates the same way.
 func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
-	order := wf.Plan()
+	prog := compileProgram(wf)
 	rep := &Report{
-		Tasks:   make([]TaskResult, 0, len(order)),
-		Outputs: make(map[workflow.TaskID]string, len(order)),
+		Tasks:   make([]TaskResult, 0, len(prog.order)),
+		Outputs: make(map[workflow.TaskID]string, len(prog.order)),
 		Params:  opts.Params, // stash once before any g.Go; goroutines only read it
 	}
 
-	gates := make(map[workflow.TaskID]chan struct{}, len(order))
-	for _, tid := range order {
+	gates := make(map[workflow.TaskID]chan struct{}, len(prog.order))
+	for _, tid := range prog.order {
 		gates[tid] = make(chan struct{})
 	}
 
@@ -225,17 +225,17 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	// skipped records, per task, whether its `when:` guard skipped it. The two
 	// are distinct so failed()/succeeded() never conflate a skip with a failure.
 	// Both are read under mu like rep.Outputs.
-	succeeded := make(map[workflow.TaskID]bool, len(order))
-	skipped := make(map[workflow.TaskID]bool, len(order))
+	succeeded := make(map[workflow.TaskID]bool, len(prog.order))
+	skipped := make(map[workflow.TaskID]bool, len(prog.order))
 	// exitCodes records, per completed task, its process exit code (0 for every
 	// non-script task), consulted for `{{id.exit}}` substitution and `.exit`
 	// conditions. Read under mu like the other state maps.
-	exitCodes := make(map[workflow.TaskID]int, len(order))
+	exitCodes := make(map[workflow.TaskID]int, len(prog.order))
 
 	// Close seeded gates and stamp their outputs before spawning any
 	// goroutine. Downstream waiters see the seed via {{id}} substitution
 	// just as if the task had run this invocation. Unknown ids are ignored.
-	for _, tid := range order {
+	for _, tid := range prog.order {
 		if v, ok := opts.Seed[tid]; ok {
 			rep.Outputs[tid] = v
 			succeeded[tid] = true
@@ -275,37 +275,23 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		},
 	}
 
-	// Each scoped loop collapses its body into a single synthetic node in the
-	// outer schedule: the body's member tasks are not scheduled individually
-	// here (a per-loop driver runs them iteratively), and an outside task that
-	// depends on a member waits on that member's gate, which the driver closes
-	// only once the loop converges. memberOf records which loop owns each body
-	// task so the scheduler can skip it.
-	memberOf := make(map[workflow.TaskID]int, len(wf.Loops))
-	for i := range wf.Loops {
-		for _, m := range wf.Loops[i].Members {
-			memberOf[m] = i
-		}
-	}
-
 	g, gctx := errgroup.WithContext(ctx)
-	for i := range wf.Loops {
-		lg := &wf.Loops[i]
-		g.Go(func() error {
-			return runLoop(gctx, wf, lg, st, hooks, opts)
-		})
-	}
-	for _, tid := range order {
-		if _, seeded := opts.Seed[tid]; seeded {
-			continue
+	for _, scheduled := range prog.units {
+		switch u := scheduled.(type) {
+		case loopUnit:
+			lg := &wf.Loops[u.index]
+			g.Go(func() error {
+				return runLoop(gctx, wf, lg, st, hooks, opts)
+			})
+		case taskUnit:
+			if _, seeded := opts.Seed[u.id]; seeded {
+				continue
+			}
+			t := wf.ByID(u.id)
+			g.Go(func() error {
+				return runTask(gctx, wf, t, st, hooks, opts)
+			})
 		}
-		if _, looped := memberOf[tid]; looped {
-			continue
-		}
-		t := wf.ByID(tid)
-		g.Go(func() error {
-			return runTask(gctx, wf, t, st, hooks, opts)
-		})
 	}
 
 	err := g.Wait()
