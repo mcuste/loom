@@ -14,6 +14,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -99,10 +100,10 @@ type runModel struct {
 }
 
 // newRunModel builds the live model for one run. meta seeds the status-bar
-// denominator (RunMeta.Total); cancel is invoked when the user presses q or
+// denominator (runner.RunMeta.Total); cancel is invoked when the user presses q or
 // ctrl-c so the run unwinds through the caller's signal-cancelled context. A
 // nil cancel is tolerated (the key press then only quits the live view).
-func newRunModel(meta RunMeta, cancel context.CancelFunc) *runModel {
+func newRunModel(meta runner.RunMeta, cancel context.CancelFunc) *runModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	return &runModel{
@@ -361,7 +362,7 @@ func newTTYRenderer(w io.Writer) *ttyRenderer {
 
 // Header prints the header block once, above the live region, then starts the
 // bubbletea program (idempotent across loop iterations).
-func (t *ttyRenderer) Header(meta RunMeta) error {
+func (t *ttyRenderer) Header(meta runner.RunMeta) error {
 	if err := t.plain.Header(meta); err != nil {
 		return err
 	}
@@ -372,7 +373,7 @@ func (t *ttyRenderer) Header(meta RunMeta) error {
 // start launches the live program in a goroutine. The goroutine exits when the
 // program quits, either from a q/ctrl-c key press in Update or from Quit() in
 // Summary/Close; done is closed on that exit so Quit can join it.
-func (t *ttyRenderer) start(meta RunMeta) {
+func (t *ttyRenderer) start(meta runner.RunMeta) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.prog != nil {
@@ -454,6 +455,10 @@ func (t *ttyRenderer) Summary(wf *workflow.Workflow, rep *executor.Report, expec
 	t.stop()
 	return t.plain.Summary(wf, rep, expected)
 }
+
+// StoreError delegates store-layer reporting to the plain writer. These lines
+// are not part of the live region, so they bypass Bubble Tea and print directly.
+func (t *ttyRenderer) StoreError(err error) { t.plain.StoreError(err) }
 
 // Close stops the live program if it is still running and surfaces any error
 // the program returned (e.g. an early write or terminal failure).

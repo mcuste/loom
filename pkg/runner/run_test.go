@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/mcuste/loom/pkg/executor"
-	"github.com/mcuste/loom/pkg/tui"
 )
 
 // TestRunWorkflow_PlainRunCompletesWithoutSeededLine pins that calling the
@@ -29,7 +28,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	if _, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home}); err != nil {
+	if _, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home}); err != nil {
 		t.Fatalf("Run: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -65,7 +64,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if _, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
+	if _, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
 		t.Fatalf("Run: %v\noutput:\n%s", err, buf.String())
 	}
 	if !strings.Contains(buf.String(), "Seeded   : 1 task(s) from prior run") {
@@ -99,7 +98,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if _, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
+	if _, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
 		t.Fatalf("Run: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -136,7 +135,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if _, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
+	if _, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
 		t.Fatalf("Run: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -175,7 +174,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if _, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
+	if _, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
 		t.Fatalf("Run: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -208,7 +207,7 @@ tasks:
 	}
 
 	var buf bytes.Buffer
-	if _, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
+	if _, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home, Plan: plan}); err != nil {
 		t.Fatalf("Run: %v\noutput:\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -254,7 +253,7 @@ tasks:
 	wf, resolved := parseAndResolve(t, manifest, nil, nil)
 
 	var buf bytes.Buffer
-	_, err := Run(context.Background(), tui.New(&buf), &buf, Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home})
+	_, err := Run(context.Background(), newTestObserver(&buf), Request{Wf: wf, Manifest: []byte(manifest), Resolved: resolved, Home: home})
 
 	var got *executor.BudgetExceededError
 	if !errors.As(err, &got) {

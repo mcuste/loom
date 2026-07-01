@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -18,7 +19,7 @@ func TestPlainRenderer_AnnotatesLoopIteration(t *testing.T) {
 
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	if err := r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3}); err != nil {
+	if err := r.Header(runner.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3}); err != nil {
 		t.Fatalf("Header: %v", err)
 	}
 	buf.Reset() // drop the header; assert only the progress line

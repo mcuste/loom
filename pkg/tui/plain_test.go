@@ -2,10 +2,12 @@ package tui_test
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -32,7 +34,7 @@ func parseWF(t *testing.T, body string) *workflow.Workflow {
 func TestPlainRenderer_HeaderPlainRun(t *testing.T) {
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	if err := r.Header(tui.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Total: 2}); err != nil {
+	if err := r.Header(runner.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Total: 2}); err != nil {
 		t.Fatalf("Header: %v", err)
 	}
 
@@ -48,7 +50,7 @@ func TestPlainRenderer_HeaderPlainRun(t *testing.T) {
 func TestPlainRenderer_HeaderSeeded(t *testing.T) {
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	if err := r.Header(tui.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Seeded: 2, Total: 1}); err != nil {
+	if err := r.Header(runner.RunMeta{RunFile: "/runs/wf/abc.json", Cwd: "/work", Seeded: 2, Total: 1}); err != nil {
 		t.Fatalf("Header: %v", err)
 	}
 
@@ -136,6 +138,17 @@ func TestPlainRenderer_SummaryPartial(t *testing.T) {
 	}
 }
 
+// TestPlainRenderer_StoreError pins the best-effort store-error line format so
+// callers can move reporting behind the renderer without changing output bytes.
+func TestPlainRenderer_StoreError(t *testing.T) {
+	var buf bytes.Buffer
+	tui.New(&buf).StoreError(errors.New("boom"))
+
+	if got, want := buf.String(), "  store: boom\n"; got != want {
+		t.Errorf("StoreError() = %q, want %q", got, want)
+	}
+}
+
 // TestPlainRenderer_SummaryLoopCountsDistinct pins that a looping run reports
 // success: a scoped loop records one rep.Tasks entry per iteration, so the raw
 // count (4) exceeds the expected task count (2); the summary must collapse the
@@ -205,7 +218,7 @@ func TestPlainRenderer_HooksRenderProgressLines(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			r := tui.New(&buf)
-			_ = r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
+			_ = r.Header(runner.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
 			buf.Reset() // drop the header; assert only the progress line
 			tc.call(r.Hooks())
 			if got := buf.String(); got != tc.want {
@@ -227,7 +240,7 @@ func TestPlainRenderer_HooksGrowDenominatorAcrossLoopPasses(t *testing.T) {
 
 	var buf bytes.Buffer
 	r := tui.New(&buf)
-	_ = r.Header(tui.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
+	_ = r.Header(runner.RunMeta{RunFile: "/r", Cwd: "/c", Total: 3})
 	buf.Reset()
 
 	h := r.Hooks()

@@ -13,6 +13,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -28,7 +29,7 @@ const waitWindow = 3 * time.Second
 // View's height bound deterministic.
 func newLiveModel(t *testing.T, total int) *teatest.TestModel {
 	t.Helper()
-	m := newRunModel(RunMeta{RunFile: "/r", Cwd: "/c", Total: total}, func() {})
+	m := newRunModel(runner.RunMeta{RunFile: "/r", Cwd: "/c", Total: total}, func() {})
 	return teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 }
 
@@ -105,7 +106,7 @@ func TestRunModel_StatusBarShowsCompletedTotals(t *testing.T) {
 // {setup, analyze-loop, synthesize} that expands to three analyze passes must end
 // at 5/5, not overshoot to 5/3.
 func TestRunModel_StatusBarGrowsDenominatorAcrossLoopPasses(t *testing.T) {
-	m := newRunModel(RunMeta{Total: 3}, func() {})
+	m := newRunModel(runner.RunMeta{Total: 3}, func() {})
 
 	run := func(id workflow.TaskID, iter int) {
 		m.onStart(taskStartMsg{id: id, iter: iter, rt: "claude-code", model: "sonnet"})
@@ -130,7 +131,7 @@ func TestRunModel_StatusBarGrowsDenominatorAcrossLoopPasses(t *testing.T) {
 // View: when more tasks run than fit in the height budget, the region is capped
 // and a single "… N more running" line accounts for the remainder.
 func TestRunModel_ViewBoundsHeightWithOverflow(t *testing.T) {
-	m := newRunModel(RunMeta{Total: 3}, func() {})
+	m := newRunModel(runner.RunMeta{Total: 3}, func() {})
 	m.height = 2 // budget of 1 row for running tasks, the rest overflows
 	m.onStart(taskStartMsg{id: "a", rt: "claude-code", model: "opus"})
 	m.onStart(taskStartMsg{id: "b", rt: "claude-code", model: "opus"})
@@ -212,7 +213,7 @@ func TestDescriptor_ShellVsLLM(t *testing.T) {
 func TestRunModel_CtrlCCancelsRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newRunModel(RunMeta{RunFile: "/r", Cwd: "/c", Total: 1}, cancel)
+	m := newRunModel(runner.RunMeta{RunFile: "/r", Cwd: "/c", Total: 1}, cancel)
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -228,4 +229,17 @@ func TestRunModel_CtrlCCancelsRun(t *testing.T) {
 		t.Fatalf("quit: %v", err)
 	}
 	tm.WaitFinished(t, teatest.WithFinalTimeout(waitWindow))
+}
+
+// TestTTYRenderer_StoreErrorDelegatesToPlain pins that tty store errors bypass
+// the live region and keep the same plain indented line format.
+func TestTTYRenderer_StoreErrorDelegatesToPlain(t *testing.T) {
+	var buf bytes.Buffer
+
+	r := newTTYRenderer(&buf)
+	r.StoreError(errors.New("boom"))
+
+	if got, want := buf.String(), "  store: boom\n"; got != want {
+		t.Fatalf("StoreError() = %q, want %q", got, want)
+	}
 }

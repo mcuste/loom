@@ -2,13 +2,10 @@ package runner
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"strings"
 
 	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/store"
-	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -37,6 +34,28 @@ type Request struct {
 	Prov     Provenance
 }
 
+// RunMeta carries the per-run facts an observer prints in its header block
+// before execution: the run-record path, the invocation cwd, and the seeded
+// task count (0 on a plain run). Total is the progress denominator for the
+// per-task lines (the expected task count, i.e. total tasks minus seeded ones);
+// the executor never reports it, so the caller threads it in here.
+type RunMeta struct {
+	RunFile string
+	Cwd     string
+	Seeded  int
+	Total   int
+}
+
+// Observer is runner's presentation seam. Callers own observer construction
+// and teardown; the execution core only drives the run header, progress hooks,
+// summary, and best-effort store-error reporting.
+type Observer interface {
+	Header(meta RunMeta) error
+	Hooks() executor.Hooks
+	Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error
+	StoreError(err error)
+}
+
 // Run is the unified run pipeline shared by doRun, runFromRecord, and the
 // daemon. It parses nothing itself; callers hand it the already-parsed workflow
 // and resolved params after the check phase has already validated and printed
@@ -46,7 +65,7 @@ type Request struct {
 // error is reported independently so a write failure after a successful run does
 // not mask the nil return value. ctx should be a signal-aware context created by
 // the caller; Run cancels execution on ctx cancellation.
-func Run(ctx context.Context, r tui.Renderer, w io.Writer, req Request) (string, error) {
+func Run(ctx context.Context, obs Observer, req Request) (string, error) {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
 	// only need the seed material the executor will actually honor.
@@ -66,19 +85,18 @@ func Run(ctx context.Context, r tui.Renderer, w io.Writer, req Request) (string,
 		return "", err
 	}
 
-	x := &runExec{r: r, w: w, req: req, state: state}
+	x := &runExec{obs: obs, req: req, state: state}
 	return x.execute(ctx, cwd, rs)
 }
 
 // runExec bundles the context that travels unchanged through the run pipeline's
-// execute/finalize hops: the renderer the caller owns, the writer store errors
-// go to, the parsed run request, and the cross-run state map (read for
-// substitution, written back in place). The per-run locals the executor produces
-// as it goes (cwd, the resolved seed, the expected task count) stay as method
-// arguments rather than fields, since they are only known partway through.
+// execute/finalize hops: the observer the caller owns, the parsed run request,
+// and the cross-run state map (read for substitution, written back in place).
+// The per-run locals the executor produces as it goes (cwd, the resolved seed,
+// the expected task count) stay as method arguments rather than fields, since
+// they are only known partway through.
 type runExec struct {
-	r     tui.Renderer
-	w     io.Writer
+	obs   Observer
 	req   Request
 	state map[string]string
 }
@@ -92,7 +110,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	run, err := store.Open(wf.ID, x.req.Manifest, store.Config{
 		Root:        x.req.Home,
 		Cwd:         cwd,
-		OnError:     func(e error) { reportStoreErr(x.w, e) },
+		OnError:     x.obs.StoreError,
 		Params:      stringifyParams(x.req.Resolved),
 		ScheduleID:  x.req.Prov.ScheduleID,
 		TriggeredBy: x.req.Prov.TriggeredBy,
@@ -110,7 +128,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	var rep *executor.Report
 	defer func() {
 		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
-			reportStoreErr(x.w, closeErr)
+			x.obs.StoreError(closeErr)
 		}
 	}()
 
@@ -118,7 +136,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	// neither creates nor closes it. Header resets the progress counter and
 	// records the denominator.
 	expected := len(wf.Tasks) - len(rs.set)
-	if err := x.r.Header(tui.RunMeta{
+	if err := x.obs.Header(RunMeta{
 		RunFile: run.Path(),
 		Cwd:     cwd,
 		Seeded:  len(rs.set),
@@ -134,7 +152,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	seedExit := seededExitCodes(rs)
 
 	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
-		x.r.Hooks(),
+		x.obs.Hooks(),
 		sh,
 	), executor.Options{Params: x.req.Resolved, Seed: rs.seed, SeedExitCodes: seedExit, State: x.state})
 	runErr = x.finalize(rep, expected, runErr)
@@ -151,7 +169,7 @@ func (x *runExec) finalize(rep *executor.Report, expected int, runErr error) err
 		return runErr
 	}
 	wf := x.req.Wf
-	if err := x.r.Summary(wf, rep, expected); err != nil && runErr == nil {
+	if err := x.obs.Summary(wf, rep, expected); err != nil && runErr == nil {
 		runErr = err
 	}
 	// Persist write-backs: each task with `writes_state` records its trimmed
@@ -159,17 +177,10 @@ func (x *runExec) finalize(rep *executor.Report, expected int, runErr error) err
 	// a partial run carries over what it managed to produce.
 	if persistState(x.state, wf, rep) {
 		if err := store.SaveState(x.req.Home, wf.ID, x.state); err != nil {
-			reportStoreErr(x.w, err)
+			x.obs.StoreError(err)
 		}
 	}
 	return runErr
-}
-
-// reportStoreErr writes a store-layer error to w on its own indented line. The
-// store is best-effort relative to the run itself, so these writes have no error
-// channel of their own and a failed write is intentionally discarded.
-func reportStoreErr(w io.Writer, err error) {
-	_, _ = fmt.Fprintf(w, "  store: %v\n", err)
 }
 
 // persistState folds each `writes_state` task's trimmed output into state and

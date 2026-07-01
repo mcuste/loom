@@ -12,6 +12,7 @@ import (
 
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 	"github.com/mcuste/loom/pkg/workflowload"
 )
@@ -67,7 +68,9 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	prov := runner.Provenance{ScheduleID: rec.ID, TriggeredBy: "schedule"}
-	res.runID, res.err = runner.RunPlain(ctx, lf, runner.Request{
+	r := tui.New(lf)
+	defer func() { _ = r.Close() }()
+	res.runID, res.err = runner.Run(ctx, r, runner.Request{
 		Wf:       wf,
 		Manifest: manifest,
 		Resolved: resolved,

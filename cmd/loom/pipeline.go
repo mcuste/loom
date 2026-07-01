@@ -109,6 +109,6 @@ func renderCheckRun(w io.Writer, req runner.Request, params paramInputs, seeded 
 	req.Resolved = resolved
 	ctx, stop := interruptContext()
 	defer stop()
-	_, err = runner.Run(ctx, r, w, req)
+	_, err = runner.Run(ctx, r, req)
 	return err
 }

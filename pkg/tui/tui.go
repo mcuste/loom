@@ -12,35 +12,23 @@ import (
 	"time"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// RunMeta carries the per-run facts the renderer prints in its header block
-// before execution: the run-record path, the invocation cwd, and the
-// seeded-task count (0 on a plain run). Total is the progress denominator for
-// the per-task lines (the expected task count, i.e. total tasks minus seeded
-// ones); the Hooks() printer needs it but the executor never reports it, so the
-// caller threads it in here.
-type RunMeta struct {
-	RunFile string
-	Cwd     string
-	Seeded  int
-	Total   int
-}
-
 // Renderer is the rendering seam. A command obtains one via New, prints the
 // header, hands Hooks() to the executor for per-task progress, then prints the
 // summary and closes. Header must be called before Hooks() so the progress
-// denominator (RunMeta.Total) is known. Every method that writes to stdout
-// returns the first write error so callers can surface it rather than have it
-// vanish into a dropped fmt.Fprintf return.
+// denominator (runner.RunMeta.Total) is known. Every method that writes to
+// stdout returns the first write error so callers can surface it rather than
+// have it vanish into a dropped fmt.Fprintf return.
 type Renderer interface {
-	// Header prints the per-run header block and records RunMeta.Total as the
-	// progress denominator for Hooks(). It also resets the per-task step counter
-	// so a fresh iteration's progress restarts at 1. It MUST be called before
-	// Hooks().
-	Header(meta RunMeta) error
+	// Header prints the per-run header block and records runner.RunMeta.Total as
+	// the progress denominator for Hooks(). It also resets the per-task step
+	// counter so a fresh iteration's progress restarts at 1. It MUST be called
+	// before Hooks().
+	Header(meta runner.RunMeta) error
 	// Plan prints the validated execution plan: the workflow header, the params
 	// table, and the numbered task order.
 	Plan(wf *workflow.Workflow, resolved workflow.ParamValues, cli map[string]string, seeded map[workflow.TaskID]bool) error
@@ -49,13 +37,17 @@ type Renderer interface {
 	// than around it via a separate writer.
 	Warn(msg string) error
 	// Hooks returns the executor progress hooks. Header MUST have been called
-	// first: the per-task lines read the progress denominator (RunMeta.Total) set
-	// by Header, so calling Hooks() first renders every line as [N/0]. The hooks
-	// serialize their writes so concurrent task callbacks never interleave
-	// mid-line.
+	// first: the per-task lines read the progress denominator
+	// (runner.RunMeta.Total) set by Header, so calling Hooks() first renders
+	// every line as [N/0]. The hooks serialize their writes so concurrent task
+	// callbacks never interleave mid-line.
 	Hooks() executor.Hooks
 	// Summary prints the closing totals-and-status block.
 	Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error
+	// StoreError reports a best-effort store-layer failure on its own indented
+	// line. It has no error channel of its own: the run's real error already
+	// won, so write failures here are intentionally discarded.
+	StoreError(err error)
 	// Close releases renderer resources (a rich renderer flushes its display and
 	// restores terminal state here) and returns any teardown error.
 	Close() error
@@ -99,7 +91,7 @@ func (e *errWriter) printf(format string, a ...any) {
 // Header prints the run-file/cwd block and the optional seeded line, then
 // records the progress denominator for Hooks() and resets the per-task step
 // counter so progress starts at 1.
-func (p *plainRenderer) Header(meta RunMeta) error {
+func (p *plainRenderer) Header(meta runner.RunMeta) error {
 	p.total = meta.Total
 	p.step.Store(0)
 	ew := &errWriter{w: p.w}
@@ -445,6 +437,13 @@ func (p *plainRenderer) Summary(wf *workflow.Workflow, rep *executor.Report, exp
 		ew.printf("✗ workflow %q stopped after %d/%d tasks\n", wf.ID, done, expected)
 	}
 	return ew.err
+}
+
+// StoreError writes a store-layer error on its own indented line. The store is
+// best-effort relative to the run itself, so a failed write is intentionally
+// discarded.
+func (p *plainRenderer) StoreError(err error) {
+	_, _ = fmt.Fprintf(p.w, "  store: %v\n", err)
 }
 
 // distinctTasks counts unique task ids across rep.Tasks. A failed run omits the
