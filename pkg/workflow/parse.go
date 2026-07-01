@@ -58,62 +58,9 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, err
 	}
 
-	// Loops are declared as tasks carrying a loop: (while) or for_each: block:
-	// the wrapper is not an executable task; its id becomes the loop id and its
-	// nested tasks: the members. Split wrappers out of the top-level task set
-	// and collect them as rawLoops for the shared loop-group machinery.
-	var rawLoops []rawLoop
-	topTasks := make([]rawTask, 0, len(raw.Tasks))
-	for _, rt := range raw.Tasks {
-		isLoop := rt.Loop.Kind != 0
-		isForEach := rt.ForEach.Kind != 0
-		isForEachParallel := rt.ForEachParallel.Kind != 0
-		if !isLoop && !isForEach && !isForEachParallel {
-			topTasks = append(topTasks, rt)
-			continue
-		}
-		tid, err := NewTaskID(rt.ID)
-		if err != nil {
-			return nil, err
-		}
-		// loop:, for_each:, and for_each_parallel: are sibling scoped-block
-		// wrappers; a task declaring more than one is ambiguous.
-		var wrappers []string
-		if isLoop {
-			wrappers = append(wrappers, "loop")
-		}
-		if isForEach {
-			wrappers = append(wrappers, "for_each")
-		}
-		if isForEachParallel {
-			wrappers = append(wrappers, "for_each_parallel")
-		}
-		if len(wrappers) > 1 {
-			return nil, &TaskBodyConflictError{Task: tid, Fields: wrappers}
-		}
-		wrapper := wrappers[0]
-		if err := rejectLoopWrapperFields(tid, rt, wrapper); err != nil {
-			return nil, err
-		}
-		rl := rawLoop{id: LoopID(tid), description: rt.Description}
-		switch {
-		case isForEach:
-			rl.kind = LoopForEach
-			if err := decodeForEachBody(&rt.ForEach, &rl); err != nil {
-				return nil, fmt.Errorf("task %q: %w", tid, err)
-			}
-		case isForEachParallel:
-			rl.kind = LoopForEach
-			rl.parallel = true
-			if err := decodeForEachBody(&rt.ForEachParallel, &rl); err != nil {
-				return nil, fmt.Errorf("task %q: %w", tid, err)
-			}
-		default:
-			if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
-				return nil, fmt.Errorf("task %q: %w", tid, err)
-			}
-		}
-		rawLoops = append(rawLoops, rl)
+	topTasks, rawLoops, err := splitLoopWrappers(raw.Tasks)
+	if err != nil {
+		return nil, err
 	}
 
 	// Only a workflow with nothing to run at all is rejected. A loop is an
@@ -161,49 +108,13 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, err
 	}
 
-	// allTasks is the flat union of top-level and every loop's nested tasks, in
-	// declaration order, each tagged with its owning loop ("" for top-level). The
-	// whole parser runs over this list so wf.Tasks ends up flat and ordered, and
-	// existing code over wf.Tasks (Plan, ByID, Effective, the scheduler) is
-	// unchanged by the addition of scoped loops.
-	allTasks := make([]loopTask, 0, len(raw.Tasks))
-	for _, rt := range topTasks {
-		allTasks = append(allTasks, loopTask{rt: rt, loop: ""})
-	}
-	for _, rl := range rawLoops {
-		for _, rt := range rl.tasks {
-			allTasks = append(allTasks, loopTask{rt: rt, loop: rl.id})
-		}
+	allTasks, ids, err := flattenLoopTasks(topTasks, rawLoops)
+	if err != nil {
+		return nil, err
 	}
 
-	// Global task-id uniqueness across top-level and every loop's nested tasks: a
-	// task lives in a single flat namespace regardless of which loop defines it.
-	ids := make(map[TaskID]struct{}, len(allTasks))
-	for _, lt := range allTasks {
-		tid, err := NewTaskID(lt.rt.ID)
-		if err != nil {
-			return nil, err
-		}
-		if _, dup := ids[tid]; dup {
-			return nil, &DuplicateTaskIDError{ID: tid}
-		}
-		ids[tid] = struct{}{}
-	}
-
-	// Loop ids share the global namespace: each must be distinct from every task
-	// id and param name, and unique across loops.
-	seenLoops := make(map[LoopID]struct{}, len(rawLoops))
-	for _, rl := range rawLoops {
-		if _, ok := ids[TaskID(rl.id)]; ok {
-			return nil, &LoopIDCollisionError{Loop: rl.id, Kind: "task"}
-		}
-		if _, ok := paramIdx[ParamName(rl.id)]; ok {
-			return nil, &LoopIDCollisionError{Loop: rl.id, Kind: "param"}
-		}
-		if _, dup := seenLoops[rl.id]; dup {
-			return nil, &DuplicateLoopIDError{Loop: rl.id}
-		}
-		seenLoops[rl.id] = struct{}{}
+	if err := validateLoopNamespace(rawLoops, ids, paramIdx); err != nil {
+		return nil, err
 	}
 
 	loops, memberByLoop, err := buildLoopGroups(rawLoops, ids, paramSet)
@@ -272,6 +183,119 @@ func Parse(data []byte) (*Workflow, error) {
 	}
 
 	return wf, nil
+}
+
+func splitLoopWrappers(rawTasks []rawTask) ([]rawTask, []rawLoop, error) {
+	// Loops are declared as tasks carrying a loop: (while) or for_each: block:
+	// the wrapper is not an executable task; its id becomes the loop id and its
+	// nested tasks: the members. Split wrappers out of the top-level task set
+	// and collect them as rawLoops for the shared loop-group machinery.
+	var rawLoops []rawLoop
+	topTasks := make([]rawTask, 0, len(rawTasks))
+	for _, rt := range rawTasks {
+		isLoop := rt.Loop.Kind != 0
+		isForEach := rt.ForEach.Kind != 0
+		isForEachParallel := rt.ForEachParallel.Kind != 0
+		if !isLoop && !isForEach && !isForEachParallel {
+			topTasks = append(topTasks, rt)
+			continue
+		}
+		tid, err := NewTaskID(rt.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		// loop:, for_each:, and for_each_parallel: are sibling scoped-block
+		// wrappers; a task declaring more than one is ambiguous.
+		var wrappers []string
+		if isLoop {
+			wrappers = append(wrappers, "loop")
+		}
+		if isForEach {
+			wrappers = append(wrappers, "for_each")
+		}
+		if isForEachParallel {
+			wrappers = append(wrappers, "for_each_parallel")
+		}
+		if len(wrappers) > 1 {
+			return nil, nil, &TaskBodyConflictError{Task: tid, Fields: wrappers}
+		}
+		wrapper := wrappers[0]
+		if err := rejectLoopWrapperFields(tid, rt, wrapper); err != nil {
+			return nil, nil, err
+		}
+		rl := rawLoop{id: LoopID(tid), description: rt.Description}
+		switch {
+		case isForEach:
+			rl.kind = LoopForEach
+			if err := decodeForEachBody(&rt.ForEach, &rl); err != nil {
+				return nil, nil, fmt.Errorf("task %q: %w", tid, err)
+			}
+		case isForEachParallel:
+			rl.kind = LoopForEach
+			rl.parallel = true
+			if err := decodeForEachBody(&rt.ForEachParallel, &rl); err != nil {
+				return nil, nil, fmt.Errorf("task %q: %w", tid, err)
+			}
+		default:
+			if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
+				return nil, nil, fmt.Errorf("task %q: %w", tid, err)
+			}
+		}
+		rawLoops = append(rawLoops, rl)
+	}
+	return topTasks, rawLoops, nil
+}
+
+func flattenLoopTasks(topTasks []rawTask, rawLoops []rawLoop) ([]loopTask, map[TaskID]struct{}, error) {
+	// allTasks is the flat union of top-level and every loop's nested tasks, in
+	// declaration order, each tagged with its owning loop ("" for top-level). The
+	// whole parser runs over this list so wf.Tasks ends up flat and ordered, and
+	// existing code over wf.Tasks (Plan, ByID, Effective, the scheduler) is
+	// unchanged by the addition of scoped loops.
+	allTasks := make([]loopTask, 0, len(topTasks)+len(rawLoops))
+	for _, rt := range topTasks {
+		allTasks = append(allTasks, loopTask{rt: rt, loop: ""})
+	}
+	for _, rl := range rawLoops {
+		for _, rt := range rl.tasks {
+			allTasks = append(allTasks, loopTask{rt: rt, loop: rl.id})
+		}
+	}
+
+	// Global task-id uniqueness across top-level and every loop's nested tasks: a
+	// task lives in a single flat namespace regardless of which loop defines it.
+	ids := make(map[TaskID]struct{}, len(allTasks))
+	for _, lt := range allTasks {
+		tid, err := NewTaskID(lt.rt.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, dup := ids[tid]; dup {
+			return nil, nil, &DuplicateTaskIDError{ID: tid}
+		}
+		ids[tid] = struct{}{}
+	}
+
+	return allTasks, ids, nil
+}
+
+func validateLoopNamespace(rawLoops []rawLoop, ids map[TaskID]struct{}, paramIdx map[ParamName]int) error {
+	// Loop ids share the global namespace: each must be distinct from every task
+	// id and param name, and unique across loops.
+	seenLoops := make(map[LoopID]struct{}, len(rawLoops))
+	for _, rl := range rawLoops {
+		if _, ok := ids[TaskID(rl.id)]; ok {
+			return &LoopIDCollisionError{Loop: rl.id, Kind: "task"}
+		}
+		if _, ok := paramIdx[ParamName(rl.id)]; ok {
+			return &LoopIDCollisionError{Loop: rl.id, Kind: "param"}
+		}
+		if _, dup := seenLoops[rl.id]; dup {
+			return &DuplicateLoopIDError{Loop: rl.id}
+		}
+		seenLoops[rl.id] = struct{}{}
+	}
+	return nil
 }
 
 // ValidateRouting checks every LLM task's effective runtime/model/effort against
