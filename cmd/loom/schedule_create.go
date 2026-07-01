@@ -90,8 +90,8 @@ func doScheduleAt(w io.Writer, home, cwd, ref string, o atOpts) error {
 
 // loadAndResolve loads the workflow and resolves its params, returning the
 // CLI-supplied param map (not the defaults) so the daemon resolves fresh
-// against the then-current workflow at fire time. ResolveParams is still called
-// here to reject a missing required param up front.
+// against the then-current workflow at fire time. ResolveAndValidateParams is
+// still called here to reject missing required params and bad routing up front.
 func loadAndResolve(home, cwd, ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
 	wf, _, path, err := workflowload.Load(home, cwd, ref)
 	if err != nil {
@@ -101,11 +101,7 @@ func loadAndResolve(home, cwd, ref string, paramArgs []string) (*workflow.Workfl
 	if err != nil {
 		return nil, "", nil, err
 	}
-	resolved, err := workflow.ResolveParams(wf, cliParams, nil)
-	if err != nil {
-		return nil, "", nil, err
-	}
-	if err := wf.ValidateRoutingWithParams(resolved, false); err != nil {
+	if _, err := workflow.ResolveAndValidateParams(wf, cliParams, nil); err != nil {
 		return nil, "", nil, err
 	}
 	if len(cliParams) == 0 {

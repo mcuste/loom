@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -37,14 +38,13 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 		d.logf("schedule %s: %v", rec.ID, res.err)
 		return
 	}
-	resolved, err := workflow.ResolveParams(wf, rec.Params, nil)
+	resolved, err := workflow.ResolveAndValidateParams(wf, rec.Params, nil)
 	if err != nil {
-		res.err = fmt.Errorf("resolve params: %w", err)
-		d.logf("schedule %s: %v", rec.ID, res.err)
-		return
-	}
-	if err := wf.ValidateRoutingWithParams(resolved, false); err != nil {
-		res.err = fmt.Errorf("validate routing: %w", err)
+		if isParamResolutionError(err) {
+			res.err = fmt.Errorf("resolve params: %w", err)
+		} else {
+			res.err = fmt.Errorf("validate routing: %w", err)
+		}
 		d.logf("schedule %s: %v", rec.ID, res.err)
 		return
 	}
@@ -80,6 +80,19 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	} else {
 		d.logf("schedule %s: run %s complete (log %s)", rec.ID, res.runID, logPath)
 	}
+}
+
+func isParamResolutionError(err error) bool {
+	var missing *workflow.MissingRequiredParamError
+	if errors.As(err, &missing) {
+		return true
+	}
+	var unknownCLI *workflow.UnknownCLIParamError
+	if errors.As(err, &unknownCLI) {
+		return true
+	}
+	var unknownFile *workflow.UnknownFileParamError
+	return errors.As(err, &unknownFile)
 }
 
 // openLog creates (and returns) the per-fire log file under

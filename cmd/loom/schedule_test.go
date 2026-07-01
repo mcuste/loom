@@ -29,6 +29,27 @@ tasks:
     command: echo hi
 `
 
+const requiredParamScheduleWorkflow = `
+name: shellwf
+params:
+  - name: env
+    required: true
+tasks:
+  - id: a
+    command: echo {{params.env}}
+`
+
+const unresolvedRuntimeScheduleWorkflow = `
+name: shellwf
+runtime: "{{params.rt}}"
+model: m1
+params:
+  - name: rt
+tasks:
+  - id: a
+    prompt: hello
+`
+
 func TestScheduleCronCreatesRecord(t *testing.T) {
 	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
@@ -150,6 +171,44 @@ func TestScheduleCronRejectsBadWorkflow(t *testing.T) {
 	out, err := runCLI(t, "schedule", "cron", "/no/such/workflow.yaml", "--expr", "0 15 * * *")
 	if err == nil {
 		t.Fatalf("want error for missing workflow, got nil (%s)", out)
+	}
+}
+
+func TestScheduleCronRejectsMissingRequiredParam(t *testing.T) {
+	home := loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+	path := writeWorkflow(t, requiredParamScheduleWorkflow)
+
+	out, err := runCLI(t, "schedule", "cron", path, "--expr", "0 15 * * *")
+	if err == nil {
+		t.Fatalf("want error for missing required param, got nil (%s)", out)
+	}
+	if !strings.Contains(err.Error(), `param "env": required value not supplied`) {
+		t.Fatalf("error = %q, want missing required param", err.Error())
+	}
+	if recs, listErr := schedule.List(home, ""); listErr != nil {
+		t.Fatalf("List: %v", listErr)
+	} else if len(recs) != 0 {
+		t.Fatalf("got %d schedules, want 0 after rejection", len(recs))
+	}
+}
+
+func TestScheduleCronRejectsBadRouting(t *testing.T) {
+	home := loomHomeForTest(t)
+	chdirTo(t, t.TempDir())
+	path := writeWorkflow(t, unresolvedRuntimeScheduleWorkflow)
+
+	out, err := runCLI(t, "schedule", "cron", path, "--expr", "0 15 * * *")
+	if err == nil {
+		t.Fatalf("want error for bad routing, got nil (%s)", out)
+	}
+	if !strings.Contains(err.Error(), "unknown runtime") {
+		t.Fatalf("error = %q, want routing rejection", err.Error())
+	}
+	if recs, listErr := schedule.List(home, ""); listErr != nil {
+		t.Fatalf("List: %v", listErr)
+	} else if len(recs) != 0 {
+		t.Fatalf("got %d schedules, want 0 after rejection", len(recs))
 	}
 }
 

@@ -222,6 +222,20 @@ func ResolveParams(wf *Workflow, cli, file map[string]string) (ParamValues, erro
 	return out, nil
 }
 
+// ResolveAndValidateParams applies the non-advisory scheduling/execution path:
+// resolve params from defaults, file, and CLI tiers, then validate routing
+// against the fully resolved bag.
+func ResolveAndValidateParams(wf *Workflow, cli, file map[string]string) (ParamValues, error) {
+	out, err := ResolveParams(wf, cli, file)
+	if err != nil {
+		return nil, err
+	}
+	if err := wf.ValidateRoutingWithParams(out, false); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ParseParamArgs decodes a slice of `key=val` strings (as collected from
 // repeated `-p` flags) into a map. The first `=` is the separator; subsequent
 // `=` characters are kept in the value verbatim. Empty values (`key=`) are

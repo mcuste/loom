@@ -2,9 +2,11 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -23,6 +25,15 @@ func releaseChild() *workflow.Workflow {
 		Tasks: []workflow.Task{
 			{ID: "build", Prompt: "build {{params.version}}"},
 			{ID: "publish", Prompt: "publish {{build}}", DependsOn: []workflow.TaskID{"build"}},
+		},
+	}
+}
+
+func childMissingRuntime() *workflow.Workflow {
+	return &workflow.Workflow{
+		ID: "release",
+		Tasks: []workflow.Task{
+			{ID: "build", Prompt: "build"},
 		},
 	}
 }
@@ -219,5 +230,57 @@ func TestRunSubWorkflowBindsLoopVarInWithValues(t *testing.T) {
 	// must have been spliced into the with-value before reaching the child.
 	if rep.Outputs["cut"] != "publish build 2.0.0" {
 		t.Errorf("Outputs[cut] = %q, want %q (loop var bound into with-value)", rep.Outputs["cut"], "publish build 2.0.0")
+	}
+}
+
+// TestRunSubWorkflowRejectsMissingRequiredParam pins the child param-resolution
+// failure path: the parent dispatch must surface the child's missing required
+// param before any child task runs.
+func TestRunSubWorkflowRejectsMissingRequiredParam(t *testing.T) {
+	child := releaseChild()
+	parent := &workflow.Workflow{
+		ID:      "parent",
+		Runtime: "exec-echo",
+		Model:   "m1",
+		Tasks: []workflow.Task{
+			{ID: "cut", Workflow: "release"},
+		},
+		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
+	}
+
+	_, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{})
+	if err == nil {
+		t.Fatal("Run returned nil error; want missing required child param failure")
+	}
+	var miss *workflow.MissingRequiredParamError
+	if !errors.As(err, &miss) {
+		t.Fatalf("errors.As MissingRequiredParamError failed; err = %v", err)
+	}
+	if miss.Name != "version" {
+		t.Fatalf("MissingRequiredParamError.Name = %q, want version", miss.Name)
+	}
+}
+
+// TestRunSubWorkflowRejectsBadRouting pins the child routing-validation
+// failure path: the parent dispatch must surface the child's missing runtime
+// before any child task runs.
+func TestRunSubWorkflowRejectsBadRouting(t *testing.T) {
+	child := childMissingRuntime()
+	parent := &workflow.Workflow{
+		ID:      "parent",
+		Runtime: "exec-echo",
+		Model:   "m1",
+		Tasks: []workflow.Task{
+			{ID: "cut", Workflow: "release"},
+		},
+		Subs: map[workflow.TaskID]*workflow.Workflow{"cut": child},
+	}
+
+	_, err := executor.Run(context.Background(), parent, executor.Hooks{}, executor.Options{})
+	if err == nil {
+		t.Fatal("Run returned nil error; want child routing-validation failure")
+	}
+	if !errors.Is(err, runtime.ErrMissingRuntime) {
+		t.Fatalf("err = %v, want missing runtime", err)
 	}
 }

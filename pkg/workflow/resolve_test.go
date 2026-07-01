@@ -324,6 +324,42 @@ func TestResolveEmptyValueSatisfiesRequired(t *testing.T) {
 	}
 }
 
+func TestResolveAndValidateParams(t *testing.T) {
+	wf := &workflow.Workflow{
+		ID:      "wf",
+		Runtime: "test-rt",
+		Model:   "m1",
+		Params: []workflow.Param{
+			{Name: "env", Default: "dev", HasDefault: true},
+		},
+		Tasks: []workflow.Task{
+			{ID: "a", Prompt: "hello"},
+		},
+	}
+
+	got, err := workflow.ResolveAndValidateParams(wf, nil, nil)
+	if err != nil {
+		t.Fatalf("ResolveAndValidateParams: %v", err)
+	}
+	if got["env"] != "dev" {
+		t.Fatalf("got[env] = %q, want dev", got["env"])
+	}
+}
+
+func TestResolveAndValidateParamsRejectsBadRouting(t *testing.T) {
+	wf := &workflow.Workflow{
+		ID: "wf",
+		Tasks: []workflow.Task{
+			{ID: "a", Prompt: "hello"},
+		},
+	}
+
+	_, err := workflow.ResolveAndValidateParams(wf, nil, nil)
+	if !errors.Is(err, runtime.ErrMissingRuntime) {
+		t.Fatalf("err = %v, want missing runtime", err)
+	}
+}
+
 func TestParseParamArgsHappy(t *testing.T) {
 	got, err := workflow.ParseParamArgs([]string{"env=prod", "url=https://x/y=z"})
 	if err != nil {

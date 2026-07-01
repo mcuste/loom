@@ -33,11 +33,8 @@ func dispatchSubWorkflow(ctx context.Context, wf *workflow.Workflow, t *workflow
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 		start := time.Now()
-		cp, err := workflow.ResolveParams(child, vals, nil)
+		cp, err := workflow.ResolveAndValidateParams(child, vals, nil)
 		if err != nil {
-			return TaskResult{TaskID: t.ID}, err
-		}
-		if err := child.ValidateRoutingWithParams(cp, false); err != nil {
 			return TaskResult{TaskID: t.ID}, err
 		}
 		childRep, err := Run(ctx, child, Hooks{}, Options{
