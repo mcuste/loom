@@ -12,21 +12,33 @@ type interpreter struct {
 	program *program
 	hooks   Hooks
 	opts    Options
+	trace   traceSink
 }
 
 func newInterpreter(p *program, hooks Hooks, opts Options) *interpreter {
+	return newInterpreterWithTrace(p, hooks, opts, nil)
+}
+
+func newInterpreterWithTrace(p *program, hooks Hooks, opts Options, trace traceSink) *interpreter {
 	return &interpreter{
 		program: p,
 		hooks:   hooks,
 		opts:    opts,
+		trace:   trace,
 	}
 }
 
 func (i *interpreter) run(ctx context.Context, st *frame) error {
+	if i.trace != nil {
+		i.trace.ProgramStart(i.program)
+	}
 	g, gctx := errgroup.WithContext(ctx)
 	for _, scheduled := range i.program.units {
 		u := scheduled
 		g.Go(func() error {
+			if i.trace != nil {
+				i.trace.UnitStart(u)
+			}
 			return u.run(gctx, i, st)
 		})
 	}
@@ -64,18 +76,33 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 		return fmt.Errorf("compiled node missing")
 	}
 	t := n.task
+	if i.trace != nil {
+		i.trace.NodeStart(n)
+	}
+	var (
+		traceRes TaskResult
+		traceErr error
+	)
+	defer func() {
+		if i.trace != nil {
+			i.trace.NodeFinish(n, traceRes, traceErr)
+		}
+	}()
 	baseDelay := i.retryBaseDelay()
 
 	if err := st.waitDeps(ctx, n.deps); err != nil {
+		traceErr = err
 		return err
 	}
 
 	if t.Cond != nil {
 		run, err := st.evalWhen(t)
 		if err != nil {
-			return fmt.Errorf("task %q: when: %w", t.ID, err)
+			traceErr = fmt.Errorf("task %q: when: %w", t.ID, err)
+			return traceErr
 		}
 		if !run {
+			traceRes = TaskResult{TaskID: t.ID, Status: StatusSkipped, Iteration: st.iteration}
 			st.recordSkip(t, i.hooks)
 			return nil
 		}
@@ -84,6 +111,7 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 	if i.program.wf.Budget != nil {
 		release, err := st.admitBudget(ctx, i.program.wf)
 		if err != nil {
+			traceErr = err
 			return err
 		}
 		defer release()
@@ -91,6 +119,7 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 
 	res, runErr, fatal := n.op.eval(ctx, i, st, n, baseDelay)
 	if fatal != nil {
+		traceErr = fatal
 		return fatal
 	}
 
@@ -99,10 +128,14 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 		i.hooks.OnFinish(*t, st.iteration, res, runErr)
 	}
 	if runErr != nil {
-		return fmt.Errorf("task %q: %w", t.ID, runErr)
+		traceRes = res
+		traceErr = fmt.Errorf("task %q: %w", t.ID, runErr)
+		return traceErr
 	}
 
+	res.Status = StatusOK
 	st.recordResult(t, res)
+	traceRes = res
 	return nil
 }
 

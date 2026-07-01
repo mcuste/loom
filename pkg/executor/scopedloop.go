@@ -172,9 +172,20 @@ func (i *interpreter) runLoopMembers(ctx context.Context, st *frame, lp *loopPro
 // race; a downstream task that needs a specific element must reference that
 // element, not the loop member.
 func (i *interpreter) runParallelPass(ctx context.Context, st *frame, lp *loopProgram, iter int, loopVar, loopVal string) error {
+	if i.trace != nil {
+		i.trace.LoopPassStart(lp, iter)
+	}
+	var traceErr error
+	defer func() {
+		if i.trace != nil {
+			i.trace.LoopPassFinish(lp, iter, traceErr)
+		}
+	}()
+
 	innerGates := lp.buildInnerGates(st.gates)
 	inner := st.childForParallelPass(innerGates, iter, loopVar, loopVal)
 	if err := i.runLoopMembers(ctx, inner, lp); err != nil {
+		traceErr = err
 		return err
 	}
 
@@ -193,9 +204,20 @@ func (i *interpreter) runParallelPass(ctx context.Context, st *frame, lp *loopPr
 // check and become the next pass's prev. loopVar/loopVal bind a for_each
 // iteration variable ("" for a while loop).
 func (i *interpreter) runLoopPass(ctx context.Context, st *frame, lp *loopProgram, prev map[workflow.TaskID]string, iter int, loopVar, loopVal string) (map[workflow.TaskID]string, error) {
+	if i.trace != nil {
+		i.trace.LoopPassStart(lp, iter)
+	}
+	var traceErr error
+	defer func() {
+		if i.trace != nil {
+			i.trace.LoopPassFinish(lp, iter, traceErr)
+		}
+	}()
+
 	innerGates := lp.buildInnerGates(st.gates)
 	inner := st.childForLoopPass(innerGates, prev, iter, loopVar, loopVal)
 	if err := i.runLoopMembers(ctx, inner, lp); err != nil {
+		traceErr = err
 		return nil, err
 	}
 
