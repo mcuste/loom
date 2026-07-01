@@ -135,6 +135,86 @@ func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
 	}
 }
 
+func TestCompileProgramBuildsLoopMetadata(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Tasks: []workflow.Task{
+			{ID: "seed"},
+			{ID: "outside"},
+			{ID: "member_a", DependsOn: []workflow.TaskID{"seed"}},
+			{ID: "member_b", DependsOn: []workflow.TaskID{"member_a"}},
+			{ID: "member_c", DependsOn: []workflow.TaskID{"member_b", "outside"}},
+		},
+		Loops: []workflow.LoopGroup{
+			{ID: "loop", Members: []workflow.TaskID{"member_a", "member_b", "member_c"}},
+		},
+	}
+
+	prog := compileProgram(wf)
+
+	if len(prog.loops) != 1 {
+		t.Fatalf("loop count = %d, want 1", len(prog.loops))
+	}
+	lp := prog.loops[0]
+	if lp == nil {
+		t.Fatal("loops[0] = nil")
+	}
+	if lp.group != &wf.Loops[0] {
+		t.Fatalf("loops[0].group = %p, want %p", lp.group, &wf.Loops[0])
+	}
+	assertTaskIDs(t, lp.members, []workflow.TaskID{"member_a", "member_b", "member_c"})
+	assertTaskIDSet(t, lp.memberSet, []workflow.TaskID{"member_a", "member_b", "member_c"})
+	assertTaskIDSet(t, lp.entryDeps, []workflow.TaskID{"seed", "outside"})
+}
+
+func TestCompileProgramBuildsForEachListSourceEntryDep(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Tasks: []workflow.Task{
+			{ID: "discover"},
+			{ID: "seed"},
+			{ID: "handle", DependsOn: []workflow.TaskID{"seed"}},
+		},
+		Loops: []workflow.LoopGroup{
+			{
+				ID:         "fan",
+				Kind:       workflow.LoopForEach,
+				ListSource: "{{discover}}",
+				As:         "item",
+				Members:    []workflow.TaskID{"handle"},
+			},
+		},
+	}
+
+	prog := compileProgram(wf)
+
+	if len(prog.loops) != 1 {
+		t.Fatalf("loop count = %d, want 1", len(prog.loops))
+	}
+	assertTaskIDSet(t, prog.loops[0].entryDeps, []workflow.TaskID{"discover", "seed"})
+}
+
+func TestCompileProgramClonesLoopMembers(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Tasks: []workflow.Task{
+			{ID: "member_a"},
+			{ID: "member_b"},
+		},
+		Loops: []workflow.LoopGroup{
+			{ID: "loop", Members: []workflow.TaskID{"member_a", "member_b"}},
+		},
+	}
+
+	prog := compileProgram(wf)
+	wf.Loops[0].Members[0] = "mutated"
+
+	assertTaskIDs(t, prog.loops[0].members, []workflow.TaskID{"member_a", "member_b"})
+}
+
 func TestCompileProgramBuildsIndependentNodeDeps(t *testing.T) {
 	t.Parallel()
 
@@ -229,6 +309,32 @@ func assertUnitKinds(t *testing.T, units []unit, want []string) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("units[%d] = %q, want %q; full=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func assertTaskIDs(t *testing.T, got []workflow.TaskID, want []workflow.TaskID) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("task id count = %d, want %d; got %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("task ids[%d] = %q, want %q; full=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func assertTaskIDSet(t *testing.T, got map[workflow.TaskID]bool, want []workflow.TaskID) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("task id set size = %d, want %d; got %v", len(got), len(want), got)
+	}
+	for _, id := range want {
+		if !got[id] {
+			t.Fatalf("task id set missing %q; got %v", id, got)
 		}
 	}
 }

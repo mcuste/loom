@@ -3,13 +3,15 @@ package executor
 import "github.com/mcuste/loom/pkg/workflow"
 
 func compileProgram(wf *workflow.Workflow) *program {
+	loops := compileLoops(wf)
 	p := &program{
 		wf:       wf,
 		order:    wf.Plan(),
 		nodes:    compileNodes(wf),
-		memberOf: buildMemberOf(wf),
+		loops:    loops,
+		memberOf: buildMemberOf(loops),
 	}
-	p.units = compileUnits(wf, p.order, p.memberOf)
+	p.units = compileUnits(p.order, p.memberOf, p.loops)
 	return p
 }
 
@@ -27,19 +29,27 @@ func compileNodes(wf *workflow.Workflow) map[workflow.TaskID]*node {
 	return nodes
 }
 
-func buildMemberOf(wf *workflow.Workflow) map[workflow.TaskID]int {
-	memberOf := make(map[workflow.TaskID]int)
+func compileLoops(wf *workflow.Workflow) []*loopProgram {
+	loops := make([]*loopProgram, 0, len(wf.Loops))
 	for i := range wf.Loops {
-		for _, member := range wf.Loops[i].Members {
+		loops = append(loops, compileLoop(wf, &wf.Loops[i]))
+	}
+	return loops
+}
+
+func buildMemberOf(loops []*loopProgram) map[workflow.TaskID]int {
+	memberOf := make(map[workflow.TaskID]int)
+	for i, loop := range loops {
+		for _, member := range loop.members {
 			memberOf[member] = i
 		}
 	}
 	return memberOf
 }
 
-func compileUnits(wf *workflow.Workflow, order []workflow.TaskID, memberOf map[workflow.TaskID]int) []unit {
-	units := make([]unit, 0, len(wf.Loops)+len(order))
-	for i := range wf.Loops {
+func compileUnits(order []workflow.TaskID, memberOf map[workflow.TaskID]int, loops []*loopProgram) []unit {
+	units := make([]unit, 0, len(loops)+len(order))
+	for i := range loops {
 		units = append(units, loopUnit{index: i})
 	}
 	for _, id := range order {

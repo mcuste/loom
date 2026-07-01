@@ -12,6 +12,7 @@ type program struct {
 	wf       *workflow.Workflow
 	order    []workflow.TaskID
 	nodes    map[workflow.TaskID]*node
+	loops    []*loopProgram
 	units    []unit
 	memberOf map[workflow.TaskID]int
 }

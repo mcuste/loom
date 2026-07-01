@@ -11,12 +11,10 @@ import (
 )
 
 type loopRunner struct {
-	ctx       context.Context
-	interp    *interpreter
-	wf        *workflow.Workflow
-	lg        *workflow.LoopGroup
-	st        *runState
-	entryDeps map[workflow.TaskID]bool
+	ctx    context.Context
+	interp *interpreter
+	lp     *loopProgram
+	st     *frame
 }
 
 // runLoop drives one scoped loop: the synthetic node that stands in for the
@@ -45,31 +43,14 @@ type loopRunner struct {
 // thereafter, silently yielding empty output. Status-helper guards over body
 // members are evaluated against this monotonically accumulating state, not a
 // per-iteration snapshot.
-func runLoop(ctx context.Context, i *interpreter, lg *workflow.LoopGroup, st *runState) error {
-	wf := i.program.wf
-	memberSet := make(map[workflow.TaskID]bool, len(lg.Members))
-	for _, m := range lg.Members {
-		memberSet[m] = true
-	}
+func runLoop(ctx context.Context, i *interpreter, lp *loopProgram, st *frame) error {
+	lg := lp.group
 
-	// Entry dependencies: the union of member dependencies that point outside
-	// the loop, plus a dynamic for_each list-source task. The synthetic node
-	// depends on all of them, so block until each has resolved before the first
-	// iteration runs (and before the for_each list is resolved).
-	entryDeps := make(map[workflow.TaskID]bool)
-	for _, m := range lg.Members {
-		for _, dep := range wf.ByID(m).DependsOn {
-			if !memberSet[dep] {
-				entryDeps[dep] = true
-			}
-		}
-	}
-	if lg.Kind == workflow.LoopForEach {
-		if ref, ok := workflow.ListSourceTaskRef(lg.ListSource); ok && !memberSet[ref] {
-			entryDeps[ref] = true
-		}
-	}
-	for dep := range entryDeps {
+	// Entry dependencies are compiled once from member dependencies plus any
+	// external dynamic for_each list source. The synthetic loop node depends on
+	// all of them, so block until each has resolved before the first iteration
+	// runs and before a dynamic list is resolved.
+	for dep := range lp.entryDeps {
 		select {
 		case <-st.gates[dep]:
 		case <-ctx.Done():
@@ -78,12 +59,10 @@ func runLoop(ctx context.Context, i *interpreter, lg *workflow.LoopGroup, st *ru
 	}
 
 	lr := loopRunner{
-		ctx:       ctx,
-		interp:    i,
-		wf:        wf,
-		lg:        lg,
-		st:        st,
-		entryDeps: entryDeps,
+		ctx:    ctx,
+		interp: i,
+		lp:     lp,
+		st:     st,
 	}
 
 	var err error
@@ -101,7 +80,7 @@ func runLoop(ctx context.Context, i *interpreter, lg *workflow.LoopGroup, st *ru
 
 	// The final pass's outputs are already in the shared outputs map; closing
 	// each member's outer gate releases exit consumers to read those values.
-	for _, m := range lg.Members {
+	for _, m := range lp.members {
 		close(st.gates[m])
 	}
 	return nil
@@ -111,7 +90,7 @@ func runLoop(ctx context.Context, i *interpreter, lg *workflow.LoopGroup, st *ru
 // Max cap is hit, threading each pass's outputs forward as the next pass's prev.
 func (lr loopRunner) runWhileLoop() error {
 	var prev map[workflow.TaskID]string
-	for iter := 1; iter <= lr.lg.Max; iter++ {
+	for iter := 1; iter <= lr.lp.group.Max; iter++ {
 		passOutputs, err := lr.runLoopPass(prev, iter, "", "")
 		if err != nil {
 			return err
@@ -120,7 +99,7 @@ func (lr loopRunner) runWhileLoop() error {
 		converged, err := lr.loopConverged()
 		lr.st.mu.Unlock()
 		if err != nil {
-			return fmt.Errorf("loop %q: convergence check: %w", lr.lg.ID, err)
+			return fmt.Errorf("loop %q: convergence check: %w", lr.lp.group.ID, err)
 		}
 		if converged {
 			break
@@ -133,11 +112,11 @@ func (lr loopRunner) runWhileLoop() error {
 // forEachList resolves a for_each loop's element list: the static List as-is, or
 // parseList of the substituted ListSource for a dynamic source.
 func (lr loopRunner) forEachList() []string {
-	if lr.lg.ListSource == "" {
-		return lr.lg.List
+	if lr.lp.group.ListSource == "" {
+		return lr.lp.group.List
 	}
 	lr.st.mu.Lock()
-	resolved := workflow.Substitute(lr.lg.ListSource, lr.st.scope.outputs, lr.interp.opts.Params, lr.interp.opts.State, nil, lr.st.scope.exitCodes)
+	resolved := workflow.Substitute(lr.lp.group.ListSource, lr.st.scope.outputs, lr.interp.opts.Params, lr.interp.opts.State, nil, lr.st.scope.exitCodes)
 	lr.st.mu.Unlock()
 	return parseList(resolved)
 }
@@ -149,7 +128,7 @@ func (lr loopRunner) runForEachLoop() error {
 	list := lr.forEachList()
 	var prev map[workflow.TaskID]string
 	for i := range list {
-		passOutputs, err := lr.runLoopPass(prev, i+1, lr.lg.As, list[i])
+		passOutputs, err := lr.runLoopPass(prev, i+1, lr.lp.group.As, list[i])
 		if err != nil {
 			return err
 		}
@@ -170,7 +149,7 @@ func (lr loopRunner) runForEachParallel() error {
 	for i := range list {
 		iter, val := i+1, list[i]
 		pg.Go(func() error {
-			return lr.runParallelPass(pgctx, iter, lr.lg.As, val)
+			return lr.runParallelPass(pgctx, iter, lr.lp.group.As, val)
 		})
 	}
 	return pg.Wait()
@@ -181,11 +160,11 @@ func (lr loopRunner) runForEachParallel() error {
 // same map, so inner runState instances can satisfy both member and external
 // waits without any additional coordination.
 func (lr loopRunner) buildInnerGates() map[workflow.TaskID]chan struct{} {
-	innerGates := make(map[workflow.TaskID]chan struct{}, len(lr.lg.Members)+len(lr.entryDeps))
-	for _, m := range lr.lg.Members {
+	innerGates := make(map[workflow.TaskID]chan struct{}, len(lr.lp.members)+len(lr.lp.entryDeps))
+	for _, m := range lr.lp.members {
 		innerGates[m] = make(chan struct{})
 	}
-	for dep := range lr.entryDeps {
+	for dep := range lr.lp.entryDeps {
 		innerGates[dep] = lr.st.gates[dep]
 	}
 	return innerGates
@@ -196,7 +175,7 @@ func (lr loopRunner) buildInnerGates() map[workflow.TaskID]chan struct{} {
 // rest via the errgroup context.
 func (lr loopRunner) runMembers(ctx context.Context, inner *runState) error {
 	ig, igctx := errgroup.WithContext(ctx)
-	for _, m := range lr.lg.Members {
+	for _, m := range lr.lp.members {
 		id := m
 		ig.Go(func() error {
 			n := lr.interp.program.nodes[id]
@@ -232,7 +211,7 @@ func (lr loopRunner) runParallelPass(ctx context.Context, iter int, loopVar, loo
 	}
 
 	lr.st.mu.Lock()
-	lr.st.scope.mergeParallelLocked(lr.lg.Members, inner.scope)
+	lr.st.scope.mergeParallelLocked(lr.lp.members, inner.scope)
 	lr.st.mu.Unlock()
 	return nil
 }
@@ -252,7 +231,7 @@ func (lr loopRunner) runLoopPass(prev map[workflow.TaskID]string, iter int, loop
 	}
 
 	lr.st.mu.Lock()
-	passOutputs := lr.st.scope.passOutputsLocked(lr.lg.Members)
+	passOutputs := lr.st.scope.passOutputsLocked(lr.lp.members)
 	lr.st.mu.Unlock()
 	return passOutputs, nil
 }
@@ -262,9 +241,9 @@ func (lr loopRunner) runLoopPass(prev map[workflow.TaskID]string, iter int, loop
 // empty; for an until loop the compiled condition is evaluated over the current
 // member outputs. The caller holds st.mu.
 func (lr loopRunner) loopConverged() (bool, error) {
-	if lr.lg.Cond == nil {
-		return strings.TrimSpace(lr.st.scope.outputs[lr.lg.UntilEmpty]) == "", nil
+	if lr.lp.group.Cond == nil {
+		return strings.TrimSpace(lr.st.scope.outputs[lr.lp.group.UntilEmpty]) == "", nil
 	}
 	env := lr.st.scope.toEnvLocked()
-	return lr.lg.Cond.Eval(env)
+	return lr.lp.group.Cond.Eval(env)
 }

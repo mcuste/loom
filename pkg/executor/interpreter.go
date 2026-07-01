@@ -45,7 +45,10 @@ func (u taskUnit) run(ctx context.Context, i *interpreter, st *frame) error {
 }
 
 func (u loopUnit) run(ctx context.Context, i *interpreter, st *frame) error {
-	return runLoop(ctx, i, &i.program.wf.Loops[u.index], st)
+	if u.index < 0 || u.index >= len(i.program.loops) {
+		return fmt.Errorf("loop %d: compiled loop missing", u.index)
+	}
+	return i.evalLoop(ctx, st, i.program.loops[u.index])
 }
 
 func (i *interpreter) retryBaseDelay() time.Duration {
@@ -101,4 +104,11 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 
 	st.recordResult(t, res)
 	return nil
+}
+
+func (i *interpreter) evalLoop(ctx context.Context, st *frame, lp *loopProgram) error {
+	if lp == nil || lp.group == nil {
+		return fmt.Errorf("compiled loop missing")
+	}
+	return runLoop(ctx, i, lp, st)
 }
