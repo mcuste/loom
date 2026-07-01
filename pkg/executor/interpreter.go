@@ -20,7 +20,7 @@ func newInterpreter(p *program, hooks Hooks, opts Options) *interpreter {
 	}
 }
 
-func (i *interpreter) run(ctx context.Context, st *runState) error {
+func (i *interpreter) run(ctx context.Context, st *frame) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, scheduled := range i.program.units {
 		u := scheduled
@@ -31,7 +31,7 @@ func (i *interpreter) run(ctx context.Context, st *runState) error {
 	return g.Wait()
 }
 
-func (u taskUnit) run(ctx context.Context, i *interpreter, st *runState) error {
+func (u taskUnit) run(ctx context.Context, i *interpreter, st *frame) error {
 	if _, seeded := i.opts.Seed[u.id]; seeded {
 		return nil
 	}
@@ -39,7 +39,7 @@ func (u taskUnit) run(ctx context.Context, i *interpreter, st *runState) error {
 	return runTask(ctx, i.program.wf, t, st, i.hooks, i.opts)
 }
 
-func (u loopUnit) run(ctx context.Context, i *interpreter, st *runState) error {
+func (u loopUnit) run(ctx context.Context, i *interpreter, st *frame) error {
 	lg := &i.program.wf.Loops[u.index]
 	return runLoop(ctx, i.program.wf, lg, st, i.hooks, i.opts)
 }

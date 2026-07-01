@@ -18,7 +18,7 @@ type program struct {
 // unit is one schedulable top-level item in a compiled program. Loop members
 // are intentionally not top-level units: their owning loop unit drives them.
 type unit interface {
-	run(context.Context, *interpreter, *runState) error
+	run(context.Context, *interpreter, *frame) error
 }
 
 // taskUnit is one top-level task scheduled directly by the executor.

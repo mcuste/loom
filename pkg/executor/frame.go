@@ -6,6 +6,15 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
+// frame is the interpreter's current execution scope. Phase 5 keeps it as an
+// alias for runState so new interpreter-facing code can adopt the target
+// vocabulary without renaming stable call sites yet.
+type frame = runState
+
+// store is the current frame's output/disposition state. It remains an alias
+// for scopeState until a later phase makes the rename concrete.
+type store = scopeState
+
 func newReport(order []workflow.TaskID, opts Options) *Report {
 	return &Report{
 		Tasks:   make([]TaskResult, 0, len(order)),
@@ -14,7 +23,7 @@ func newReport(order []workflow.TaskID, opts Options) *Report {
 	}
 }
 
-func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, opts Options) *runState {
+func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, opts Options) *frame {
 	gates := make(map[workflow.TaskID]chan struct{}, len(order))
 	for _, tid := range order {
 		gates[tid] = make(chan struct{})
@@ -41,10 +50,10 @@ func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, o
 		workDir = wf.WorkingDir
 	}
 
-	return &runState{
+	return &frame{
 		runShared: &runShared{
 			rep: rep,
-			scope: scopeState{
+			scope: store{
 				outputs:   rep.Outputs,
 				succeeded: succeeded,
 				skipped:   skipped,

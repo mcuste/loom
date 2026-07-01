@@ -7,10 +7,11 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// scopeState bundles the four run-scope maps that are always cloned and merged
-// together: outputs, succeeded, skipped, and exitCodes. Grouping them into one
-// value eliminates the lockstep quad-clone in forParallelIteration and the
-// duplicate workflow.Env construction in evalWhen and loopConverged.
+// scopeState is the current frame store: the four run-scope maps that are
+// always cloned and merged together: outputs, succeeded, skipped, and
+// exitCodes. Grouping them into one value eliminates the lockstep quad-clone
+// in forParallelIteration and the duplicate workflow.Env construction in
+// evalWhen and loopConverged.
 type scopeState struct {
 	outputs   map[workflow.TaskID]string
 	succeeded map[workflow.TaskID]bool

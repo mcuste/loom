@@ -26,8 +26,9 @@ func bindLoopVar(body string, st *runState) string {
 // Every field is read or written under mu, except workDir (immutable after init).
 type runShared struct {
 	rep *Report
-	// scope bundles the four run-scope maps (outputs, succeeded, skipped,
-	// exitCodes) that are always cloned and merged together. outputs aliases
+	// scope is the current frame store: the four run-scope maps (outputs,
+	// succeeded, skipped, exitCodes) that are always cloned and merged together.
+	// outputs aliases
 	// rep.Outputs for the top-level schedule, sequential loops, and while loops,
 	// so those paths publish straight into the report. A parallel for_each
 	// iteration swaps in a private copy (seeded from a snapshot of the shared
@@ -68,9 +69,10 @@ type loopCtx struct {
 	loopVal string
 }
 
-// runState combines a pointer to the shared run invariants with the per-pass
-// context. Embedding both gives runTask and its helpers direct field access
-// (st.mu, st.scope, st.gates, st.iteration) without changing call sites.
+// runState is the current interpreter frame. It combines a pointer to the
+// shared run invariants with the per-pass context so runTask and its helpers
+// get direct field access (st.mu, st.scope, st.gates, st.iteration) without
+// changing stable call sites.
 type runState struct {
 	*runShared
 	loopCtx

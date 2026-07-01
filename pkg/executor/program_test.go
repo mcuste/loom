@@ -32,6 +32,6 @@ func TestProgramPhaseOneSkeleton(t *testing.T) {
 
 type skeletonUnit struct{}
 
-func (skeletonUnit) run(context.Context, *interpreter, *runState) error {
+func (skeletonUnit) run(context.Context, *interpreter, *frame) error {
 	return nil
 }
