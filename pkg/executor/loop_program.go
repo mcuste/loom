@@ -40,3 +40,18 @@ func compileLoop(wf *workflow.Workflow, lg *workflow.LoopGroup) *loopProgram {
 	}
 	return lp
 }
+
+// buildInnerGates allocates a fresh gate channel for each loop member and
+// aliases the already-closed outer gates for each entry dependency into the
+// same map, so inner frames can satisfy both member and external waits without
+// any additional coordination.
+func (lp *loopProgram) buildInnerGates(outer map[workflow.TaskID]chan struct{}) map[workflow.TaskID]chan struct{} {
+	innerGates := make(map[workflow.TaskID]chan struct{}, len(lp.members)+len(lp.entryDeps))
+	for _, m := range lp.members {
+		innerGates[m] = make(chan struct{})
+	}
+	for dep := range lp.entryDeps {
+		innerGates[dep] = outer[dep]
+	}
+	return innerGates
+}

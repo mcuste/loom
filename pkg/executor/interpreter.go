@@ -110,5 +110,5 @@ func (i *interpreter) evalLoop(ctx context.Context, st *frame, lp *loopProgram) 
 	if lp == nil || lp.group == nil {
 		return fmt.Errorf("compiled loop missing")
 	}
-	return runLoop(ctx, i, lp, st)
+	return i.runLoop(ctx, st, lp)
 }

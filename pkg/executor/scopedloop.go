@@ -10,13 +10,6 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-type loopRunner struct {
-	ctx    context.Context
-	interp *interpreter
-	lp     *loopProgram
-	st     *frame
-}
-
 // runLoop drives one scoped loop: the synthetic node that stands in for the
 // loop's body in the outer schedule. It first waits for the body's external
 // (entry) dependencies to resolve, then runs the body sub-DAG iteratively: a
@@ -43,7 +36,7 @@ type loopRunner struct {
 // thereafter, silently yielding empty output. Status-helper guards over body
 // members are evaluated against this monotonically accumulating state, not a
 // per-iteration snapshot.
-func runLoop(ctx context.Context, i *interpreter, lp *loopProgram, st *frame) error {
+func (i *interpreter) runLoop(ctx context.Context, st *frame, lp *loopProgram) error {
 	lg := lp.group
 
 	// Entry dependencies are compiled once from member dependencies plus any
@@ -58,21 +51,14 @@ func runLoop(ctx context.Context, i *interpreter, lp *loopProgram, st *frame) er
 		}
 	}
 
-	lr := loopRunner{
-		ctx:    ctx,
-		interp: i,
-		lp:     lp,
-		st:     st,
-	}
-
 	var err error
 	switch {
 	case lg.Kind == workflow.LoopForEach && lg.Parallel:
-		err = lr.runForEachParallel()
+		err = i.runForEachParallel(ctx, st, lp)
 	case lg.Kind == workflow.LoopForEach:
-		err = lr.runForEachLoop()
+		err = i.runForEachLoop(ctx, st, lp)
 	default:
-		err = lr.runWhileLoop()
+		err = i.runWhileLoop(ctx, st, lp)
 	}
 	if err != nil {
 		return err
@@ -88,18 +74,18 @@ func runLoop(ctx context.Context, i *interpreter, lp *loopProgram, st *frame) er
 
 // runWhileLoop runs a LoopWhile body until its convergence check passes or the
 // Max cap is hit, threading each pass's outputs forward as the next pass's prev.
-func (lr loopRunner) runWhileLoop() error {
+func (i *interpreter) runWhileLoop(ctx context.Context, st *frame, lp *loopProgram) error {
 	var prev map[workflow.TaskID]string
-	for iter := 1; iter <= lr.lp.group.Max; iter++ {
-		passOutputs, err := lr.runLoopPass(prev, iter, "", "")
+	for iter := 1; iter <= lp.group.Max; iter++ {
+		passOutputs, err := i.runLoopPass(ctx, st, lp, prev, iter, "", "")
 		if err != nil {
 			return err
 		}
-		lr.st.mu.Lock()
-		converged, err := lr.loopConverged()
-		lr.st.mu.Unlock()
+		st.mu.Lock()
+		converged, err := i.loopConverged(st, lp)
+		st.mu.Unlock()
 		if err != nil {
-			return fmt.Errorf("loop %q: convergence check: %w", lr.lp.group.ID, err)
+			return fmt.Errorf("loop %q: convergence check: %w", lp.group.ID, err)
 		}
 		if converged {
 			break
@@ -111,24 +97,24 @@ func (lr loopRunner) runWhileLoop() error {
 
 // forEachList resolves a for_each loop's element list: the static List as-is, or
 // parseList of the substituted ListSource for a dynamic source.
-func (lr loopRunner) forEachList() []string {
-	if lr.lp.group.ListSource == "" {
-		return lr.lp.group.List
+func (i *interpreter) forEachList(st *frame, lp *loopProgram) []string {
+	if lp.group.ListSource == "" {
+		return lp.group.List
 	}
-	lr.st.mu.Lock()
-	resolved := workflow.Substitute(lr.lp.group.ListSource, lr.st.scope.outputs, lr.interp.opts.Params, lr.interp.opts.State, nil, lr.st.scope.exitCodes)
-	lr.st.mu.Unlock()
+	st.mu.Lock()
+	resolved := workflow.Substitute(lp.group.ListSource, st.scope.outputs, i.opts.Params, i.opts.State, nil, st.scope.exitCodes)
+	st.mu.Unlock()
 	return parseList(resolved)
 }
 
 // runForEachLoop resolves the loop's list once and runs the body once per
 // element in order, binding the loop variable to each element and threading prev
 // forward. An empty list runs no passes.
-func (lr loopRunner) runForEachLoop() error {
-	list := lr.forEachList()
+func (i *interpreter) runForEachLoop(ctx context.Context, st *frame, lp *loopProgram) error {
+	list := i.forEachList(st, lp)
 	var prev map[workflow.TaskID]string
-	for i := range list {
-		passOutputs, err := lr.runLoopPass(prev, i+1, lr.lp.group.As, list[i])
+	for idx := range list {
+		passOutputs, err := i.runLoopPass(ctx, st, lp, prev, idx+1, lp.group.As, list[idx])
 		if err != nil {
 			return err
 		}
@@ -143,46 +129,27 @@ func (lr loopRunner) runForEachLoop() error {
 // passes never observe or clobber one another; after a pass completes its member
 // outputs are merged back into the shared report. The first pass to error
 // cancels the rest via the errgroup context. An empty list runs no passes.
-func (lr loopRunner) runForEachParallel() error {
-	list := lr.forEachList()
-	pg, pgctx := errgroup.WithContext(lr.ctx)
-	for i := range list {
-		iter, val := i+1, list[i]
+func (i *interpreter) runForEachParallel(ctx context.Context, st *frame, lp *loopProgram) error {
+	list := i.forEachList(st, lp)
+	pg, pgctx := errgroup.WithContext(ctx)
+	for idx := range list {
+		iter, val := idx+1, list[idx]
 		pg.Go(func() error {
-			return lr.runParallelPass(pgctx, iter, lr.lp.group.As, val)
+			return i.runParallelPass(pgctx, st, lp, iter, lp.group.As, val)
 		})
 	}
 	return pg.Wait()
 }
 
-// buildInnerGates allocates a fresh gate channel for each loop member and
-// aliases the already-closed outer gates for each entry dependency into the
-// same map, so inner runState instances can satisfy both member and external
-// waits without any additional coordination.
-func (lr loopRunner) buildInnerGates() map[workflow.TaskID]chan struct{} {
-	innerGates := make(map[workflow.TaskID]chan struct{}, len(lr.lp.members)+len(lr.lp.entryDeps))
-	for _, m := range lr.lp.members {
-		innerGates[m] = make(chan struct{})
-	}
-	for dep := range lr.lp.entryDeps {
-		innerGates[dep] = lr.st.gates[dep]
-	}
-	return innerGates
-}
-
 // runMembers dispatches all loop members concurrently over inner via an
 // errgroup and waits for them to complete. The first member error cancels the
 // rest via the errgroup context.
-func (lr loopRunner) runMembers(ctx context.Context, inner *runState) error {
+func (i *interpreter) runLoopMembers(ctx context.Context, st *frame, lp *loopProgram) error {
 	ig, igctx := errgroup.WithContext(ctx)
-	for _, m := range lr.lp.members {
-		id := m
+	for _, id := range lp.members {
+		id := id
 		ig.Go(func() error {
-			n := lr.interp.program.nodes[id]
-			if n == nil || n.task == nil {
-				return fmt.Errorf("task %q: compiled node missing", id)
-			}
-			return lr.interp.evalNode(igctx, inner, n)
+			return i.evalNode(igctx, st, i.program.nodes[id])
 		})
 	}
 	return ig.Wait()
@@ -203,16 +170,16 @@ func (lr loopRunner) runMembers(ctx context.Context, inner *runState) error {
 // succeeding element's value survives is still unspecified, since the passes
 // race; a downstream task that needs a specific element must reference that
 // element, not the loop member.
-func (lr loopRunner) runParallelPass(ctx context.Context, iter int, loopVar, loopVal string) error {
-	innerGates := lr.buildInnerGates()
-	inner := lr.st.forParallelIteration(innerGates, iter, loopVar, loopVal)
-	if err := lr.runMembers(ctx, inner); err != nil {
+func (i *interpreter) runParallelPass(ctx context.Context, st *frame, lp *loopProgram, iter int, loopVar, loopVal string) error {
+	innerGates := lp.buildInnerGates(st.gates)
+	inner := st.forParallelIteration(innerGates, iter, loopVar, loopVal)
+	if err := i.runLoopMembers(ctx, inner, lp); err != nil {
 		return err
 	}
 
-	lr.st.mu.Lock()
-	lr.st.scope.mergeParallelLocked(lr.lp.members, inner.scope)
-	lr.st.mu.Unlock()
+	st.mu.Lock()
+	st.scope.mergeParallelLocked(lp.members, inner.scope)
+	st.mu.Unlock()
 	return nil
 }
 
@@ -223,16 +190,16 @@ func (lr loopRunner) runParallelPass(ctx context.Context, iter int, loopVar, loo
 // dispatched concurrently; the pass returns their body outputs, which feed the
 // while convergence check and become the next pass's prev. loopVar/loopVal
 // bind a for_each iteration variable ("" for a while loop).
-func (lr loopRunner) runLoopPass(prev map[workflow.TaskID]string, iter int, loopVar, loopVal string) (map[workflow.TaskID]string, error) {
-	innerGates := lr.buildInnerGates()
-	inner := lr.st.forLoopIteration(innerGates, prev, iter, loopVar, loopVal)
-	if err := lr.runMembers(lr.ctx, inner); err != nil {
+func (i *interpreter) runLoopPass(ctx context.Context, st *frame, lp *loopProgram, prev map[workflow.TaskID]string, iter int, loopVar, loopVal string) (map[workflow.TaskID]string, error) {
+	innerGates := lp.buildInnerGates(st.gates)
+	inner := st.forLoopIteration(innerGates, prev, iter, loopVar, loopVal)
+	if err := i.runLoopMembers(ctx, inner, lp); err != nil {
 		return nil, err
 	}
 
-	lr.st.mu.Lock()
-	passOutputs := lr.st.scope.passOutputsLocked(lr.lp.members)
-	lr.st.mu.Unlock()
+	st.mu.Lock()
+	passOutputs := st.scope.passOutputsLocked(lp.members)
+	st.mu.Unlock()
 	return passOutputs, nil
 }
 
@@ -240,10 +207,10 @@ func (lr loopRunner) runLoopPass(prev map[workflow.TaskID]string, iter int, loop
 // pass. For an until_empty loop the target member's trimmed output must be
 // empty; for an until loop the compiled condition is evaluated over the current
 // member outputs. The caller holds st.mu.
-func (lr loopRunner) loopConverged() (bool, error) {
-	if lr.lp.group.Cond == nil {
-		return strings.TrimSpace(lr.st.scope.outputs[lr.lp.group.UntilEmpty]) == "", nil
+func (i *interpreter) loopConverged(st *frame, lp *loopProgram) (bool, error) {
+	if lp.group.Cond == nil {
+		return strings.TrimSpace(st.scope.outputs[lp.group.UntilEmpty]) == "", nil
 	}
-	env := lr.st.scope.toEnvLocked()
-	return lr.lp.group.Cond.Eval(env)
+	env := st.scope.toEnvLocked()
+	return lp.group.Cond.Eval(env)
 }
