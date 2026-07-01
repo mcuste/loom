@@ -27,7 +27,7 @@ func newRunCmd(env *cliEnv) *cobra.Command {
 			if resumeLatest {
 				return doRunResumeLatest(cmd.OutOrStdout(), env.home, args[0], paramArgs)
 			}
-			return doRun(cmd.OutOrStdout(), args[0], paramArgs)
+			return doRun(cmd.OutOrStdout(), env.home, args[0], paramArgs)
 		},
 	}
 	addParamFlags(cmd, &paramArgs)
@@ -40,11 +40,7 @@ func newRunCmd(env *cliEnv) *cobra.Command {
 // doRun runs the shared check phase (validate + print the plan) and then, only
 // if it passes, executes the whole workflow fresh. home is resolved up front (as
 // the resume paths do) so a home-resolution failure surfaces before the plan.
-func doRun(w io.Writer, path string, paramArgs []string) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doRun(w io.Writer, home, path string, paramArgs []string) error {
 	wf, manifest, _, err := loadWorkflow(home, path)
 	if err != nil {
 		return err

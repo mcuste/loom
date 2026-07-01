@@ -13,7 +13,7 @@ func newCheckCmd(env *cliEnv) *cobra.Command {
 		Short: "Validate a workflow and print its execution plan, without running",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doCheck(cmd.OutOrStdout(), args[0], paramArgs)
+			return doCheck(cmd.OutOrStdout(), env.home, args[0], paramArgs)
 		},
 	}
 	addParamFlags(cmd, &paramArgs)
@@ -22,11 +22,7 @@ func newCheckCmd(env *cliEnv) *cobra.Command {
 
 // doCheck runs the shared validation phase only: validate and print the plan,
 // then stop without executing.
-func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doCheck(w io.Writer, home, path string, paramArgs []string) (err error) {
 	wf, _, _, err := loadWorkflow(home, path)
 	if err != nil {
 		return err

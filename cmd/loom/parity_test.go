@@ -17,10 +17,11 @@ var parityBar = strings.Repeat("─", 40)
 // deterministic (no run-file path, cwd, or timings), so the whole block is
 // compared against the pre-seam golden text.
 func TestDoCheckParity(t *testing.T) {
+	home := loomHomeForTest(t)
 	path := writeWorkflow(t, "name: demo\ntasks:\n  - id: a\n    command: echo hi\n")
 
 	var buf bytes.Buffer
-	if err := doCheck(&buf, path, nil); err != nil {
+	if err := doCheck(&buf, home, path, nil); err != nil {
 		t.Fatalf("doCheck: %v\noutput:\n%s", err, buf.String())
 	}
 
@@ -42,12 +43,12 @@ func TestDoCheckParity(t *testing.T) {
 // pre-seam golden text. Everything else (plan, progress framing, summary block)
 // must match exactly.
 func TestDoRunParity(t *testing.T) {
-	loomHomeForTest(t)
+	home := loomHomeForTest(t)
 	chdirTo(t, t.TempDir())
 	path := writeWorkflow(t, "name: demo\ntasks:\n  - id: a\n    command: echo hi\n")
 
 	var buf bytes.Buffer
-	if err := doRun(&buf, path, nil); err != nil {
+	if err := doRun(&buf, home, path, nil); err != nil {
 		t.Fatalf("doRun: %v\noutput:\n%s", err, buf.String())
 	}
 
