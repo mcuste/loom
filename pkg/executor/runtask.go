@@ -77,13 +77,11 @@ type runState struct {
 	loopCtx
 }
 
-// forLoopIteration derives a runState for one scoped-loop pass: it shares the
-// report, succeeded/skipped maps, mutex, and budget slot with st (so usage and
-// budget accounting stay global) but swaps in a fresh per-iteration gate set,
-// the prior iteration's outputs for prev substitution, the 1-based pass number
-// stamped onto results, and the for_each loop-variable binding (loopVar/loopVal,
-// both "" for a while loop).
-func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
+// childFrameForLoopPass is the interpreter-facing name for deriving a
+// sequential loop-pass frame. The child frame reuses the parent's report,
+// store, mutex, and budget gate, but swaps in pass-local gates and loop
+// bindings.
+func (st *runState) childFrameForLoopPass(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
 	return &runState{
 		runShared: st.runShared,
 		loopCtx: loopCtx{
@@ -96,23 +94,11 @@ func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, pr
 	}
 }
 
-// childFrameForLoopPass is the interpreter-facing name for deriving a
-// sequential loop-pass frame. The child frame reuses the parent's report,
-// store, mutex, and budget gate, but swaps in pass-local gates and loop
-// bindings.
-func (st *runState) childFrameForLoopPass(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
-	return st.forLoopIteration(gates, prev, iteration, loopVar, loopVal)
-}
-
-// forParallelIteration derives a runState for one pass of a parallel for_each.
-// Unlike forLoopIteration it swaps in private outputs/succeeded/skipped maps,
-// each a snapshot of the shared state taken under st.mu, so concurrent passes
-// neither read nor overwrite one another's member results: an item's sub-DAG
-// sees only entry-dependency outputs plus its own members. The shared report
-// (rows, usage, budget slot) and mutex stay shared; the driver merges each
-// pass's member outputs back afterward. prev is nil: a parallel body has no
-// prior iteration to read (the parser rejects {{prev.id}} inside one).
-func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
+// childFrameForParallelLoopPass is the interpreter-facing name for deriving a
+// parallel for_each pass frame. The child frame snapshots the store so sibling
+// passes do not observe or clobber one another's member state, while still
+// sharing the parent report, mutex, and budget gate.
+func (st *runState) childFrameForParallelLoopPass(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
 	sh := &runShared{
 		rep:     st.rep,
 		scope:   st.scope.cloneUnderLock(st.mu),
@@ -130,14 +116,6 @@ func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}
 			loopVal:   loopVal,
 		},
 	}
-}
-
-// childFrameForParallelLoopPass is the interpreter-facing name for deriving a
-// parallel for_each pass frame. The child frame snapshots the store so sibling
-// passes do not observe or clobber one another's member state, while still
-// sharing the parent report, mutex, and budget gate.
-func (st *runState) childFrameForParallelLoopPass(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
-	return st.forParallelIteration(gates, iteration, loopVar, loopVal)
 }
 
 // waitDeps blocks until every dependency gate has closed, or returns ctx.Err
