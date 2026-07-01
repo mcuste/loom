@@ -93,6 +93,66 @@ func TestCompileProgramPreservesTopLevelPlanOrder(t *testing.T) {
 	assertUnitKinds(t, prog.units, []string{"loop:0", "task:a", "task:b", "task:c"})
 }
 
+func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Tasks: []workflow.Task{
+			{ID: "a"},
+			{ID: "b", DependsOn: []workflow.TaskID{"a"}},
+			{ID: "c", DependsOn: []workflow.TaskID{"a", "b"}},
+		},
+	}
+
+	prog := compileProgram(wf)
+
+	if len(prog.nodes) != len(wf.Tasks) {
+		t.Fatalf("node count = %d, want %d", len(prog.nodes), len(wf.Tasks))
+	}
+	for i := range wf.Tasks {
+		task := &wf.Tasks[i]
+		n := prog.nodes[task.ID]
+		if n == nil {
+			t.Fatalf("nodes[%q] = nil", task.ID)
+		}
+		if n.id != task.ID {
+			t.Fatalf("nodes[%q].id = %q, want %q", task.ID, n.id, task.ID)
+		}
+		if n.task != task {
+			t.Fatalf("nodes[%q].task = %p, want %p", task.ID, n.task, task)
+		}
+		if len(n.deps) != len(task.DependsOn) {
+			t.Fatalf("nodes[%q].deps len = %d, want %d", task.ID, len(n.deps), len(task.DependsOn))
+		}
+		for j := range task.DependsOn {
+			if n.deps[j] != task.DependsOn[j] {
+				t.Fatalf("nodes[%q].deps[%d] = %q, want %q", task.ID, j, n.deps[j], task.DependsOn[j])
+			}
+		}
+		if _, ok := n.op.(legacyOp); !ok {
+			t.Fatalf("nodes[%q].op = %T, want legacyOp", task.ID, n.op)
+		}
+	}
+}
+
+func TestCompileProgramBuildsIndependentNodeDeps(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Tasks: []workflow.Task{
+			{ID: "a"},
+			{ID: "b", DependsOn: []workflow.TaskID{"a"}},
+		},
+	}
+
+	prog := compileProgram(wf)
+	wf.Tasks[1].DependsOn[0] = "mutated"
+
+	if got := prog.nodes["b"].deps[0]; got != "a" {
+		t.Fatalf("nodes[b].deps[0] = %q, want %q", got, "a")
+	}
+}
+
 func assertUnitKinds(t *testing.T, units []unit, want []string) {
 	t.Helper()
 

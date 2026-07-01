@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -35,11 +36,22 @@ func (u taskUnit) run(ctx context.Context, i *interpreter, st *frame) error {
 	if _, seeded := i.opts.Seed[u.id]; seeded {
 		return nil
 	}
-	t := i.program.wf.ByID(u.id)
-	return runTask(ctx, i.program.wf, t, st, i.hooks, i.opts)
+	n := i.program.nodes[u.id]
+	if n == nil || n.task == nil {
+		return fmt.Errorf("task %q: compiled node missing", u.id)
+	}
+	return runTask(ctx, i.program.wf, n.task, st, i.hooks, i.opts)
 }
 
 func (u loopUnit) run(ctx context.Context, i *interpreter, st *frame) error {
 	lg := &i.program.wf.Loops[u.index]
 	return runLoop(ctx, i.program.wf, lg, st, i.hooks, i.opts)
+}
+
+func (legacyOp) eval(ctx context.Context, i *interpreter, st *frame, n *node) (TaskResult, error, error) {
+	baseDelay := i.opts.RetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = defaultRetryBaseDelay
+	}
+	return dispatch(ctx, i.program.wf, n.task, st, i.hooks, i.opts, baseDelay)
 }

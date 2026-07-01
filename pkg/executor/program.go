@@ -11,9 +11,27 @@ import (
 type program struct {
 	wf       *workflow.Workflow
 	order    []workflow.TaskID
+	nodes    map[workflow.TaskID]*node
 	units    []unit
 	memberOf map[workflow.TaskID]int
 }
+
+// node is one compiled task plus the metadata the interpreter will eventually
+// own directly, rather than re-reading from workflow.Workflow on every eval.
+type node struct {
+	id   workflow.TaskID
+	task *workflow.Task
+	deps []workflow.TaskID
+	op   op
+}
+
+// op is the executable behavior of one task body form. Phase 6 keeps a single
+// legacy implementation that delegates to the existing dispatcher.
+type op interface {
+	eval(context.Context, *interpreter, *frame, *node) (TaskResult, error, error)
+}
+
+type legacyOp struct{}
 
 // unit is one schedulable top-level item in a compiled program. Loop members
 // are intentionally not top-level units: their owning loop unit drives them.
