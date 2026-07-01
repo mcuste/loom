@@ -12,14 +12,14 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-func newResumeCmd() *cobra.Command {
+func newResumeCmd(env *cliEnv) *cobra.Command {
 	var paramArgs []string
 	cmd := &cobra.Command{
 		Use:   "resume <run-id>",
 		Short: "Resume a previous workflow run, skipping tasks that already completed",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doResume(cmd.OutOrStdout(), args[0], paramArgs)
+			return doResume(cmd.OutOrStdout(), env.home, args[0], paramArgs)
 		},
 	}
 	addParamFlags(cmd, &paramArgs)
@@ -32,16 +32,9 @@ func newResumeCmd() *cobra.Command {
 // record carries the directory the original run was invoked from, this chdirs
 // into it before re-running so the resumed run's shell tasks and relative paths
 // resolve against the original dir rather than the resume's launch dir.
-func doResume(w io.Writer, runID string, paramArgs []string) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doResume(w io.Writer, home, runID string, paramArgs []string) error {
 	rec, err := store.LoadByRunID(home, runID)
 	if err != nil {
-		return err
-	}
-	if err := chdirToRecorded(w, rec.Cwd); err != nil {
 		return err
 	}
 	// The original workflow file path is not stored in the record, so the parent
@@ -53,12 +46,8 @@ func doResume(w io.Writer, runID string, paramArgs []string) error {
 // doRunResumeLatest is the --resume-latest entry point for `loom run`. The
 // workflow body comes from the YAML on disk; the record only supplies the
 // seeded outputs and the original params.
-func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
-	path, err = resolveWorkflowRef(path)
+func doRunResumeLatest(w io.Writer, home, path string, paramArgs []string) error {
+	path, err := resolveWorkflowRef(home, path)
 	if err != nil {
 		return err
 	}
@@ -77,67 +66,72 @@ func doRunResumeLatest(w io.Writer, path string, paramArgs []string) error {
 	if err != nil {
 		return err
 	}
-	if err := chdirToRecorded(w, rec.Cwd); err != nil {
-		return err
-	}
 	return runFromRecord(w, home, path, manifest, rec, paramArgs)
 }
 
 // chdirToRecorded changes into cwd (the directory the original run was invoked
 // from) when it is recorded and differs from the current dir, so a resumed
 // run's shell tasks and relative paths resolve against it. A blank cwd or one
-// already matching the current dir is a no-op.
-func chdirToRecorded(w io.Writer, cwd string) error {
-	if cwd == "" {
-		return nil
-	}
+// already matching the current dir is a no-op. It returns the effective working
+// directory after any chdir so callers can thread it into the new run record.
+func chdirToRecorded(w io.Writer, cwd string) (string, error) {
 	here, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("resolve working directory: %w", err)
+		return "", fmt.Errorf("resolve working directory: %w", err)
 	}
-	if cwd == here {
-		return nil
+	if cwd == "" || cwd == here {
+		return here, nil
 	}
 	if err := os.Chdir(cwd); err != nil {
-		return fmt.Errorf("chdir to recorded run dir %s: %w", cwd, err)
+		return "", fmt.Errorf("chdir to recorded run dir %s: %w", cwd, err)
 	}
 	if _, err := fmt.Fprintf(w, "Cwd      : %s (restored from run record)\n", cwd); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return cwd, nil
 }
 
-// runFromRecord drives a resume invocation: parse the manifest, merge the
-// record's params (as the lower-precedence tier) with any CLI overrides,
-// build the seed from ok tasks, then dispatch a fresh run that bypasses
-// seeded tasks entirely. Ids present in the record but no longer in the
-// current workflow are dropped from the seed (they cannot be re-gated and
-// must not contaminate the executor's task count). For each surviving
-// seeded task, the new run record gets a synthetic ok entry written through
-// the store hooks before the executor starts, so a subsequent resume of
-// THIS run finds them already-completed instead of re-dispatching.
+// runFromRecord drives a resume invocation. It delegates domain assembly
+// (manifest parse, seed plan, cwd) to runner.ResumeRequest, then handles
+// the CLI-specific steps: chdir into the recorded working directory,
+// workflow linking via the CLI resolver, and rendering + execution.
+// Ids present in the record but no longer in the current workflow are
+// dropped from the seed by runner.Run (they cannot be re-gated and must
+// not contaminate the executor's task count). The record's params are the
+// lower-precedence tier under any CLI overrides.
 func runFromRecord(w io.Writer, home, selfPath string, manifest []byte, rec *store.RunRecord, paramArgs []string) error {
-	wf, err := workflow.Parse(manifest)
+	req, needsChdir, err := runner.ResumeRequest(rec, manifest, selfPath, nil)
 	if err != nil {
 		return err
 	}
+
+	// The CLI owns the chdir: os.Chdir is a process-global side effect that
+	// must not happen inside the runner package. When the record carries a
+	// working directory, change into it so shell tasks and relative paths
+	// resolve against the original directory.
+	if needsChdir {
+		cwd, err := chdirToRecorded(w, req.Cwd)
+		if err != nil {
+			return err
+		}
+		req.Cwd = cwd
+	}
+
 	// Re-resolve, link, and validate sub-workflow children from disk at resume
 	// time, just as a fresh run does. selfPath is the parent's on-disk path when
 	// known (--resume-latest reads it from disk); for a stored-manifest resume it
 	// is empty, so path refs resolve relative to the (restored) working directory
 	// and registry-name refs through the cwd-based registry roots.
-	if err := workflow.Link(wf, selfPath, resolveSubWorkflowRef); err != nil {
+	if err := workflow.Link(req.Wf, selfPath, func(ref, parentDir string) (string, error) {
+		return resolveSubWorkflowRef(home, ref, parentDir)
+	}); err != nil {
 		return err
 	}
-
-	// Seed every ok task from the record unfiltered; resolveSeed is the single
-	// authority that drops ids no longer present in the current workflow (the
-	// executor ignores Seed keys with no matching task).
-	plan := runner.SeedPlanFromRecord(rec)
 
 	// Run the shared check phase, annotating the plan with the seeded tasks,
 	// then execute. The record's params are the lower-precedence tier under any
 	// CLI overrides.
-	seeded := runner.SeededSet(wf, plan)
-	return renderCheckRun(w, runner.Request{Wf: wf, Manifest: manifest, Home: home, Plan: plan}, paramInputs{cli: paramArgs, file: rec.Params}, seeded)
+	seeded := runner.SeededSetFromRequest(req)
+	req.Home = home
+	return renderCheckRun(w, req, paramInputs{cli: paramArgs, file: rec.Params}, seeded)
 }

@@ -8,11 +8,7 @@ import (
 	"github.com/mcuste/loom/pkg/tui"
 )
 
-func doScheduleList(w io.Writer, workflowFilter string) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doScheduleList(w io.Writer, home, workflowFilter string) error {
 	recs, err := schedule.List(home, workflowFilter)
 	if err != nil {
 		return err
@@ -20,23 +16,15 @@ func doScheduleList(w io.Writer, workflowFilter string) error {
 	return tui.SchedulesTable(w, recs)
 }
 
-func doScheduleRemove(w io.Writer, id string) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doScheduleRemove(w io.Writer, home, id string) error {
 	if err := schedule.Remove(home, id); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "removed %s\n", id)
+	_, err := fmt.Fprintf(w, "removed %s\n", id)
 	return err
 }
 
-func doScheduleToggle(w io.Writer, id string, enabled bool) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doScheduleToggle(w io.Writer, home, id string, enabled bool) error {
 	rec, err := schedule.Get(home, id)
 	if err != nil {
 		return err

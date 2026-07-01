@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/mcuste/loom/pkg/registry"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -51,18 +52,11 @@ func SchedulesTable(w io.Writer, recs []schedule.Record) error {
 // resolved path far off to the right.
 const descWidth = 60
 
-// WorkflowRef is a registry workflow entry: its colon-joined name and the file
-// it resolves to, used as input to WorkflowsTable.
-type WorkflowRef struct {
-	Name string
-	Path string
-}
-
 // WorkflowsTable writes the workflow listing to w: name, best-effort truncated
 // description, and the resolved file path, columns tab-aligned. A parse error
 // or absent description leaves the description column blank; an absent registry
 // root lists nothing.
-func WorkflowsTable(w io.Writer, refs []WorkflowRef) error {
+func WorkflowsTable(w io.Writer, refs []registry.Ref) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, r := range refs {
 		desc := ""

@@ -3,7 +3,6 @@ package store_test
 import (
 	"testing"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -25,7 +24,7 @@ func TestOnFinishPreservesSkippedStatus(t *testing.T) {
 	// Match the executor's hook sequence: OnStart initialises the task entry,
 	// then OnFinish records its terminal disposition.
 	run.OnStart(task, 0, "", "", "")
-	run.OnFinish(task, 0, executor.TaskResult{Status: executor.StatusSkipped}, nil)
+	run.OnFinish(task, 0, store.TaskRecord{Status: store.StatusSkipped}, nil)
 
 	tasks := readRun(t, run.Path())["tasks"].([]any)
 	got := tasks[0].(map[string]any)

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -109,12 +108,11 @@ func TestOnStartOnFinishUpdatesTaskEntry(t *testing.T) {
 
 	task := workflow.Task{ID: "alpha"}
 	run.OnStart(task, 0, "claude-code", "sonnet", "medium")
-	run.OnFinish(task, 0, executor.TaskResult{
-		Prompt:  "substituted prompt",
-		Output:  "model output",
-		Usage:   runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5},
-		Elapsed: 250 * time.Millisecond,
-	}, nil)
+	run.OnFinish(task, 0, store.NewTaskRecord(
+		"substituted prompt", "", "model output",
+		0, 250*time.Millisecond, "",
+		runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5},
+	), nil)
 
 	m := readRun(t, run.Path())
 	tasks, ok := m["tasks"].([]any)
@@ -156,7 +154,7 @@ func TestOnFinishRecordsTaskError(t *testing.T) {
 
 	task := workflow.Task{ID: "beta"}
 	run.OnStart(task, 0, "rt", "m", "")
-	run.OnFinish(task, 0, executor.TaskResult{}, errors.New("kaboom"))
+	run.OnFinish(task, 0, store.TaskRecord{}, errors.New("kaboom"))
 
 	tasks := readRun(t, run.Path())["tasks"].([]any)
 	got := tasks[0].(map[string]any)
@@ -178,8 +176,8 @@ func TestCloseFinalizesAndLinksLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	run.OnFinish(workflow.Task{ID: "a"}, 0, executor.TaskResult{Elapsed: 10 * time.Millisecond}, nil)
-	run.OnFinish(workflow.Task{ID: "b"}, 0, executor.TaskResult{Elapsed: 20 * time.Millisecond}, nil)
+	run.OnFinish(workflow.Task{ID: "a"}, 0, store.TaskRecord{ElapsedMs: 10}, nil)
+	run.OnFinish(workflow.Task{ID: "b"}, 0, store.TaskRecord{ElapsedMs: 20}, nil)
 
 	summary := &store.Summary{
 		TaskCount: 2,
@@ -240,7 +238,7 @@ func TestAtomicRewriteLeavesNoTmp(t *testing.T) {
 	for i := range 5 {
 		task := workflow.Task{ID: workflow.TaskID(fmt.Sprintf("t%d", i))}
 		run.OnStart(task, 0, "rt", "m", "")
-		run.OnFinish(task, 0, executor.TaskResult{}, nil)
+		run.OnFinish(task, 0, store.TaskRecord{}, nil)
 	}
 	if _, err := os.Stat(run.Path() + ".tmp"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tmp file lingered: err=%v", err)
@@ -272,7 +270,7 @@ func TestConcurrentOnFinishIsSafe(t *testing.T) {
 			id := workflow.TaskID(fmt.Sprintf("t%02d", i))
 			task := workflow.Task{ID: id}
 			run.OnStart(task, 0, "rt", "m", "")
-			run.OnFinish(task, 0, executor.TaskResult{Output: fmt.Sprintf("out-%d", i)}, nil)
+			run.OnFinish(task, 0, store.TaskRecord{Output: fmt.Sprintf("out-%d", i)}, nil)
 		}()
 	}
 	wg.Wait()
@@ -353,21 +351,20 @@ func TestShellTaskCommandRoundTrips(t *testing.T) {
 	// (executor passes empty strings for shell tasks).
 	shellTask := workflow.Task{ID: "shell-echo"}
 	run.OnStart(shellTask, 0, "", "", "")
-	run.OnFinish(shellTask, 0, executor.TaskResult{
-		Command: "echo hello world",
-		Output:  "hello world\n",
-		Elapsed: 50 * time.Millisecond,
+	run.OnFinish(shellTask, 0, store.TaskRecord{
+		Command:   "echo hello world",
+		Output:    "hello world\n",
+		ElapsedMs: 50,
 	}, nil)
 
 	// LLM task: only Prompt set; Command must stay absent in JSON.
 	llmTask := workflow.Task{ID: "llm-summarise"}
 	run.OnStart(llmTask, 0, "claude-code", "sonnet", "low")
-	run.OnFinish(llmTask, 0, executor.TaskResult{
-		Prompt:  "summarise this",
-		Output:  "summary here",
-		Usage:   runtime.Usage{InputTokens: 5, OutputTokens: 3},
-		Elapsed: 120 * time.Millisecond,
-	}, nil)
+	run.OnFinish(llmTask, 0, store.NewTaskRecord(
+		"summarise this", "", "summary here",
+		0, 120*time.Millisecond, "",
+		runtime.Usage{InputTokens: 5, OutputTokens: 3},
+	), nil)
 
 	tasks := readRun(t, run.Path())["tasks"].([]any)
 	if len(tasks) != 2 {

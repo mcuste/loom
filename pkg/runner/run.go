@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/mcuste/loom/pkg/executor"
@@ -23,14 +22,17 @@ type Provenance struct {
 
 // Request bundles everything the unified run pipeline consumes: the parsed
 // workflow and its inlined manifest, the resolved params, the resolved
-// LOOM_HOME, the optional seed plan, and the provenance. Wf, Manifest, and
-// Resolved arrive together from the check phase, so grouping them keeps the
-// pipeline signature stable. A zero Plan and zero Prov mark a plain direct run.
+// LOOM_HOME, the invocation working directory, the optional seed plan, and the
+// provenance. Wf, Manifest, and Resolved arrive together from the check phase,
+// so grouping them keeps the pipeline signature stable. A zero Plan and zero
+// Prov mark a plain direct run. Cwd is the directory the run is launched from;
+// it is stored in the run record so a later resume can restore it.
 type Request struct {
 	Wf       *workflow.Workflow
 	Manifest []byte
 	Resolved workflow.ParamValues
 	Home     string
+	Cwd      string
 	Plan     SeedPlan
 	Prov     Provenance
 }
@@ -51,14 +53,10 @@ func Run(ctx context.Context, r tui.Renderer, w io.Writer, req Request) (string,
 	rs := resolveSeed(req.Wf, req.Plan)
 
 	// Home is resolved once by the caller (before any resume-time chdir) so a
-	// relative LOOM_HOME cannot split the store across two dirs. Resolve only the
-	// invocation cwd here, then thread both into every run record so the store
-	// roots under the home directory and a later resume can restore the directory
-	// the run was launched from.
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("resolve working directory: %w", err)
-	}
+	// relative LOOM_HOME cannot split the store across two dirs. Cwd is supplied
+	// by the caller so it reflects the directory the run was launched from (not
+	// the directory Run executes in, which may differ after a resume-time chdir).
+	cwd := req.Cwd
 
 	// Load cross-run state once. Each run substitutes `{{state.key}}` from it
 	// and folds its `writes_state` outputs back in. A missing file yields an
@@ -206,12 +204,30 @@ func stringifyParams(p workflow.ParamValues) map[string]string {
 	return out
 }
 
-// storeHooks binds store.Run.OnStart and store.Run.OnFinish as method values
-// directly: their signatures match executor.Hooks with no adapter needed.
+// toRecord maps an executor.TaskResult to the store.TaskRecord DTO that
+// Run.OnFinish consumes. The translation lives here so pkg/store need not
+// import pkg/executor.
+func toRecord(res executor.TaskResult) store.TaskRecord {
+	return store.NewTaskRecord(
+		res.Prompt,
+		res.Command,
+		res.Output,
+		res.ExitCode,
+		res.Elapsed,
+		string(res.Status),
+		res.Usage,
+	)
+}
+
+// storeHooks binds store.Run.OnStart as a direct method value and wraps
+// OnFinish with toRecord so the executor's TaskResult is converted before it
+// reaches the store.
 func storeHooks(run *store.Run) executor.Hooks {
 	return executor.Hooks{
-		OnStart:  run.OnStart,
-		OnFinish: run.OnFinish,
+		OnStart: run.OnStart,
+		OnFinish: func(t workflow.Task, iter int, res executor.TaskResult, err error) {
+			run.OnFinish(t, iter, toRecord(res), err)
+		},
 	}
 }
 

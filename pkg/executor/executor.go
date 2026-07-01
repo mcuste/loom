@@ -137,6 +137,19 @@ type Hooks struct {
 	OnFinish func(t workflow.Task, iter int, res TaskResult, err error)
 }
 
+// RunnerResolver maps a runtime name to its Runner implementation. A nil
+// Resolver in Options falls back to runtime.Lookup, the global registry.
+type RunnerResolver interface {
+	Resolve(name runtime.Name) (runtime.Runner, bool)
+}
+
+// RunnerResolverFunc adapts a function to RunnerResolver.
+type RunnerResolverFunc func(runtime.Name) (runtime.Runner, bool)
+
+func (f RunnerResolverFunc) Resolve(name runtime.Name) (runtime.Runner, bool) {
+	return f(name)
+}
+
 // Options configures a Run call. The zero value is valid and runs the workflow
 // with no parameters.
 type Options struct {
@@ -173,6 +186,9 @@ type Options struct {
 	// directory here and the child inherits it unless it declares its own. Empty
 	// means inherit loom's process cwd.
 	WorkDir string
+	// Resolver maps a runtime name to its Runner. When nil, defaults to
+	// runtime.Lookup (the process-wide registry).
+	Resolver RunnerResolver
 }
 
 // Run executes wf's tasks concurrently, respecting the dependency graph.
@@ -225,15 +241,6 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 
 	var mu sync.Mutex
 
-	// budgetInFlight serializes budget-gated dispatches so the check-then-commit
-	// is atomic. A workflow budget is enforced against the cumulative cost of
-	// *completed* tasks, but a task's cost is only known after it runs; without
-	// serialization, two goroutines whose deps resolve concurrently both read a
-	// stale spend, both pass the check, and the concurrent subgraph overshoots
-	// the limit. Admitting at most one budget-gated task at a time guarantees its
-	// cost is recorded before the next task's check runs, bounding the overshoot
-	// to the single task that crosses the limit (matching the serial semantics).
-	// budgetReady wakes a waiter once the in-flight task records its cost.
 	// The workflow's own working_dir wins; opts.WorkDir is the inherited fallback
 	// a parent passes to a linked child, so a child without its own working_dir
 	// runs in the parent's effective directory.
@@ -242,17 +249,23 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 		workDir = wf.WorkingDir
 	}
 
+	sh := &runShared{
+		rep: rep,
+		scope: scopeState{
+			outputs:   rep.Outputs,
+			succeeded: succeeded,
+			skipped:   skipped,
+			exitCodes: exitCodes,
+		},
+		mu:      &mu,
+		budget:  &budgetGate{ready: sync.NewCond(&mu)},
+		workDir: workDir,
+	}
 	st := &runState{
-		rep:            rep,
-		outputs:        rep.Outputs,
-		succeeded:      succeeded,
-		skipped:        skipped,
-		exitCodes:      exitCodes,
-		gates:          gates,
-		mu:             &mu,
-		budgetInFlight: new(bool),
-		budgetReady:    sync.NewCond(&mu),
-		workDir:        workDir,
+		runShared: sh,
+		loopCtx: loopCtx{
+			gates: gates,
+		},
 	}
 
 	// Each scoped loop collapses its body into a single synthetic node in the

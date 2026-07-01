@@ -199,10 +199,20 @@ func (p *plainRenderer) Plan(wf *workflow.Workflow, resolved workflow.ParamValue
 	// loop's first body wave; loopAfter[oi] lists loops to emit right after order
 	// index oi (-1 emits before the first task). waveOf is non-decreasing along a
 	// topological order, so the boundary is a contiguous prefix.
-	waveOf := waveIndex(wf)
+	planEntries := wf.AnnotatedPlan()
+	waveOf := make(map[workflow.TaskID]int, len(planEntries))
+	loopWaveOf := make(map[workflow.LoopID]int)
+	for _, e := range planEntries {
+		waveOf[e.ID] = e.Wave
+		if e.LoopID != "" {
+			if w, ok := loopWaveOf[e.LoopID]; !ok || e.Wave < w {
+				loopWaveOf[e.LoopID] = e.Wave
+			}
+		}
+	}
 	loopAfter := make(map[int][]int)
 	for li := range wf.Loops {
-		lw := loopWaveIndex(&wf.Loops[li], waveOf)
+		lw := loopWaveOf[wf.Loops[li].ID]
 		pos := -1
 		for oi, id := range order {
 			if waveOf[id] <= lw {

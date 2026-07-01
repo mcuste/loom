@@ -18,7 +18,6 @@ package runtime
 import (
 	"context"
 	"errors"
-	"fmt"
 )
 
 // Name identifies a runtime in workflow YAML, e.g. "claude-code".
@@ -73,24 +72,6 @@ type Runner interface {
 	Run(ctx context.Context, req Request) (Response, error)
 }
 
-// Validate looks name up in the registry and dispatches to its Runner. Use it
-// from the workflow parser and from any caller building a Request outside
-// the parser path. Per-runtime errors are wrapped with the runtime name so
-// the caller's error message reads "<name>: <field> <value>: <sentinel>".
-func Validate(name Name, req Request) error {
-	if name == "" {
-		return ErrMissingRuntime
-	}
-	r, ok := Lookup(name)
-	if !ok {
-		return fmt.Errorf("%q: %w", name, ErrUnknownRuntime)
-	}
-	if err := r.Validate(req); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
-}
-
 // Sentinel errors. Validation failures wrap one of these so callers can use
 // errors.Is to test the failure mode independent of the runtime that raised
 // it.
@@ -139,13 +120,4 @@ type Response struct {
 type Subprocess interface {
 	Runner
 	Binary() string
-}
-
-// API is implemented by runtimes that call a remote API (claude-api,
-// openai-api, alibaba-api, ollama). EnvVars returns the names of environment
-// variables that must be set (e.g. "ANTHROPIC_API_KEY") so the executor can
-// preflight-check credentials.
-type API interface {
-	Runner
-	EnvVars() []string
 }

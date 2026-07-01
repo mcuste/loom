@@ -55,19 +55,18 @@ func parseBudget(node yaml.Node) (*Budget, error) {
 		return nil, &MalformedBudgetError{Reason: "must be a mapping"}
 	}
 	b := &Budget{}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		k, v := node.Content[i], node.Content[i+1]
-		if k.Kind != yaml.ScalarNode {
-			return nil, &MalformedBudgetError{Reason: "key must be a scalar"}
-		}
-		switch k.Value {
+	if err := eachMapEntry(&node, "budget:", func(key string, v *yaml.Node) error {
+		switch key {
 		case "max_cost_usd":
 			if err := v.Decode(&b.MaxCostUSD); err != nil {
-				return nil, fmt.Errorf("budget.max_cost_usd: %w", err)
+				return fmt.Errorf("budget.max_cost_usd: %w", err)
 			}
 		default:
-			return nil, &UnknownBudgetFieldError{Field: k.Value}
+			return &UnknownBudgetFieldError{Field: key}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	// Reject anything that is not a finite positive float. The `<= 0` form would
 	// admit NaN (NaN <= 0 is false in IEEE 754), which silently disables

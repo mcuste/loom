@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"time"
 
 	"github.com/mcuste/loom/pkg/schedule"
@@ -11,16 +10,6 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 	"github.com/spf13/cobra"
 )
-
-// absPath returns the absolute form of p, falling back to p when resolution
-// fails. The scheduler stores an absolute workflow path so the daemon reloads
-// the same file regardless of its own working directory.
-func absPath(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		return abs
-	}
-	return p
-}
 
 // triggerCommon holds the schedule flags shared by `schedule cron` and
 // `schedule at`: the timezone the trigger is interpreted in, the catch-up
@@ -60,23 +49,23 @@ type atOpts struct {
 // doScheduleCron validates the workflow and params, then persists a recurring
 // schedule. Validation happens now so a bad workflow, missing required param,
 // or malformed cron expression fails at the prompt, not at 15:00.
-func doScheduleCron(w io.Writer, ref string, o cronOpts) error {
+func doScheduleCron(w io.Writer, home, ref string, o cronOpts) error {
 	overlap, err := schedule.ParseOverlap(o.overlap)
 	if err != nil {
 		return err
 	}
-	wf, path, params, err := loadAndResolve(ref, o.paramArgs)
+	wf, path, params, err := loadAndResolve(home, ref, o.paramArgs)
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewCronRecord(string(wf.ID), ref, absPath(path), params, o.catchup,
+	rec := schedule.NewCronRecord(string(wf.ID), ref, path, params, o.catchup,
 		schedule.Trigger{Cron: o.expr, TZ: o.tz}, overlap)
-	return addAndReport(w, rec)
+	return addAndReport(w, home, rec)
 }
 
 // doScheduleAt validates the workflow and params, parses the one-off instant in
 // the chosen timezone, and persists a one-off schedule.
-func doScheduleAt(w io.Writer, ref string, o atOpts) error {
+func doScheduleAt(w io.Writer, home, ref string, o atOpts) error {
 	loc := time.Local
 	if o.tz != "" {
 		l, err := time.LoadLocation(o.tz)
@@ -89,21 +78,21 @@ func doScheduleAt(w io.Writer, ref string, o atOpts) error {
 	if err != nil {
 		return err
 	}
-	wf, path, params, err := loadAndResolve(ref, o.paramArgs)
+	wf, path, params, err := loadAndResolve(home, ref, o.paramArgs)
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewAtRecord(string(wf.ID), ref, absPath(path), params, o.catchup,
+	rec := schedule.NewAtRecord(string(wf.ID), ref, path, params, o.catchup,
 		schedule.Trigger{At: at, TZ: o.tz})
-	return addAndReport(w, rec)
+	return addAndReport(w, home, rec)
 }
 
 // loadAndResolve loads the workflow and resolves its params, returning the
 // CLI-supplied param map (not the defaults) so the daemon resolves fresh
 // against the then-current workflow at fire time. ResolveParams is still called
 // here to reject a missing required param up front.
-func loadAndResolve(ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
-	wf, _, path, err := loadWorkflow(ref)
+func loadAndResolve(home, ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
+	wf, _, path, err := loadWorkflow(home, ref)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -120,11 +109,7 @@ func loadAndResolve(ref string, paramArgs []string) (*workflow.Workflow, string,
 	return wf, path, cliParams, nil
 }
 
-func addAndReport(w io.Writer, rec schedule.Record) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func addAndReport(w io.Writer, home string, rec schedule.Record) error {
 	stored, err := schedule.Add(home, rec, schedule.Config{})
 	if err != nil {
 		return err

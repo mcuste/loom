@@ -1,0 +1,218 @@
+package workflow
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/mcuste/loom/pkg/runtime"
+)
+
+// loopTask pairs a raw task with the id of its owning loop. The loop field is
+// "" for top-level (non-loop-member) tasks.
+type loopTask struct {
+	rt   rawTask
+	loop LoopID
+}
+
+// parseState bundles the mutable state threaded through the per-task build
+// loop: the workflow being assembled, the global task-id set used for
+// dependency and placeholder validation, the param name set, and the per-loop
+// metadata derived from the raw loop declarations.
+type parseState struct {
+	wf           *Workflow
+	ids          map[TaskID]struct{}
+	paramSet     map[ParamName]struct{}
+	asByLoop     map[LoopID]string
+	memberByLoop map[LoopID]map[TaskID]bool
+}
+
+// buildTask constructs one Task from a raw task (paired with its owning loop
+// id, "" for top-level tasks) and appends it to st.wf. It performs all
+// per-task validation: body-form checks, dependency graph edges, placeholder
+// validation, schema, when-expression, etc.
+func buildTask(st *parseState, lt loopTask) error {
+	rt := lt.rt
+	tid := TaskID(rt.ID)
+	wf := st.wf
+
+	// Exactly one body form. loop/for_each wrappers were split out above, so
+	// the only forms that can appear here are prompt, prompt_file, command,
+	// workflow, and script; each conflicts with all the others.
+	presentForms := detectBodyForms(rt)
+	switch {
+	case len(presentForms) > 1:
+		return &TaskBodyConflictError{Task: tid, Fields: presentForms}
+	case len(presentForms) == 0:
+		return fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
+	}
+	// with: is only meaningful alongside workflow:.
+	if rt.With.Kind != 0 && rt.Workflow == "" {
+		return fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
+	}
+	// args: is only meaningful alongside script:.
+	if len(rt.Args) > 0 && rt.Script == "" {
+		return fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
+	}
+	// ok_exit applies to tasks that run a process (prompt/command/script); a
+	// sub-workflow has no process exit code. Each entry must be a valid Unix
+	// exit code (0-255); a negative or out-of-range value can never match a real
+	// exit and is almost certainly a mistake.
+	if len(rt.OkExit) > 0 {
+		if rt.Workflow != "" {
+			return fmt.Errorf("task %q: %w", tid, ErrOkExitOnSubWorkflow)
+		}
+		for _, code := range rt.OkExit {
+			if code < 0 || code > 255 {
+				return fmt.Errorf("task %q: %w: %d", tid, ErrOkExitOutOfRange, code)
+			}
+		}
+	}
+
+	// body is the text that placeholder validation runs against;
+	// substitution targets the same string at execution time. A sub-workflow
+	// task has no prompt body: its placeholder-derived deps come from scanning
+	// its with-values instead.
+	body := rt.Prompt
+	var withArgs []WithArg
+	switch {
+	case rt.Command != "":
+		body = rt.Command
+		if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+			return fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
+		}
+		if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+			return fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSystemPrompt)
+		}
+	case rt.Workflow != "":
+		// runtime/model/effort on a sub-workflow task are not rejected: they
+		// override the linked child's workflow-level defaults at link time (see
+		// linkSubWorkflows), so a parent can run a shared child cheaper without
+		// forking it. system_prompt stays rejected: the child's tasks carry their
+		// own, and there is no single task here for one to apply to.
+		if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+			return fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithSystemPrompt)
+		}
+		wa, werr := decodeWith(tid, rt.With)
+		if werr != nil {
+			return werr
+		}
+		withArgs = wa
+		// Join the with-values so the malformed-placeholder check below scans
+		// every value the way it scans a prompt body.
+		var sb strings.Builder
+		for _, a := range withArgs {
+			sb.WriteString(a.Value)
+			sb.WriteByte('\n')
+		}
+		body = sb.String()
+	case rt.Script != "":
+		if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+			return fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithRuntime)
+		}
+		if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+			return fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSystemPrompt)
+		}
+		// The script path and its argv carry placeholders, so scan all of them:
+		// each {{id}} / {{id.exit}} ref must resolve to a dependency.
+		var sb strings.Builder
+		sb.WriteString(rt.Script)
+		for _, a := range rt.Args {
+			sb.WriteByte('\n')
+			sb.WriteString(a)
+		}
+		body = sb.String()
+	case rt.PromptFile != "":
+		// A prompt_file must be inlined by InlinePromptFiles before Parse; one
+		// reaching here was not, so there is no body to build a task from.
+		return fmt.Errorf("task %q: prompt_file must be inlined before parsing", tid)
+	}
+	schema, err := parseSchema(rt.Schema)
+	if err != nil {
+		return fmt.Errorf("task %q: %w", tid, err)
+	}
+	if schema != nil && rt.Command != "" {
+		return fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
+	}
+	if schema != nil && rt.Script != "" {
+		return fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSchema)
+	}
+	dc := depsCtx{tid: tid, known: st.ids, params: st.paramSet, loopVar: st.asByLoop[lt.loop]}
+	var deps []TaskID
+	if rt.Workflow != "" {
+		deps, err = buildSubWorkflowDeps(dc, rt.DependsOn, withArgs)
+	} else {
+		deps, err = buildDeps(dc, rt.DependsOn, body)
+	}
+	if err != nil {
+		return err
+	}
+	if err := checkMalformedParamPlaceholders(tid, body); err != nil {
+		return err
+	}
+	// A task-level system_prompt_file must be inlined by InlinePromptFiles
+	// before Parse, mirroring prompt_file; one reaching here was not, so reject
+	// it rather than silently dropping the file-backed override.
+	if rt.SystemPromptFile != "" {
+		return fmt.Errorf("task %q: system_prompt_file must be inlined before parsing", tid)
+	}
+	// A task-level system prompt is validated exactly like the workflow-level
+	// one: declared param placeholders only, no task-id placeholders. Shell and
+	// sub-workflow tasks were already rejected above, so rt.SystemPrompt here
+	// belongs to an LLM task.
+	if err := validateSystemPrompt(rt.SystemPrompt, st.paramSet); err != nil {
+		return fmt.Errorf("task %q: %w", tid, err)
+	}
+	retry, err := parseRetry(tid, rt.Retry)
+	if err != nil {
+		return err
+	}
+	if rt.WritesState != "" && !identifierRe.MatchString(rt.WritesState) {
+		return &InvalidWritesStateError{Task: tid, Key: rt.WritesState}
+	}
+	taskBudget, err := parseBudget(rt.Budget)
+	if err != nil {
+		return fmt.Errorf("task %q: %w", tid, err)
+	}
+	// A when: expression may only reference this task's dependencies: the
+	// executor evaluates it after the dependency gates close, so a reference
+	// to any other task (or the task's own id) could read an output that has
+	// not been written yet. Bounding ParseCondition by depSet rejects those
+	// at load time.
+	var cond *Condition
+	if rt.When != "" {
+		depSet := make(map[TaskID]bool, len(deps))
+		for _, d := range deps {
+			depSet[d] = true
+		}
+		cond, err = ParseCondition(rt.When, depSet)
+		if err != nil {
+			return fmt.Errorf("task %q: %w", tid, err)
+		}
+	}
+	wf.byID[tid] = len(wf.Tasks)
+	wf.Tasks = append(wf.Tasks, Task{
+		ID:           tid,
+		Prompt:       rt.Prompt,
+		Command:      rt.Command,
+		Description:  rt.Description,
+		Runtime:      runtime.Name(rt.Runtime),
+		Model:        runtime.Model(rt.Model),
+		Effort:       runtime.Effort(rt.Effort),
+		SystemPrompt: rt.SystemPrompt,
+		DependsOn:    deps,
+		When:         rt.When,
+		Cond:         cond,
+		Retry:        retry,
+		WritesState:  rt.WritesState,
+		Budget:       taskBudget,
+		Schema:       schema,
+		Cache:        rt.Cache,
+		Loop:         lt.loop,
+		Workflow:     rt.Workflow,
+		With:         withArgs,
+		Script:       rt.Script,
+		Args:         rt.Args,
+		OkExit:       rt.OkExit,
+	})
+	return nil
+}

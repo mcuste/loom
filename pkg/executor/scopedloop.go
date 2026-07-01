@@ -3,7 +3,6 @@ package executor
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
@@ -117,7 +116,7 @@ func forEachList(lg *workflow.LoopGroup, st *runState, opts Options) []string {
 		return lg.List
 	}
 	st.mu.Lock()
-	resolved := workflow.Substitute(lg.ListSource, st.outputs, opts.Params, opts.State, nil, st.exitCodes)
+	resolved := workflow.Substitute(lg.ListSource, st.scope.outputs, opts.Params, opts.State, nil, st.scope.exitCodes)
 	st.mu.Unlock()
 	return parseList(resolved)
 }
@@ -156,6 +155,35 @@ func runForEachParallel(ctx context.Context, wf *workflow.Workflow, lg *workflow
 	return pg.Wait()
 }
 
+// buildInnerGates allocates a fresh gate channel for each loop member and
+// aliases the already-closed outer gates for each entry dependency into the
+// same map, so inner runState instances can satisfy both member and external
+// waits without any additional coordination.
+func buildInnerGates(lg *workflow.LoopGroup, st *runState, entryDeps map[workflow.TaskID]bool) map[workflow.TaskID]chan struct{} {
+	innerGates := make(map[workflow.TaskID]chan struct{}, len(lg.Members)+len(entryDeps))
+	for _, m := range lg.Members {
+		innerGates[m] = make(chan struct{})
+	}
+	for dep := range entryDeps {
+		innerGates[dep] = st.gates[dep]
+	}
+	return innerGates
+}
+
+// runMembers dispatches all loop members concurrently over inner via an
+// errgroup and waits for them to complete. The first member error cancels the
+// rest via the errgroup context.
+func runMembers(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, inner *runState, hooks Hooks, opts Options) error {
+	ig, igctx := errgroup.WithContext(ctx)
+	for _, m := range lg.Members {
+		t := wf.ByID(m)
+		ig.Go(func() error {
+			return runTask(igctx, wf, t, inner, hooks, opts)
+		})
+	}
+	return ig.Wait()
+}
+
 // runParallelPass runs one pass of a parallel for_each body: a fresh gate per
 // member plus the aliased entry-dependency gates, over an isolated runState.
 // After the members complete it merges their outputs and succeeded/skipped
@@ -172,44 +200,14 @@ func runForEachParallel(ctx context.Context, wf *workflow.Workflow, lg *workflow
 // race; a downstream task that needs a specific element must reference that
 // element, not the loop member.
 func runParallelPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, st *runState, hooks Hooks, opts Options, entryDeps map[workflow.TaskID]bool, iter int, loopVar, loopVal string) error {
-	innerGates := make(map[workflow.TaskID]chan struct{}, len(lg.Members)+len(entryDeps))
-	for _, m := range lg.Members {
-		innerGates[m] = make(chan struct{})
-	}
-	for dep := range entryDeps {
-		innerGates[dep] = st.gates[dep]
-	}
-
+	innerGates := buildInnerGates(lg, st, entryDeps)
 	inner := st.forParallelIteration(innerGates, iter, loopVar, loopVal)
-	ig, igctx := errgroup.WithContext(ctx)
-	for _, m := range lg.Members {
-		t := wf.ByID(m)
-		ig.Go(func() error {
-			return runTask(igctx, wf, t, inner, hooks, opts)
-		})
-	}
-	if err := ig.Wait(); err != nil {
+	if err := runMembers(ctx, wf, lg, inner, hooks, opts); err != nil {
 		return err
 	}
 
 	st.mu.Lock()
-	for _, m := range lg.Members {
-		switch {
-		case inner.succeeded[m]:
-			// An element ran the member to completion: publish its output and let
-			// success dominate any prior or concurrent skip mark.
-			st.outputs[m] = inner.outputs[m]
-			st.exitCodes[m] = inner.exitCodes[m]
-			st.succeeded[m] = true
-			st.skipped[m] = false
-		case inner.skipped[m] && !st.succeeded[m]:
-			// This element skipped and no element has succeeded yet: record the
-			// skip without clobbering a real output a later success may still set.
-			st.outputs[m] = inner.outputs[m]
-			st.exitCodes[m] = inner.exitCodes[m]
-			st.skipped[m] = true
-		}
-	}
+	st.scope.mergeParallelLocked(lg.Members, inner.scope)
 	st.mu.Unlock()
 	return nil
 }
@@ -222,31 +220,14 @@ func runParallelPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.Lo
 // convergence check and become the next pass's prev. loopVar/loopVal bind a
 // for_each iteration variable ("" for a while loop).
 func runLoopPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGroup, st *runState, hooks Hooks, opts Options, entryDeps map[workflow.TaskID]bool, prev map[workflow.TaskID]string, iter int, loopVar, loopVal string) (map[workflow.TaskID]string, error) {
-	innerGates := make(map[workflow.TaskID]chan struct{}, len(lg.Members)+len(entryDeps))
-	for _, m := range lg.Members {
-		innerGates[m] = make(chan struct{})
-	}
-	for dep := range entryDeps {
-		innerGates[dep] = st.gates[dep]
-	}
-
+	innerGates := buildInnerGates(lg, st, entryDeps)
 	inner := st.forLoopIteration(innerGates, prev, iter, loopVar, loopVal)
-	ig, igctx := errgroup.WithContext(ctx)
-	for _, m := range lg.Members {
-		t := wf.ByID(m)
-		ig.Go(func() error {
-			return runTask(igctx, wf, t, inner, hooks, opts)
-		})
-	}
-	if err := ig.Wait(); err != nil {
+	if err := runMembers(ctx, wf, lg, inner, hooks, opts); err != nil {
 		return nil, err
 	}
 
 	st.mu.Lock()
-	passOutputs := make(map[workflow.TaskID]string, len(lg.Members))
-	for _, m := range lg.Members {
-		passOutputs[m] = st.outputs[m]
-	}
+	passOutputs := st.scope.passOutputsLocked(lg.Members)
 	st.mu.Unlock()
 	return passOutputs, nil
 }
@@ -257,13 +238,8 @@ func runLoopPass(ctx context.Context, wf *workflow.Workflow, lg *workflow.LoopGr
 // member outputs. The caller holds st.mu.
 func loopConverged(lg *workflow.LoopGroup, st *runState) (bool, error) {
 	if lg.Cond == nil {
-		return strings.TrimSpace(st.outputs[lg.UntilEmpty]) == "", nil
+		return strings.TrimSpace(st.scope.outputs[lg.UntilEmpty]) == "", nil
 	}
-	env := workflow.Env{
-		Outputs:   maps.Clone(st.outputs),
-		Succeeded: maps.Clone(st.succeeded),
-		Skipped:   maps.Clone(st.skipped),
-		ExitCodes: maps.Clone(st.exitCodes),
-	}
+	env := st.scope.toEnvLocked()
 	return lg.Cond.Eval(env)
 }

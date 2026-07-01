@@ -124,34 +124,41 @@ func paramTag(source string) string {
 // their own group inline at the wave where their body first becomes runnable,
 // so the loop's position in the flow is visible rather than detached.
 func richWaves(wf *workflow.Workflow) string {
-	waves := wf.Waves()
-	waveOf := waveIndex(wf)
+	entries := wf.AnnotatedPlan()
 
-	// idWidth is just the widest top-level task id; loop members are drawn under
-	// their own groups and never appear in the wave rows, so excluding them keeps
-	// this column from being padded for ids it never shows.
+	// Derive topByWave, loopWave (min wave per loop), idWidth, and waveCount
+	// from the pre-computed annotated plan in a single pass.
+	waveCount := 0
 	idWidth := 0
-	for i := range wf.Tasks {
-		t := &wf.Tasks[i]
-		if t.Loop != "" {
-			continue
+	loopWave := make(map[workflow.LoopID]int)
+	for _, e := range entries {
+		if e.Wave+1 > waveCount {
+			waveCount = e.Wave + 1
 		}
-		if n := len(t.ID); n > idWidth {
-			idWidth = n
+		if e.LoopID == "" {
+			if n := len(e.ID); n > idWidth {
+				idWidth = n
+			}
+		} else {
+			// Track the earliest wave any member of this loop runs in so the
+			// loop group is anchored at the right position.
+			if w, ok := loopWave[e.LoopID]; !ok || e.Wave < w {
+				loopWave[e.LoopID] = e.Wave
+			}
 		}
 	}
 
 	// Filter loop members out of each wave; an original wave with no top-level
 	// task (every member pulled into a loop) is dropped and the displayed waves
 	// renumbered, but its position is still used to anchor inline loop groups.
-	topByWave := make([][]workflow.TaskID, len(waves))
-	displayed := 0
-	for wi, wave := range waves {
-		for _, id := range wave {
-			if t := wf.ByID(id); t != nil && t.Loop == "" {
-				topByWave[wi] = append(topByWave[wi], id)
-			}
+	topByWave := make([][]workflow.TaskID, waveCount)
+	for _, e := range entries {
+		if e.LoopID == "" {
+			topByWave[e.Wave] = append(topByWave[e.Wave], e.ID)
 		}
+	}
+	displayed := 0
+	for wi := range topByWave {
 		if len(topByWave[wi]) > 0 {
 			displayed++
 		}
@@ -161,7 +168,7 @@ func richWaves(wf *workflow.Workflow) string {
 	b.WriteString(sectionStyle.Render(fmt.Sprintf("Execution plan (%d wave%s)", displayed, plural(displayed))))
 	b.WriteString("\n")
 	waveNo := 0
-	for wi := range waves {
+	for wi := range topByWave {
 		if len(topByWave[wi]) > 0 {
 			waveNo++
 			b.WriteString(waveStyle.Render(fmt.Sprintf("  Wave %d (%d task%s)", waveNo, len(topByWave[wi]), plural(len(topByWave[wi])))))
@@ -171,41 +178,12 @@ func richWaves(wf *workflow.Workflow) string {
 			}
 		}
 		for li := range wf.Loops {
-			if loopWaveIndex(&wf.Loops[li], waveOf) == wi {
+			if loopWave[wf.Loops[li].ID] == wi {
 				b.WriteString(richLoopGroup(wf, &wf.Loops[li]))
 			}
 		}
 	}
 	return b.String()
-}
-
-// waveIndex maps each task id to the index of the wave it executes in, derived
-// from wf.Waves(). Loop members are included so a loop's flow position can be
-// computed from its body.
-func waveIndex(wf *workflow.Workflow) map[workflow.TaskID]int {
-	m := make(map[workflow.TaskID]int)
-	for i, wave := range wf.Waves() {
-		for _, id := range wave {
-			m[id] = i
-		}
-	}
-	return m
-}
-
-// loopWaveIndex returns the index of the earliest wave in which any member of
-// lg becomes runnable, i.e. where the loop sits in the execution flow. A loop
-// with no resolvable member wave (none in waveOf) anchors at wave 0.
-func loopWaveIndex(lg *workflow.LoopGroup, waveOf map[workflow.TaskID]int) int {
-	idx := -1
-	for _, m := range lg.Members {
-		if w, ok := waveOf[m]; ok && (idx == -1 || w < idx) {
-			idx = w
-		}
-	}
-	if idx == -1 {
-		return 0
-	}
-	return idx
 }
 
 // richLoopGroup draws one labeled group for a scoped loop: its id, a

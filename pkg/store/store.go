@@ -14,12 +14,12 @@
 // atomically (write to .tmp, rename) on every OnStart/OnFinish so a crash
 // mid-run still leaves a valid file on disk.
 //
-// Run.OnFinish consumes [executor.TaskResult] directly, so the CLI hooks the
-// store into the executor with no field-by-field translation at the boundary;
-// the store owns only [Summary], its workflow-level Close input. The package
-// never reaches into runtime or workflow internals beyond the small surface
-// those packages already expose. Disk errors are reported via the optional
-// OnError callback so a failing disk does not abort a workflow.
+// Run.OnFinish consumes a [TaskRecord] pre-mapped by pkg/runner, so the
+// executor import lives only in the runner layer; the store owns only
+// [Summary], its workflow-level Close input. The package never reaches into
+// runtime or workflow internals beyond the small surface those packages already
+// expose. Disk errors are reported via the optional OnError callback so a
+// failing disk does not abort a workflow.
 package store
 
 import (
@@ -32,7 +32,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/task"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -121,10 +120,7 @@ type Config struct {
 // events. The manifest bytes are stored verbatim so the on-disk snapshot
 // is byte-identical to what the user ran.
 func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, error) {
-	root := cfg.Root
-	if root == "" {
-		root = ".loom"
-	}
+	h := NewHome(cfg.Root)
 	now := time.Now
 	if cfg.Now != nil {
 		now = cfg.Now
@@ -141,11 +137,11 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 	}
 	id := started.Format(runIDLayout) + "-" + suffix
 
-	dir := filepath.Join(root, "runs", string(workflowID))
+	dir := h.workflowRunsDir(string(workflowID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: create run dir: %w", err)
 	}
-	path := filepath.Join(dir, id+".json")
+	path := h.runPath(string(workflowID), id)
 
 	r := &Run{
 		path:         path,
@@ -204,11 +200,11 @@ func (r *Run) OnStart(t workflow.Task, iter int, rt runtime.Name, m runtime.Mode
 	}
 }
 
-// OnFinish satisfies [executor.Hooks].OnFinish: it records a task's final
-// prompt, output, usage, and status, then rewrites the run file. Errors are
-// surfaced via the configured OnError callback and do not propagate to the
-// caller. As with OnStart, callers pass the method value directly.
-func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runErr error) {
+// OnFinish records a task's final prompt, output, usage, and status, then
+// rewrites the run file. rec is a [TaskRecord] DTO pre-populated by
+// pkg/runner so the store need not import pkg/executor. Errors are surfaced
+// via the configured OnError callback and do not propagate to the caller.
+func (r *Run) OnFinish(t workflow.Task, iter int, rec TaskRecord, runErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := taskKey{id: t.ID, iter: iter}
@@ -220,12 +216,12 @@ func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runEr
 	}
 	tr := &r.state.Tasks[idx]
 	tr.Iteration = iter
-	tr.Prompt = res.Prompt
-	tr.Command = res.Command
-	tr.Output = res.Output
-	tr.ExitCode = res.ExitCode
-	tr.Usage = usageDTO(res.Usage)
-	tr.ElapsedMs = res.Elapsed.Milliseconds()
+	tr.Prompt = rec.Prompt
+	tr.Command = rec.Command
+	tr.Output = rec.Output
+	tr.ExitCode = rec.ExitCode
+	tr.Usage = rec.Usage
+	tr.ElapsedMs = rec.ElapsedMs
 	tr.FinishedAt = r.now()
 	if runErr != nil {
 		tr.Status = StatusFailed
@@ -234,7 +230,7 @@ func (r *Run) OnFinish(t workflow.Task, iter int, res executor.TaskResult, runEr
 		// Preserve the executor's terminal disposition: a skipped task must not be
 		// recorded as "ok", or the persisted run view would disagree with the live
 		// TUI about the same task. Any other nil-error result is a completed task.
-		if res.Status == executor.StatusSkipped {
+		if rec.Status == StatusSkipped {
 			tr.Status = StatusSkipped
 		} else {
 			tr.Status = StatusOK
@@ -282,16 +278,7 @@ func (r *Run) Close(summary *Summary, runErr error) error {
 // The write goes to <path>.tmp then renames, so a crashed loom never leaves
 // a half-written file under the canonical path.
 func (r *Run) flushLocked() error {
-	data, err := json.MarshalIndent(r.state, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.path)
+	return writeJSONAtomic(r.path, r.state)
 }
 
 func (r *Run) now() time.Time {
@@ -330,71 +317,6 @@ func statusFor(err error) string {
 	return StatusFailed
 }
 
-func usageDTO(u runtime.Usage) usageJSON {
-	return usageJSON{
-		InputTokens:     u.InputTokens,
-		OutputTokens:    u.OutputTokens,
-		CacheReadTokens: u.CacheReadTokens,
-		TotalCostUSD:    u.TotalCostUSD,
-	}
-}
-
-// LoadState reads the cross-run state map for wf from
-// <root>/state/<workflow_id>.json. A missing file is not an error: it returns
-// a fresh empty map so first-tick callers can write into it directly. root
-// defaults to ".loom" when empty, matching [Config.Root].
-func LoadState(root string, wf workflow.WorkflowID) (map[string]string, error) {
-	if root == "" {
-		root = ".loom"
-	}
-	path := statePath(root, wf)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]string{}, nil
-		}
-		return nil, fmt.Errorf("store: read state %s: %w", path, err)
-	}
-	state := map[string]string{}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("store: parse state %s: %w", path, err)
-	}
-	return state, nil
-}
-
-// SaveState atomically writes the cross-run state map for wf to
-// <root>/state/<workflow_id>.json. The write is atomic: the bytes go to a .tmp
-// sibling and are renamed into place, so a crash mid-write never leaves a
-// half-written state file. root defaults to ".loom" when empty.
-func SaveState(root string, wf workflow.WorkflowID, state map[string]string) error {
-	if root == "" {
-		root = ".loom"
-	}
-	dir := filepath.Join(root, "state")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("store: create state dir: %w", err)
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("store: marshal state: %w", err)
-	}
-	data = append(data, '\n')
-	path := statePath(root, wf)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("store: write state: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("store: rename state: %w", err)
-	}
-	return nil
-}
-
-// statePath is the on-disk location of a workflow's cross-run state file.
-func statePath(root string, wf workflow.WorkflowID) string {
-	return filepath.Join(root, "state", string(wf)+".json")
-}
-
 // Load reads a run record from path and decodes it into a [RunRecord]. Used
 // by the resume command to recover the persisted manifest, params, and per-
 // task outputs from a prior run. Errors are wrapped with the source path so
@@ -409,58 +331,4 @@ func Load(path string) (*RunRecord, error) {
 		return nil, fmt.Errorf("store: parse run record %s: %w", path, err)
 	}
 	return &rec, nil
-}
-
-// RunRecord is the top-level on-disk structure for a single workflow run.
-// Exported so callers (e.g. the resume command) bind to the same JSON shape
-// the store writes; a field rename here is a compile-time error at the call
-// site instead of a silent JSON decode miss.
-type RunRecord struct {
-	RunID       string            `json:"run_id"`
-	WorkflowID  string            `json:"workflow_id"`
-	ScheduleID  string            `json:"schedule_id,omitempty"`
-	TriggeredBy string            `json:"triggered_by,omitempty"`
-	Cwd         string            `json:"cwd,omitempty"`
-	StartedAt   time.Time         `json:"started_at"`
-	FinishedAt  time.Time         `json:"finished_at,omitzero"`
-	ElapsedMs   int64             `json:"elapsed_ms,omitempty"`
-	Status      string            `json:"status"`
-	Error       string            `json:"error,omitempty"`
-	TaskCount   int               `json:"task_count,omitempty"`
-	Usage       usageJSON         `json:"usage,omitzero"`
-	Manifest    string            `json:"manifest"`
-	Params      map[string]string `json:"params,omitempty"`
-	Tasks       []TaskRecord      `json:"tasks"`
-}
-
-// TaskRecord is the per-task entry within a [RunRecord]. Iteration is the
-// 1-based scoped-loop pass that produced this record and 0 for a non-looped
-// task, so a looped task contributes one record per pass.
-type TaskRecord struct {
-	ID         string    `json:"id"`
-	Iteration  int       `json:"iteration,omitempty"`
-	Runtime    string    `json:"runtime,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Effort     string    `json:"effort,omitempty"`
-	StartedAt  time.Time `json:"started_at,omitzero"`
-	FinishedAt time.Time `json:"finished_at,omitzero"`
-	ElapsedMs  int64     `json:"elapsed_ms,omitempty"`
-	Status     string    `json:"status,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	Usage      usageJSON `json:"usage,omitzero"`
-	Prompt     string    `json:"prompt,omitempty"`
-	Command    string    `json:"command,omitempty"`
-	Output     string    `json:"output,omitempty"`
-	// ExitCode is a script task's process exit code. Omitted (and zero) for every
-	// other task form and for a script task that exited cleanly.
-	ExitCode int `json:"exit_code,omitempty"`
-}
-
-// usageJSON is unexported; external callers read accounting via the embedded
-// fields of RunRecord/TaskRecord rather than through this inner type.
-type usageJSON struct {
-	InputTokens     int     `json:"input_tokens,omitempty"`
-	OutputTokens    int     `json:"output_tokens,omitempty"`
-	CacheReadTokens int     `json:"cache_read_tokens,omitempty"`
-	TotalCostUSD    float64 `json:"total_cost_usd,omitempty"`
 }

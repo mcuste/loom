@@ -224,10 +224,10 @@ func (d *daemon) logf(format string, a ...any) {
 
 // schedulesDir returns the on-disk directory that holds schedule records.
 func (d *daemon) schedulesDir() string {
-	return filepath.Join(d.home, "schedules")
+	return schedule.SchedulesDir(d.home)
 }
 
 // scheduleLogDir returns the per-schedule log directory.
 func (d *daemon) scheduleLogDir(id string) string {
-	return filepath.Join(d.home, "schedules", "logs", id)
+	return filepath.Join(schedule.SchedulesDir(d.home), "logs", id)
 }

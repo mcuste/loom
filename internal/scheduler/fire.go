@@ -11,7 +11,6 @@ import (
 
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/schedule"
-	"github.com/mcuste/loom/pkg/tui"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -52,16 +51,22 @@ func (d *daemon) execute(rec schedule.Record, fireTime time.Time, results chan<-
 	}
 	defer func() { _ = lf.Close() }()
 
-	r := tui.New(lf)
-	defer func() { _ = r.Close() }()
+	cwd, err := os.Getwd()
+	if err != nil {
+		res.err = fmt.Errorf("resolve working directory: %w", err)
+		d.logf("schedule %s: %v", rec.ID, res.err)
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	prov := runner.Provenance{ScheduleID: rec.ID, TriggeredBy: "schedule"}
-	res.runID, res.err = runner.Run(ctx, r, lf, runner.Request{
+	res.runID, res.err = runner.RunPlain(ctx, lf, runner.Request{
 		Wf:       wf,
 		Manifest: manifest,
 		Resolved: resolved,
 		Home:     d.home,
+		Cwd:      cwd,
 		Prov:     prov,
 	})
 	if res.err != nil {

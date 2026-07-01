@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/tui"
@@ -81,10 +83,16 @@ func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, 
 // the command is issued, not at fire time. It returns the parsed workflow, the
 // inlined manifest bytes (what the store persists), and the resolved absolute
 // path the schedule records so the daemon can reload it from its own cwd.
-func loadWorkflow(ref string) (*workflow.Workflow, []byte, string, error) {
-	path, err := resolveWorkflowRef(ref)
+func loadWorkflow(home, ref string) (*workflow.Workflow, []byte, string, error) {
+	path, err := resolveWorkflowRef(home, ref)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	// Make the path absolute so the scheduler can reload the file regardless of
+	// its own working directory, and so callers do not need a separate abs step.
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("resolve workflow path %s: %w", path, err)
 	}
 	wf, manifest, err := workflow.ReadAndParse(path)
 	if err != nil {
@@ -93,7 +101,9 @@ func loadWorkflow(ref string) (*workflow.Workflow, []byte, string, error) {
 	// Resolve and link any `workflow:` children from disk, statically validate
 	// them, and run the routing check, so a bad sub-workflow ref or route fails
 	// before any model call.
-	if err := workflow.Link(wf, path, resolveSubWorkflowRef); err != nil {
+	if err := workflow.Link(wf, path, func(ref, parentDir string) (string, error) {
+		return resolveSubWorkflowRef(home, ref, parentDir)
+	}); err != nil {
 		return nil, nil, "", err
 	}
 	return wf, manifest, path, nil
@@ -104,9 +114,20 @@ func loadWorkflow(ref string) (*workflow.Workflow, []byte, string, error) {
 // share this tail: one renderer drives both the check and the run that follows, so
 // a stateful display spans both. params carries the CLI and (lower-precedence)
 // file tiers; seeded annotates the plan with carried-over tasks. The caller
-// fills req.Wf, req.Manifest, req.Home, and any seed plan; the resolved params
-// come from the check done here.
+// fills req.Wf, req.Manifest, req.Home, req.Cwd, and any seed plan; the
+// resolved params come from the check done here.
 func renderCheckRun(w io.Writer, req runner.Request, params paramInputs, seeded map[workflow.TaskID]bool) (err error) {
+	// Resolve cwd here when the caller did not supply one, so Run's store open
+	// records the directory this invocation is launched from. Callers that
+	// chdir before reaching here (resume paths) set req.Cwd explicitly so the
+	// record stores the restored directory, not the mid-chdir one.
+	if req.Cwd == "" {
+		cwd, cwderr := os.Getwd()
+		if cwderr != nil {
+			return fmt.Errorf("resolve working directory: %w", cwderr)
+		}
+		req.Cwd = cwd
+	}
 	r, finish := newRenderer(w)
 	defer finish(&err)
 	resolved, err := validateAndPlan(r, req.Wf, params, false, seeded)

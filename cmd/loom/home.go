@@ -38,3 +38,11 @@ func loomHome() (string, error) {
 func workflowsDir(home string) string {
 	return filepath.Join(home, "workflows")
 }
+
+// cliEnv is the resolved per-invocation environment. It is created once in
+// newRootCmd and populated by PersistentPreRunE so every subcommand handler
+// receives a single explicit input rather than re-deriving loomHome
+// independently.
+type cliEnv struct {
+	home string
+}

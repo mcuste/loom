@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mcuste/loom/pkg/registry"
 	"github.com/mcuste/loom/pkg/schedule"
 )
 
@@ -108,7 +109,7 @@ func minimalWFBody(desc string) string {
 func TestWorkflowsTableColumns(t *testing.T) {
 	path := writeWFFile(t, "name: mywf\nruntime: cmd-echo\nmodel: m1\ntasks:\n  - id: a\n    command: echo hi\n")
 	var buf bytes.Buffer
-	if err := WorkflowsTable(&buf, []WorkflowRef{{Name: "mywf", Path: path}}); err != nil {
+	if err := WorkflowsTable(&buf, []registry.Ref{{Name: "mywf", Path: path}}); err != nil {
 		t.Fatalf("WorkflowsTable: %v", err)
 	}
 	out := buf.String()
@@ -125,7 +126,7 @@ func TestWorkflowsTableTruncation(t *testing.T) {
 	longDesc := strings.Repeat("x", 65) // exceeds descWidth (60)
 	path := writeWFFile(t, minimalWFBody(longDesc))
 	var buf bytes.Buffer
-	if err := WorkflowsTable(&buf, []WorkflowRef{{Name: "wf", Path: path}}); err != nil {
+	if err := WorkflowsTable(&buf, []registry.Ref{{Name: "wf", Path: path}}); err != nil {
 		t.Fatalf("WorkflowsTable: %v", err)
 	}
 	out := buf.String()
@@ -145,7 +146,7 @@ func TestWorkflowsTableFirstLine(t *testing.T) {
 	body := "name: wf\nruntime: cmd-echo\nmodel: m1\ndescription: |\n  first\n  second\ntasks:\n  - id: a\n    command: echo hi\n"
 	path := writeWFFile(t, body)
 	var buf bytes.Buffer
-	if err := WorkflowsTable(&buf, []WorkflowRef{{Name: "wf", Path: path}}); err != nil {
+	if err := WorkflowsTable(&buf, []registry.Ref{{Name: "wf", Path: path}}); err != nil {
 		t.Fatalf("WorkflowsTable: %v", err)
 	}
 	out := buf.String()
@@ -166,7 +167,7 @@ func TestWorkflowsTableBlankDescOnParseError(t *testing.T) {
 		t.Fatalf("write bad yaml: %v", err)
 	}
 	var buf bytes.Buffer
-	if err := WorkflowsTable(&buf, []WorkflowRef{{Name: "bad", Path: badPath}}); err != nil {
+	if err := WorkflowsTable(&buf, []registry.Ref{{Name: "bad", Path: badPath}}); err != nil {
 		t.Fatalf("WorkflowsTable: %v", err)
 	}
 	out := buf.String()

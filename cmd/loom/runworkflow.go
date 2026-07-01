@@ -13,7 +13,7 @@ import (
 // its `check` subcommand stops after validation and the printed plan. A path
 // that is not a subcommand routes to the parent (cobra runs it when args[0]
 // does not name a child), so `loom run wf.yaml` executes as before.
-func newRunCmd() *cobra.Command {
+func newRunCmd(env *cliEnv) *cobra.Command {
 	var (
 		paramArgs    []string
 		resumeLatest bool
@@ -25,7 +25,7 @@ func newRunCmd() *cobra.Command {
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if resumeLatest {
-				return doRunResumeLatest(cmd.OutOrStdout(), args[0], paramArgs)
+				return doRunResumeLatest(cmd.OutOrStdout(), env.home, args[0], paramArgs)
 			}
 			return doRun(cmd.OutOrStdout(), args[0], paramArgs)
 		},
@@ -33,7 +33,7 @@ func newRunCmd() *cobra.Command {
 	addParamFlags(cmd, &paramArgs)
 	cmd.Flags().BoolVar(&resumeLatest, "resume-latest", false,
 		"seed ok tasks from $LOOM_HOME/runs/<wf>/latest.json (default $HOME/.loom) and re-run the remainder")
-	cmd.AddCommand(newCheckCmd())
+	cmd.AddCommand(newCheckCmd(env))
 	return cmd
 }
 
@@ -41,11 +41,11 @@ func newRunCmd() *cobra.Command {
 // if it passes, executes the whole workflow fresh. home is resolved up front (as
 // the resume paths do) so a home-resolution failure surfaces before the plan.
 func doRun(w io.Writer, path string, paramArgs []string) error {
-	wf, manifest, _, err := loadWorkflow(path)
+	home, err := loomHome()
 	if err != nil {
 		return err
 	}
-	home, err := loomHome()
+	wf, manifest, _, err := loadWorkflow(home, path)
 	if err != nil {
 		return err
 	}

@@ -79,6 +79,7 @@ var spec = runtime.Spec{
 	AcceptSystemPrompt: false,
 	Args:               args,
 	Decode:             decode,
+	Price:              costUSD,
 }
 
 func args(req runtime.Request) []string {
@@ -95,14 +96,12 @@ func args(req runtime.Request) []string {
 }
 
 // decode scans codex's JSONL event stream for the final agent message and turn
-// usage, then derives TotalCostUSD from the model pricing. The model is taken
-// from whichever event echoes it (codex stamps the resolved model on its
-// stream); an absent model falls through costUSD to a non-fatal 0.
+// usage. Pricing is applied by Spec.Run via the Price hook; decode is a pure
+// stdout-to-Response transform.
 func decode(stdout []byte) (runtime.Response, error) {
 	var (
 		lastAgentMessage string
 		usage            runtime.Usage
-		model            runtime.Model
 	)
 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
 	// Individual JSONL events (especially reasoning items) can exceed the
@@ -119,7 +118,6 @@ func decode(stdout []byte) (runtime.Response, error) {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"item"`
-			Model runtime.Model `json:"model"`
 			Usage struct {
 				InputTokens           int `json:"input_tokens"`
 				CachedInputTokens     int `json:"cached_input_tokens"`
@@ -129,9 +127,6 @@ func decode(stdout []byte) (runtime.Response, error) {
 		}
 		if err := json.Unmarshal(line, &ev); err != nil {
 			return runtime.Response{}, fmt.Errorf("parse json: %w", err)
-		}
-		if ev.Model != "" {
-			model = ev.Model
 		}
 		switch ev.Type {
 		case "item.completed":
@@ -155,7 +150,6 @@ func decode(stdout []byte) (runtime.Response, error) {
 		return runtime.Response{}, fmt.Errorf("no agent_message in event stream")
 	}
 
-	usage.TotalCostUSD = costUSD(model, usage)
 	return runtime.Response{
 		Output: lastAgentMessage,
 		Usage:  usage,

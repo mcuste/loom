@@ -8,9 +8,10 @@ import (
 
 	"github.com/mcuste/loom/internal/daemoninstall"
 	"github.com/mcuste/loom/internal/scheduler"
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
-func newDaemonCmd() *cobra.Command {
+func newDaemonCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run the scheduler loop that fires scheduled workflows",
@@ -20,17 +21,16 @@ func newDaemonCmd() *cobra.Command {
 			"supervisor (launchd/systemd) to keep it alive across reboots.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			home, err := loomHome()
-			if err != nil {
-				return err
-			}
 			ctx, stop := interruptContext()
 			defer stop()
-			d := scheduler.New(home, cmd.OutOrStdout(), loadWorkflow)
+			loader := func(ref string) (*workflow.Workflow, []byte, string, error) {
+				return loadWorkflow(env.home, ref)
+			}
+			d := scheduler.New(env.home, cmd.OutOrStdout(), loader)
 			return d.Run(ctx)
 		},
 	}
-	cmd.AddCommand(newDaemonInstallCmd())
+	cmd.AddCommand(newDaemonInstallCmd(env))
 	return cmd
 }
 
@@ -38,7 +38,7 @@ func newDaemonCmd() *cobra.Command {
 // systemd on Linux) that keeps `loom daemon` running across logout and reboot,
 // and by default loads it so the daemon starts immediately. Pass --manual to
 // only write the unit and print the commands to enable it yourself.
-func newDaemonInstallCmd() *cobra.Command {
+func newDaemonInstallCmd(env *cliEnv) *cobra.Command {
 	var manual bool
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -49,11 +49,7 @@ func newDaemonInstallCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolve loom binary path: %w", err)
 			}
-			home, err := loomHome()
-			if err != nil {
-				return err
-			}
-			return daemoninstall.Install(cmd.OutOrStdout(), exec, home, manual)
+			return daemoninstall.Install(cmd.OutOrStdout(), exec, env.home, manual)
 		},
 	}
 	cmd.Flags().BoolVar(&manual, "manual", false, "only write the unit file; print the commands to enable it yourself instead of running them")

@@ -7,40 +7,11 @@ import (
 )
 
 // decideFire is the pure firing decision for one record at instant now. It
-// returns whether to fire, whether to remove the record, and the NextFire to
-// persist. firstScan distinguishes a tick that is due now from one that was
-// missed while the daemon was down (only honored for catch-up).
+// delegates to rec.Due, which lives next to the Record type in pkg/schedule.
+// firstScan distinguishes a tick that is due now from one that was missed
+// while the daemon was down (only honored for catch-up).
 func decideFire(rec schedule.Record, now time.Time, firstScan bool) (fire, remove bool, next time.Time, err error) {
-	if rec.Trigger.IsCron() {
-		nf := rec.NextFire
-		if nf.IsZero() {
-			if nf, err = rec.NextFireAfter(now); err != nil {
-				return false, false, time.Time{}, err
-			}
-		}
-		if now.Before(nf) {
-			return false, false, nf, nil // not due
-		}
-		advanced, err := rec.NextFireAfter(now)
-		if err != nil {
-			return false, false, time.Time{}, err
-		}
-		if firstScan && !rec.Catchup {
-			// Missed tick(s) while down; skip without firing.
-			return false, false, advanced, nil
-		}
-		return true, false, advanced, nil
-	}
-
-	// One-off.
-	at := rec.Trigger.At
-	if now.Before(at) {
-		return false, false, at, nil // not due
-	}
-	if firstScan && !rec.Catchup {
-		return false, true, time.Time{}, nil // missed while down, drop
-	}
-	return true, true, time.Time{}, nil // fire then remove
+	return rec.Due(now, firstScan)
 }
 
 // earliest returns the earlier of two instants, treating the zero time as

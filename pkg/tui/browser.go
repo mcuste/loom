@@ -14,6 +14,17 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
+// runLoader abstracts loading a run record from disk so the browser model
+// can be tested without a real filesystem.
+type runLoader interface {
+	Load(path string) (*store.RunRecord, error)
+}
+
+// runLoaderFunc adapts a function to runLoader.
+type runLoaderFunc func(string) (*store.RunRecord, error)
+
+func (f runLoaderFunc) Load(path string) (*store.RunRecord, error) { return f(path) }
+
 // Browse runs the interactive run browser over headers until the user quits.
 // It takes over the screen (alternate buffer) and reads keys from the default
 // input; callers should invoke it only for an interactive terminal (Rich(w)),
@@ -63,6 +74,8 @@ type browserModel struct {
 	ttop    int                // first visible step-pane row (incl. wave headers)
 	oscroll int                // output-pane scroll offset
 
+	loader runLoader
+
 	sym    symbolSet
 	width  int
 	height int
@@ -73,6 +86,7 @@ type browserModel struct {
 func newBrowserModel(w io.Writer, headers []store.RunHeader) *browserModel {
 	m := &browserModel{
 		all:    headers,
+		loader: runLoaderFunc(store.Load),
 		sym:    symbolsFor(termenv.NewOutput(w).Profile),
 		width:  80,
 		height: 24,
@@ -205,7 +219,7 @@ func (m *browserModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // pane rather than aborting the browser.
 func (m *browserModel) openSelected() {
 	h := m.current()
-	m.rec, m.recErr = store.Load(h.Path)
+	m.rec, m.recErr = m.loader.Load(h.Path)
 	m.mode = modeDetail
 	m.tsel, m.ttop, m.oscroll = 0, 0, 0
 	m.status = ""
@@ -214,64 +228,14 @@ func (m *browserModel) openSelected() {
 	}
 }
 
-// stepNode is one task in the opened run's dependency graph: its id, the wave
-// (topological level) it runs in, whether it is the last task in that wave
-// (for the tree elbow vs tee glyph), how many records it produced (a looped
-// task yields more than one), and the record carrying its status and output
-// (nil when the task never ran, e.g. it was gated out by an upstream failure).
-type stepNode struct {
-	id    workflow.TaskID
-	wave  int // -1 when the manifest did not parse (flat fallback)
-	last  bool
-	iters int
-	rec   *store.TaskRecord
-}
-
-// buildSteps derives the step nodes for the opened run. With a parsed manifest
-// it groups tasks into execution waves (so the pane can show what runs in
-// parallel); without one it falls back to the recorded tasks in order. Either
-// way each node is matched to its record by id.
+// buildSteps derives the step nodes for the opened run by delegating to
+// NewRunView, which encapsulates the manifest-parsing and wave-grouping logic
+// shared with the plain renderers. The browser model retains only the cursor,
+// scroll, and filter state that is inherently interactive.
 func (m *browserModel) buildSteps() {
-	m.steps = m.steps[:0]
-	m.wf = nil
-	if m.rec.Manifest != "" {
-		if wf, err := workflow.Parse([]byte(m.rec.Manifest)); err == nil {
-			m.wf = wf
-		}
-	}
-	if m.wf == nil {
-		// Fallback: one node per record, no wave structure.
-		for i := range m.rec.Tasks {
-			m.steps = append(m.steps, stepNode{
-				id: workflow.TaskID(m.rec.Tasks[i].ID), wave: -1, last: true,
-				iters: 1, rec: &m.rec.Tasks[i],
-			})
-		}
-		return
-	}
-	for wi, wave := range m.wf.Waves() {
-		for j, id := range wave {
-			m.steps = append(m.steps, stepNode{
-				id:    id,
-				wave:  wi,
-				last:  j == len(wave)-1,
-				iters: m.countRecords(id),
-				rec:   findTask(m.rec, string(id)),
-			})
-		}
-	}
-}
-
-// countRecords counts how many task records share an id; a looped or for_each
-// task contributes one per iteration.
-func (m *browserModel) countRecords(id workflow.TaskID) int {
-	n := 0
-	for i := range m.rec.Tasks {
-		if m.rec.Tasks[i].ID == string(id) {
-			n++
-		}
-	}
-	return n
+	rv := NewRunView(m.rec)
+	m.wf = rv.Wf
+	m.steps = rv.Steps
 }
 
 // scrollBottom is the sentinel offset for "scroll to the end": View clamps it

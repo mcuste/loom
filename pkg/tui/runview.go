@@ -171,9 +171,10 @@ func ShowRun(w io.Writer, rec *store.RunRecord, full bool) error {
 		return ew.err
 	}
 
-	// Parse the embedded manifest (best effort) so the summary and bodies can
-	// annotate each task with its dependencies.
-	wf := parseManifest(rec)
+	// Build the run read-model once: parses the manifest best-effort so the
+	// summary and bodies can annotate each task with its dependencies.
+	rv := NewRunView(rec)
+	wf := rv.Wf
 
 	if _, err := fmt.Fprintf(w, "\nTasks (%d):\n", len(rec.Tasks)); err != nil {
 		return err
@@ -246,6 +247,89 @@ func writeTaskBody(ew *errWriter, tr *store.TaskRecord) {
 	if tr.Error != "" {
 		ew.printf("\n── error ────────────────────────────────\n%s\n", tr.Error)
 	}
+}
+
+// stepNode is one task in the opened run's dependency graph: its id, the wave
+// (topological level) it runs in, whether it is the last task in that wave
+// (for the tree elbow vs tee glyph), how many records it produced (a looped
+// task yields more than one), and the record carrying its status and output
+// (nil when the task never ran, e.g. it was gated out by an upstream failure).
+type stepNode struct {
+	id    workflow.TaskID
+	wave  int // -1 when the manifest did not parse (flat fallback)
+	last  bool
+	iters int
+	rec   *store.TaskRecord
+}
+
+// RunView is the delivery-free read model for one run's dependency graph and
+// task records. It is built once from a RunRecord and consumed by both the
+// interactive browser model and the plain renderers (ShowRun, RunsTable).
+// Both call sites keep only their presentation logic and read from this struct.
+type RunView struct {
+	// Wf is the parsed workflow manifest, or nil when absent or unparseable.
+	Wf *workflow.Workflow
+	// Steps lists the run's tasks in wave execution order (topological sort).
+	// When the manifest did not parse, wave is -1 for every step (flat fallback).
+	Steps []stepNode
+	// ByID maps each task id to its first-seen task record (nil for a task that
+	// never ran). A looped task appears multiple times in the record but the map
+	// holds only the first entry; callers needing all iterations scan Steps.
+	ByID map[workflow.TaskID]*store.TaskRecord
+}
+
+// NewRunView builds a RunView from a run record. It parses the embedded manifest
+// best-effort and uses its wave structure when available; without a parseable
+// manifest it falls back to the recorded tasks in declaration order.
+func NewRunView(rec *store.RunRecord) RunView {
+	rv := RunView{
+		Wf:   parseManifest(rec),
+		ByID: make(map[workflow.TaskID]*store.TaskRecord, len(rec.Tasks)),
+	}
+	for i := range rec.Tasks {
+		id := workflow.TaskID(rec.Tasks[i].ID)
+		if _, seen := rv.ByID[id]; !seen {
+			rv.ByID[id] = &rec.Tasks[i]
+		}
+	}
+	if rv.Wf == nil {
+		for i := range rec.Tasks {
+			rv.Steps = append(rv.Steps, stepNode{
+				id:    workflow.TaskID(rec.Tasks[i].ID),
+				wave:  -1,
+				last:  true,
+				iters: 1,
+				rec:   &rec.Tasks[i],
+			})
+		}
+		return rv
+	}
+	for _, e := range rv.Wf.AnnotatedPlan() {
+		rv.Steps = append(rv.Steps, stepNode{
+			id:    e.ID,
+			wave:  e.Wave,
+			last:  e.LastInWave,
+			iters: countRecordsForID(rec, e.ID),
+			rec:   findTask(rec, string(e.ID)),
+		})
+	}
+	return rv
+}
+
+// countRecordsForID counts how many task records in rec share the given id.
+// A looped or for_each task contributes one record per iteration; a task that
+// never ran (not present in records) returns 1 so the step node still renders.
+func countRecordsForID(rec *store.RunRecord, id workflow.TaskID) int {
+	n := 0
+	for i := range rec.Tasks {
+		if rec.Tasks[i].ID == string(id) {
+			n++
+		}
+	}
+	if n == 0 {
+		return 1
+	}
+	return n
 }
 
 // parseManifest re-parses the run record's embedded manifest, returning nil if

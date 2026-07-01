@@ -2,21 +2,19 @@ package store_test
 
 import (
 	"testing"
-	"time"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// These tests pin the type-consolidation contract: store.Run.OnFinish now
-// accepts an executor.TaskResult directly and reads the fields it persists
-// (Prompt, Command, Output, Usage, Elapsed) straight off that value, with no
-// intermediate store-owned result type. Each sub-test drives a single OnFinish
-// call and asserts one persisted field so a regression names the exact field
-// that stopped flowing through. readRun and the deterministic clock/rand
-// helpers are shared from store_test.go in this package.
+// These tests pin the field-consolidation contract: store.Run.OnFinish
+// accepts a store.TaskRecord DTO and reads the fields it persists (Prompt,
+// Command, Output, Usage, ElapsedMs) straight off that value. Each sub-test
+// drives a single OnFinish call and asserts one persisted field so a
+// regression names the exact field that stopped flowing through. readRun and
+// the deterministic clock/rand helpers are shared from store_test.go in this
+// package.
 
 // openRun opens a run rooted at a fresh temp dir with deterministic id inputs.
 // Failing fast on the open error keeps each scenario test focused on the one
@@ -34,10 +32,10 @@ func openRun(t *testing.T) *store.Run {
 	return run
 }
 
-// TestOnFinishPersistsExecutorResultFields pins, one field per sub-test, that
-// each field of an executor.TaskResult lands in the on-disk task record. The
+// TestOnFinishPersistsTaskRecordFields pins, one field per sub-test, that
+// each field of a store.TaskRecord DTO lands in the on-disk task record. The
 // cases are fully independent, so they run in parallel.
-func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
+func TestOnFinishPersistsTaskRecordFields(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -45,13 +43,13 @@ func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
 		rt     runtime.Name
 		model  runtime.Model
 		effort runtime.Effort
-		result executor.TaskResult
+		result store.TaskRecord
 		want   func(t *testing.T, task map[string]any)
 	}{
 		{
 			name: "prompt",
 			rt:   "claude-code", model: "sonnet", effort: "medium",
-			result: executor.TaskResult{Prompt: "substituted prompt"},
+			result: store.TaskRecord{Prompt: "substituted prompt"},
 			want: func(t *testing.T, task map[string]any) {
 				if task["prompt"] != "substituted prompt" {
 					t.Fatalf("tasks[0].prompt = %v, want %q", task["prompt"], "substituted prompt")
@@ -61,7 +59,7 @@ func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
 		{
 			name: "output",
 			rt:   "claude-code", model: "sonnet", effort: "medium",
-			result: executor.TaskResult{Output: "model output"},
+			result: store.TaskRecord{Output: "model output"},
 			want: func(t *testing.T, task map[string]any) {
 				if task["output"] != "model output" {
 					t.Fatalf("tasks[0].output = %v, want %q", task["output"], "model output")
@@ -69,10 +67,9 @@ func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
 			},
 		},
 		{
-			// Shell tasks carry no runtime/model/effort; executor.TaskResult is the
-			// single owner that carries Command.
+			// Shell tasks carry no runtime/model/effort; Command is set on the DTO.
 			name:   "command",
-			result: executor.TaskResult{Command: "echo {{msg}}"},
+			result: store.TaskRecord{Command: "echo {{msg}}"},
 			want: func(t *testing.T, task map[string]any) {
 				if task["command"] != "echo {{msg}}" {
 					t.Fatalf("tasks[0].command = %v, want %q", task["command"], "echo {{msg}}")
@@ -82,7 +79,7 @@ func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
 		{
 			name: "usage",
 			rt:   "claude-code", model: "sonnet", effort: "medium",
-			result: executor.TaskResult{Usage: runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5}},
+			result: store.NewTaskRecord("", "", "", 0, 0, "", runtime.Usage{InputTokens: 10, OutputTokens: 20, TotalCostUSD: 0.5}),
 			want: func(t *testing.T, task map[string]any) {
 				usage, ok := task["usage"].(map[string]any)
 				if !ok {
@@ -96,7 +93,7 @@ func TestOnFinishPersistsExecutorResultFields(t *testing.T) {
 		{
 			name: "elapsed",
 			rt:   "claude-code", model: "sonnet", effort: "medium",
-			result: executor.TaskResult{Elapsed: 250 * time.Millisecond},
+			result: store.TaskRecord{ElapsedMs: 250},
 			want: func(t *testing.T, task map[string]any) {
 				if v, _ := task["elapsed_ms"].(float64); int64(v) != 250 {
 					t.Fatalf("tasks[0].elapsed_ms = %v, want 250", task["elapsed_ms"])

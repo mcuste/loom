@@ -33,12 +33,21 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
+	env := &cliEnv{}
 	root := &cobra.Command{
 		Use:          "loom",
 		Short:        "Validate and run workflow YAML files",
 		SilenceUsage: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			h, err := loomHome()
+			if err != nil {
+				return err
+			}
+			env.home = h
+			return nil
+		},
 	}
-	root.AddCommand(newRunCmd(), newResumeCmd(), newRunsCmd(), newWorkflowsCmd(), newScheduleCmd(), newDaemonCmd())
+	root.AddCommand(newRunCmd(env), newResumeCmd(env), newRunsCmd(env), newWorkflowsCmd(env), newScheduleCmd(env), newDaemonCmd(env))
 	return root
 }
 

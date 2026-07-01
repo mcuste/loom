@@ -19,7 +19,7 @@ import (
 // path component (no separators) so a crafted value cannot escape the runs
 // root via `..` traversal. Shared by `loom resume` and `loom runs show`.
 func ResolveRunID(root, runID string) (string, error) {
-	runsRoot := filepath.Join(rootOrDefault(root), "runs")
+	runsRoot := NewHome(root).runsDir()
 	if runID == "latest" {
 		return findLatestRecord(runsRoot)
 	}
@@ -71,7 +71,7 @@ func LoadByRunID(root, runID string) (*RunRecord, error) {
 // authority for this path so callers that need "the last run of workflow X" do
 // not re-derive the layout independently.
 func WorkflowLatestPath(root, workflowID string) string {
-	return filepath.Join(rootOrDefault(root), "runs", workflowID, "latest.json")
+	return NewHome(root).latestPath(workflowID)
 }
 
 // validateRunID rejects ids that contain a path separator; without this,

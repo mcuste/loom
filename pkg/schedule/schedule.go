@@ -30,8 +30,6 @@ import (
 	"time"
 
 	"github.com/adhocore/gronx"
-
-	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // Overlap is the policy for a fire that arrives while the schedule's previous
@@ -88,42 +86,6 @@ func (t Trigger) Summary() string {
 		return "at -"
 	}
 	return "at " + t.At.Format("2006-01-02 15:04 MST")
-}
-
-// ParseAtTime turns a clock time (and optional date) in loc into a concrete
-// instant. Without a date it uses today in loc; if that instant has already
-// passed it rolls to the next day, so "at 15:00" means the next 15:00. A
-// supplied date is honored verbatim (no rollover).
-//
-// The optional labels argument customises the field names used in error
-// messages: labels[0] replaces "time" (e.g. "--time") and labels[1] replaces
-// "date" (e.g. "--date"). Callers that surface CLI flag names pass them here
-// so format errors name the offending flag directly.
-func ParseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time, labels ...string) (time.Time, error) {
-	timeLabel, dateLabel := "time", "date"
-	if len(labels) > 0 && labels[0] != "" {
-		timeLabel = labels[0]
-	}
-	if len(labels) > 1 && labels[1] != "" {
-		dateLabel = labels[1]
-	}
-	hm, err := time.Parse("15:04", timeStr)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("schedule: invalid %s %q: want HH:MM", timeLabel, timeStr)
-	}
-	if dateStr != "" {
-		d, err := time.Parse("2006-01-02", dateStr)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("schedule: invalid %s %q: want YYYY-MM-DD", dateLabel, dateStr)
-		}
-		return time.Date(d.Year(), d.Month(), d.Day(), hm.Hour(), hm.Minute(), 0, 0, loc), nil
-	}
-	nowLoc := now.In(loc)
-	at := time.Date(nowLoc.Year(), nowLoc.Month(), nowLoc.Day(), hm.Hour(), hm.Minute(), 0, 0, loc)
-	if !at.After(now) {
-		at = at.AddDate(0, 0, 1)
-	}
-	return at, nil
 }
 
 // Record is a single persisted schedule.
@@ -203,32 +165,6 @@ func Validate(rec Record) error {
 		}
 	}
 	return nil
-}
-
-// NextFireAfter computes the next instant the schedule is due strictly after t,
-// returned in UTC. For a one-off, it is the trigger instant when that is after
-// t, otherwise the zero time (already past). For a cron, the expression is
-// evaluated in the trigger's timezone (local when TZ is empty).
-func (r Record) NextFireAfter(t time.Time) (time.Time, error) {
-	if !r.Trigger.IsCron() {
-		if r.Trigger.At.After(t) {
-			return r.Trigger.At.UTC(), nil
-		}
-		return time.Time{}, nil
-	}
-	loc := time.Local
-	if r.Trigger.TZ != "" {
-		l, err := time.LoadLocation(r.Trigger.TZ)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("schedule: invalid timezone %q: %w", r.Trigger.TZ, err)
-		}
-		loc = l
-	}
-	next, err := gronx.NextTickAfter(r.Trigger.Cron, t.In(loc), false)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("schedule: compute next tick for %q: %w", r.Trigger.Cron, err)
-	}
-	return next.UTC(), nil
 }
 
 // Add validates rec, assigns its id (when empty), CreatedAt, and initial
@@ -384,88 +320,6 @@ func NewAtRecord(workflowID, ref, path string, params map[string]string, catchup
 	return rec
 }
 
-// inlineIDSuffix marks schedule IDs that originate from a workflow's inline
-// `schedule:` block. It is the single authority for the naming convention so
-// a re-sync upserts the same record and a dropped block can find and remove
-// its prior record.
-const inlineIDSuffix = "_inline"
-
-// SyncAction describes the outcome of a [SyncInline] call.
-type SyncAction int
-
-const (
-	// SyncNoOp means the workflow has no inline schedule and none was stored.
-	SyncNoOp SyncAction = iota
-	// SyncAdded means a new inline schedule record was created.
-	SyncAdded
-	// SyncUpdated means an existing inline schedule record was updated in place.
-	SyncUpdated
-	// SyncRemoved means a previously synced inline schedule was deleted because
-	// the workflow's `schedule:` block was dropped.
-	SyncRemoved
-)
-
-// SyncResult is the outcome of a [SyncInline] call.
-type SyncResult struct {
-	// Action classifies what happened.
-	Action SyncAction
-	// ID is the schedule id that was affected. Empty for SyncNoOp.
-	ID string
-	// NextFire is the next fire instant for SyncAdded and SyncUpdated.
-	// Zero for SyncRemoved and SyncNoOp.
-	NextFire time.Time
-}
-
-// SyncInline upserts or removes the inline schedule for wf and returns a
-// SyncResult describing the change. path must be the absolute workflow file
-// path. ref is the display name recorded on the schedule record and shown in
-// messages.
-//
-// Field-preservation rule on update: CreatedAt, LastFire, LastRunID, and
-// Enabled from the existing record survive the re-sync; NextFire is
-// recomputed from the (possibly updated) cron expression.
-func SyncInline(home string, wf *workflow.Workflow, path, ref string) (SyncResult, error) {
-	id := string(wf.ID) + inlineIDSuffix
-	existing, getErr := Get(home, id)
-
-	if wf.Schedule == nil {
-		if getErr == nil {
-			if err := Remove(home, id); err != nil {
-				return SyncResult{}, err
-			}
-			return SyncResult{Action: SyncRemoved, ID: id}, nil
-		}
-		return SyncResult{Action: SyncNoOp}, nil
-	}
-
-	rec := NewRecord(string(wf.ID), ref, path, nil, false)
-	rec.ID = id
-	rec.Trigger = Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ}
-	if err := Validate(rec); err != nil {
-		return SyncResult{}, err
-	}
-	if getErr == nil {
-		rec.CreatedAt = existing.CreatedAt
-		rec.LastFire = existing.LastFire
-		rec.LastRunID = existing.LastRunID
-		rec.Enabled = existing.Enabled
-		next, err := rec.NextFireAfter(time.Now())
-		if err != nil {
-			return SyncResult{}, err
-		}
-		rec.NextFire = next
-		if err := Update(home, rec); err != nil {
-			return SyncResult{}, err
-		}
-		return SyncResult{Action: SyncUpdated, ID: id, NextFire: rec.NextFire}, nil
-	}
-	stored, err := Add(home, rec, Config{})
-	if err != nil {
-		return SyncResult{}, err
-	}
-	return SyncResult{Action: SyncAdded, ID: stored.ID, NextFire: stored.NextFire}, nil
-}
-
 // write atomically persists rec to <root>/schedules/<id>.json.
 func write(root string, rec Record) error {
 	dir := schedulesDir(root)
@@ -486,6 +340,13 @@ func write(root string, rec Record) error {
 		return fmt.Errorf("schedule: rename %q: %w", rec.ID, err)
 	}
 	return nil
+}
+
+// SchedulesDir returns the directory under root where schedule records are
+// stored. It is the single authority for the layout; daemon helpers call this
+// instead of re-encoding the path independently.
+func SchedulesDir(root string) string {
+	return schedulesDir(root)
 }
 
 func schedulesDir(root string) string {

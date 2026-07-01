@@ -4,7 +4,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/mcuste/loom/pkg/executor"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -29,9 +28,9 @@ func TestRunRecord_TwoIterationLoopRoundTrips(t *testing.T) {
 	// Pass 1 and pass 2 of the same looped task: same id, distinct iteration and
 	// output. Both must survive the round-trip.
 	run.OnStart(task, 1, "claude-code", "sonnet", "low")
-	run.OnFinish(task, 1, executor.TaskResult{Output: "first", Iteration: 1}, nil)
+	run.OnFinish(task, 1, store.TaskRecord{Output: "first"}, nil)
 	run.OnStart(task, 2, "claude-code", "sonnet", "low")
-	run.OnFinish(task, 2, executor.TaskResult{Output: "second", Iteration: 2}, nil)
+	run.OnFinish(task, 2, store.TaskRecord{Output: "second"}, nil)
 
 	if err := run.Close(&store.Summary{}, nil); err != nil {
 		t.Fatalf("Close: %v", err)

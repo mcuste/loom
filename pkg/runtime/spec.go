@@ -53,6 +53,11 @@ type Spec struct {
 	// Decode maps captured stdout to a Response. Must be non-nil before Run is
 	// called.
 	Decode func(stdout []byte) (Response, error)
+	// Price, when non-nil, is called after a successful Decode to set
+	// resp.Usage.TotalCostUSD. It receives the request Model and the decoded
+	// Usage so pricing logic can live in the runtime package rather than inside
+	// Decode.
+	Price func(Model, Usage) float64
 }
 
 // Compile-time proof that Spec satisfies the Subprocess contract.
@@ -115,6 +120,9 @@ func (s Spec) Run(ctx context.Context, req Request) (Response, error) {
 	resp, err := s.Decode(stdout.Bytes())
 	if err != nil {
 		return Response{}, fmt.Errorf("%s: %w", s.Name, err)
+	}
+	if s.Price != nil {
+		resp.Usage.TotalCostUSD = s.Price(req.Model, resp.Usage)
 	}
 	resp.ExitCode = 0
 	return resp, nil

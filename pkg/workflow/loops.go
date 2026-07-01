@@ -118,12 +118,8 @@ func decodeLoopBody(entry *yaml.Node, rl *rawLoop) error {
 	if entry.Kind != yaml.MappingNode {
 		return errors.New("loop: must be a mapping")
 	}
-	for i := 0; i+1 < len(entry.Content); i += 2 {
-		k, v := entry.Content[i], entry.Content[i+1]
-		if k.Kind != yaml.ScalarNode {
-			return errors.New("loop: key must be a scalar")
-		}
-		switch k.Value {
+	return eachMapEntry(entry, "loop:", func(key string, v *yaml.Node) error {
+		switch key {
 		case "until_empty":
 			if err := v.Decode(&rl.untilEmpty); err != nil {
 				return fmt.Errorf("loop: until_empty: %w", err)
@@ -143,10 +139,10 @@ func decodeLoopBody(entry *yaml.Node, rl *rawLoop) error {
 				return fmt.Errorf("loop: tasks: %w", err)
 			}
 		default:
-			return &UnknownLoopGroupFieldError{Field: k.Value}
+			return &UnknownLoopGroupFieldError{Field: key}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // decodeForEachBody decodes a `for_each:` block's fields from a mapping node
@@ -161,12 +157,8 @@ func decodeForEachBody(entry *yaml.Node, rl *rawLoop) error {
 		return errors.New("for_each: must be a mapping")
 	}
 	hasIn := false
-	for i := 0; i+1 < len(entry.Content); i += 2 {
-		k, v := entry.Content[i], entry.Content[i+1]
-		if k.Kind != yaml.ScalarNode {
-			return errors.New("for_each: key must be a scalar")
-		}
-		switch k.Value {
+	if err := eachMapEntry(entry, "for_each:", func(key string, v *yaml.Node) error {
+		switch key {
 		case "in":
 			hasIn = true
 			switch v.Kind {
@@ -198,8 +190,11 @@ func decodeForEachBody(entry *yaml.Node, rl *rawLoop) error {
 				return fmt.Errorf("for_each: tasks: %w", err)
 			}
 		default:
-			return &UnknownForEachFieldError{Field: k.Value}
+			return &UnknownForEachFieldError{Field: key}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if !hasIn {
 		return &MissingForEachListError{Loop: rl.id}
@@ -351,39 +346,6 @@ func resolveForEach(lg *LoopGroup, rl rawLoop, ids map[TaskID]struct{}, params m
 		}
 	}
 	lg.ListSource = rl.listSource
-	return nil
-}
-
-// checkPrevPlaceholders enforces that every `{{prev.id}}` placeholder appears
-// only inside a loop body task and references a member of that same loop. A
-// prev reference names the prior iteration's output of a sibling member, so it
-// is meaningless outside a loop and may never cross a loop boundary. It is also
-// rejected inside a parallel for_each body: its passes run concurrently with no
-// ordering, so there is no prior iteration to read.
-func checkPrevPlaceholders(wf *Workflow, memberByLoop map[LoopID]map[TaskID]bool) error {
-	parallelLoop := make(map[LoopID]bool, len(wf.Loops))
-	for i := range wf.Loops {
-		if wf.Loops[i].Parallel {
-			parallelLoop[wf.Loops[i].ID] = true
-		}
-	}
-	for i := range wf.Tasks {
-		t := &wf.Tasks[i]
-		for _, text := range t.TextBodies() {
-			for _, m := range prevPlaceholderRe.FindAllStringSubmatch(text, -1) {
-				name := m[1]
-				if t.Loop == "" {
-					return &PrevOutsideLoopError{Task: t.ID, Name: name}
-				}
-				if parallelLoop[t.Loop] {
-					return &PrevInParallelLoopError{Task: t.ID, Loop: t.Loop, Name: name}
-				}
-				if !memberByLoop[t.Loop][TaskID(name)] {
-					return &PrevNotMemberError{Task: t.ID, Loop: t.Loop, Name: name}
-				}
-			}
-		}
-	}
 	return nil
 }
 

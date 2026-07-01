@@ -19,7 +19,11 @@ func completeWorkflowRef(_ *cobra.Command, args []string, _ string) ([]string, c
 	if len(args) != 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	refs, err := listRegistryWorkflows()
+	home, err := loomHome()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+	refs, err := listRegistryWorkflows(home)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveDefault
 	}
@@ -33,23 +37,23 @@ func completeWorkflowRef(_ *cobra.Command, args []string, _ string) ([]string, c
 // newWorkflowsCmd is the parent for inspecting the workflow registries.
 // Its `ls` subcommand lists the workflows runnable by name, merged from
 // the local .loom/workflows and global $LOOM_HOME/workflows roots.
-func newWorkflowsCmd() *cobra.Command {
+func newWorkflowsCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workflows",
 		Short: "Inspect the local and global workflow registries",
 	}
-	cmd.AddCommand(newWorkflowsListCmd())
+	cmd.AddCommand(newWorkflowsListCmd(env))
 	return cmd
 }
 
-func newWorkflowsListCmd() *cobra.Command {
+func newWorkflowsListCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List registry workflows by name",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doWorkflowsList(cmd.OutOrStdout())
+			return doWorkflowsList(cmd.OutOrStdout(), env.home)
 		},
 	}
 	return cmd
@@ -60,14 +64,10 @@ func newWorkflowsListCmd() *cobra.Command {
 // shadowed name shows which root won), sorted by name. A parse error or absent
 // description leaves the description column blank; an absent registry root lists
 // nothing. Columns are aligned with a tabwriter so the output reads as a table.
-func doWorkflowsList(w io.Writer) error {
-	refs, err := listRegistryWorkflows()
+func doWorkflowsList(w io.Writer, home string) error {
+	refs, err := listRegistryWorkflows(home)
 	if err != nil {
 		return err
 	}
-	tuiRefs := make([]tui.WorkflowRef, len(refs))
-	for i, r := range refs {
-		tuiRefs[i] = tui.WorkflowRef{Name: r.Name, Path: r.Path}
-	}
-	return tui.WorkflowsTable(w, tuiRefs)
+	return tui.WorkflowsTable(w, refs)
 }

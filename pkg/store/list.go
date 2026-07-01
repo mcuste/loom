@@ -50,7 +50,8 @@ type runHeaderJSON struct {
 // when empty, matching [Config.Root]. A missing runs directory is not an
 // error: it returns an empty slice so a fresh install lists cleanly.
 func ListWorkflows(root string) ([]string, error) {
-	runsDir := filepath.Join(rootOrDefault(root), "runs")
+	h := NewHome(root)
+	runsDir := h.runsDir()
 	entries, err := os.ReadDir(runsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -72,7 +73,8 @@ func ListWorkflows(root string) ([]string, error) {
 // missing workflow directory is not an error: it returns an empty slice. root
 // defaults to ".loom" when empty.
 func ListRuns(root, workflowID string) ([]RunHeader, error) {
-	dir := filepath.Join(rootOrDefault(root), "runs", workflowID)
+	h := NewHome(root)
+	dir := h.workflowRunsDir(workflowID)
 	headers, err := readRunDir(dir)
 	if err != nil {
 		return nil, err
@@ -89,9 +91,10 @@ func ListAllRuns(root string) ([]RunHeader, error) {
 	if err != nil {
 		return nil, err
 	}
+	h := NewHome(root)
 	var all []RunHeader
 	for _, id := range ids {
-		dir := filepath.Join(rootOrDefault(root), "runs", id)
+		dir := h.workflowRunsDir(id)
 		headers, err := readRunDir(dir)
 		if err != nil {
 			return nil, err
@@ -162,11 +165,4 @@ func sortNewestFirst(h []RunHeader) {
 		}
 		return h[i].StartedAt.After(h[j].StartedAt)
 	})
-}
-
-func rootOrDefault(root string) string {
-	if root == "" {
-		return ".loom"
-	}
-	return root
 }

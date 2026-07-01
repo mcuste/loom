@@ -3,7 +3,6 @@ package executor
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -23,48 +22,36 @@ func bindLoopVar(body string, st *runState) string {
 	return strings.ReplaceAll(body, "{{"+st.loopVar+"}}", st.loopVal)
 }
 
-// runState bundles the shared, mutex-guarded run state that every task
-// goroutine touches: the aggregate report, the succeeded/skipped maps, the
-// per-task gates, the guarding mutex, and the budget admission slot.
-//
-// All map fields and rep are read and written under mu, exactly as Run does
-// today. budgetInFlight and budgetReady serialize budget-gated dispatch; they
-// are unused when the workflow declares no budget.
-//
-// Bundling these into one value (rather than a sprawling parameter list) lets
-// the per-task dispatch body live in runTask and be reused by runLoop.
-type runState struct {
+// runShared holds the run-global invariant state shared across all iterations.
+// Every field is read or written under mu, except workDir (immutable after init).
+type runShared struct {
 	rep *Report
-	// outputs is the map a task reads upstream values from and writes its own
-	// output to. It aliases rep.Outputs for the top-level schedule, sequential
-	// loops, and while loops, so those paths publish straight into the report. A
-	// parallel for_each iteration swaps in a private copy (seeded from a snapshot
-	// of the shared outputs) so concurrent passes neither observe nor clobber one
-	// another's member outputs; the driver merges each pass's outputs back into
-	// rep.Outputs afterward.
-	outputs map[workflow.TaskID]string
-	// succeeded records, per task id, whether the task ran to completion (its
-	// body dispatched and returned without error).
-	succeeded map[workflow.TaskID]bool
-	// skipped records, per task id, whether the task's `when:` guard evaluated
-	// false and the task was skipped without running. succeeded and skipped are
-	// distinct and mutually exclusive: a task false in both never reached a
-	// terminal disposition (it failed), which lets failed()/succeeded()/skipped()
-	// in `when:` expressions tell a skip apart from a failure.
-	skipped map[workflow.TaskID]bool
-	// exitCodes records, per completed task, its process exit code (0 for every
-	// non-script task), consulted for `{{id.exit}}` substitution and `.exit`
-	// conditions. Shares the aliasing/cloning rules of outputs: aliased for
-	// sequential and while loops, snapshotted per parallel for_each pass.
-	exitCodes map[workflow.TaskID]int
-	gates     map[workflow.TaskID]chan struct{}
-	mu        *sync.Mutex
-	// budgetInFlight is a pointer so a scoped-loop iteration's derived runState
-	// (fresh gates, but the same report, mutex, and budget slot) serializes
+	// scope bundles the four run-scope maps (outputs, succeeded, skipped,
+	// exitCodes) that are always cloned and merged together. outputs aliases
+	// rep.Outputs for the top-level schedule, sequential loops, and while loops,
+	// so those paths publish straight into the report. A parallel for_each
+	// iteration swaps in a private copy (seeded from a snapshot of the shared
+	// scope) so concurrent passes neither observe nor clobber one another's
+	// member results; the driver merges each pass's scope back afterward.
+	scope scopeState
+	mu    *sync.Mutex
+	// budget is a pointer so a scoped-loop iteration's derived runState (fresh
+	// gates, but the same report, mutex, and budget slot) serializes
 	// budget-gated dispatch against the outer schedule rather than against a
-	// private copy of the flag.
-	budgetInFlight *bool
-	budgetReady    *sync.Cond
+	// private copy of the gate.
+	budget *budgetGate
+	// workDir is the cwd every task process in this run is launched in (the LLM
+	// runtime, shell, and script alike), resolved once in Run from the workflow's
+	// working_dir. "" inherits loom's process cwd. Immutable after init.
+	workDir string
+}
+
+// loopCtx is the per-pass context carried by value to each goroutine.
+// None of its fields require mu: they are either immutable per-pass (iteration,
+// loopVar, loopVal, prev) or concurrency-safe by design (gates: channels, closed
+// once, never re-opened).
+type loopCtx struct {
+	gates map[workflow.TaskID]chan struct{}
 	// prev maps a loop member id to its prior-iteration output, consulted for
 	// `{{prev.id}}` substitution inside a scoped-loop body. nil outside a loop
 	// (and on the first iteration), where prev placeholders collapse to empty.
@@ -79,12 +66,14 @@ type runState struct {
 	loopVar string
 	// loopVal is the current element bound to loopVar for this iteration.
 	loopVal string
-	// workDir is the cwd every task process in this run is launched in (the LLM
-	// runtime, shell, and script alike), resolved once in Run from the workflow's
-	// working_dir. "" inherits loom's process cwd. Constant for the whole run, so
-	// the `inner := *st` struct copy in the loop-iteration derivations carries it
-	// unchanged.
-	workDir string
+}
+
+// runState combines a pointer to the shared run invariants with the per-pass
+// context. Embedding both gives runTask and its helpers direct field access
+// (st.mu, st.scope, st.gates, st.iteration) without changing call sites.
+type runState struct {
+	*runShared
+	loopCtx
 }
 
 // forLoopIteration derives a runState for one scoped-loop pass: it shares the
@@ -94,13 +83,16 @@ type runState struct {
 // stamped onto results, and the for_each loop-variable binding (loopVar/loopVal,
 // both "" for a while loop).
 func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
-	inner := *st
-	inner.gates = gates
-	inner.prev = prev
-	inner.iteration = iteration
-	inner.loopVar = loopVar
-	inner.loopVal = loopVal
-	return &inner
+	return &runState{
+		runShared: st.runShared,
+		loopCtx: loopCtx{
+			gates:     gates,
+			prev:      prev,
+			iteration: iteration,
+			loopVar:   loopVar,
+			loopVal:   loopVal,
+		},
+	}
 }
 
 // forParallelIteration derives a runState for one pass of a parallel for_each.
@@ -112,19 +104,23 @@ func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, pr
 // pass's member outputs back afterward. prev is nil: a parallel body has no
 // prior iteration to read (the parser rejects {{prev.id}} inside one).
 func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
-	inner := *st
-	inner.gates = gates
-	inner.prev = nil
-	inner.iteration = iteration
-	inner.loopVar = loopVar
-	inner.loopVal = loopVal
-	st.mu.Lock()
-	inner.outputs = maps.Clone(st.outputs)
-	inner.succeeded = maps.Clone(st.succeeded)
-	inner.skipped = maps.Clone(st.skipped)
-	inner.exitCodes = maps.Clone(st.exitCodes)
-	st.mu.Unlock()
-	return &inner
+	sh := &runShared{
+		rep:     st.rep,
+		scope:   st.scope.cloneUnderLock(st.mu),
+		mu:      st.mu,
+		budget:  st.budget,
+		workDir: st.workDir,
+	}
+	return &runState{
+		runShared: sh,
+		loopCtx: loopCtx{
+			gates:     gates,
+			prev:      nil,
+			iteration: iteration,
+			loopVar:   loopVar,
+			loopVal:   loopVal,
+		},
+	}
 }
 
 // runTask executes one task end to end: it waits for the task's dependency
@@ -221,52 +217,17 @@ func (st *runState) waitDeps(ctx context.Context, t *workflow.Task) error {
 // current outputs/succeeded/skipped state and reports whether the task should
 // run. The caller guarantees t.Cond != nil; Cond was compiled at load time.
 func (st *runState) evalWhen(t *workflow.Task) (bool, error) {
-	st.mu.Lock()
-	env := workflow.Env{
-		Outputs:   maps.Clone(st.outputs),
-		Succeeded: maps.Clone(st.succeeded),
-		Skipped:   maps.Clone(st.skipped),
-		ExitCodes: maps.Clone(st.exitCodes),
-	}
-	st.mu.Unlock()
+	env := st.scope.snapshotEnv(st.mu)
 	return t.Cond.Eval(env)
 }
 
-// admitBudget blocks until no other budget-gated task is in flight, then claims
-// the slot. The check-then-commit is atomic under mu: the in-flight task's cost
-// is recorded (and its slot released) before the next task is admitted, so
-// concurrent subgraphs cannot each read a stale spend and collectively overshoot
-// the limit. It returns the release the caller must defer; on a cost overshoot
-// (spend strictly greater than the limit; landing exactly on it is allowed) or a
-// cancellation it returns an error and a no-op release.
+// admitBudget delegates to the run's [budgetGate], passing a closure that
+// reads the cumulative cost under the gate's lock. See [budgetGate.admit] for
+// the full serialization protocol.
 func (st *runState) admitBudget(ctx context.Context, wf *workflow.Workflow) (func(), error) {
-	noop := func() {}
-	st.mu.Lock()
-	for *st.budgetInFlight {
-		st.budgetReady.Wait()
-		// A wake may come from a sibling's cancellation rather than a slot
-		// release; bail without claiming the slot so we never block g.Wait.
-		if ctx.Err() != nil {
-			st.mu.Unlock()
-			return noop, ctx.Err()
-		}
-	}
-	spent := st.rep.Usage.TotalCostUSD
-	if spent > wf.Budget.MaxCostUSD {
-		// Wake peers so they re-evaluate and drain (each will also abort) rather
-		// than block forever on the slot this goroutine never takes.
-		st.budgetReady.Broadcast()
-		st.mu.Unlock()
-		return noop, &BudgetExceededError{Limit: wf.Budget.MaxCostUSD, Spent: spent}
-	}
-	*st.budgetInFlight = true
-	st.mu.Unlock()
-	return func() {
-		st.mu.Lock()
-		*st.budgetInFlight = false
-		st.budgetReady.Broadcast()
-		st.mu.Unlock()
-	}, nil
+	return st.budget.admit(ctx, func() float64 {
+		return st.rep.Usage.TotalCostUSD
+	}, wf.Budget.MaxCostUSD)
 }
 
 // recordSkip publishes a `when:`-guarded task that was skipped: it fires
@@ -278,9 +239,7 @@ func (st *runState) recordSkip(t *workflow.Task, hooks Hooks) {
 		hooks.OnFinish(*t, st.iteration, res, nil)
 	}
 	st.mu.Lock()
-	st.outputs[t.ID] = ""
-	st.skipped[t.ID] = true
-	st.exitCodes[t.ID] = 0
+	st.scope.recordSkipLocked(t.ID)
 	st.rep.Tasks = append(st.rep.Tasks, res)
 	st.mu.Unlock()
 	close(st.gates[t.ID])
@@ -292,9 +251,7 @@ func (st *runState) recordSkip(t *workflow.Task, hooks Hooks) {
 func (st *runState) recordResult(t *workflow.Task, res TaskResult) {
 	res.Status = StatusOK
 	st.mu.Lock()
-	st.outputs[t.ID] = res.Output
-	st.succeeded[t.ID] = true
-	st.exitCodes[t.ID] = res.ExitCode
+	st.scope.recordResultLocked(t.ID, res.Output, res.ExitCode)
 	st.rep.Tasks = append(st.rep.Tasks, res)
 	st.rep.Usage.Add(res.Usage)
 	st.mu.Unlock()
@@ -315,122 +272,97 @@ func (st *runState) recordResult(t *workflow.Task, res TaskResult) {
 func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (res TaskResult, runErr, fatal error) {
 	switch t.BodyKind() {
 	case workflow.BodySubWorkflow:
-		// A sub-workflow task is a leaf in this DAG: at dispatch it recursively
-		// runs the linked child via Run and captures its result. The child brings
-		// its own runtime, so there is no runtime.Lookup here (like a shell task).
-		// wf.Subs is the authoritative link source: the executor already holds the
-		// parent workflow, so callers need not copy the links into Options.
-		child := wf.Subs[t.ID]
-		if child == nil {
-			return TaskResult{}, nil, fmt.Errorf("task %q: sub-workflow %q not linked", t.ID, t.Workflow)
-		}
-		if hooks.OnStart != nil {
-			hooks.OnStart(*t, st.iteration, "", "", "")
-		}
-		// with-values are substituted against the PARENT context first, then
-		// handed to the child as its CLI-tier param values.
-		st.mu.Lock()
-		vals := make(map[string]string, len(t.With))
-		for _, a := range t.With {
-			vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
-		}
-		st.mu.Unlock()
-		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			start := time.Now()
-			cp, err := workflow.ResolveParams(child, vals, nil)
-			if err != nil {
-				return TaskResult{TaskID: t.ID}, err
-			}
-			childRep, err := Run(ctx, child, Hooks{}, Options{
-				Params: cp,
-				// Child shares the parent's cross-run state so {{state.x}} placeholders in
-				// child prompts resolve the same store. Write-back (writes_state) is a
-				// CLI-layer pass over the top-level report only, so the child never mutates
-				// the map here.
-				State:          opts.State,
-				Cache:          opts.Cache,
-				RetryBaseDelay: opts.RetryBaseDelay,
-				// The parent's effective cwd is the child's inherited fallback; the
-				// child's own working_dir (if any) overrides it inside Run.
-				WorkDir: st.workDir,
-			})
-			if err != nil {
-				return TaskResult{TaskID: t.ID}, err
-			}
-			ot, err := child.OutputTask()
-			if err != nil {
-				return TaskResult{TaskID: t.ID}, err
-			}
-			out := childRep.Outputs[ot]
-			// One parent row, child result + SUMMED child usage; schema (if any)
-			// validates the child result uniformly with the LLM branch.
-			r := TaskResult{TaskID: t.ID, Output: out, Usage: childRep.Usage, Elapsed: time.Since(start)}
-			return r, validateSchema(t, out)
-		})
+		return dispatchSubWorkflow(ctx, wf, t, st, hooks, opts, baseDelay)
 	case workflow.BodyShell:
-		if hooks.OnStart != nil {
-			hooks.OnStart(*t, st.iteration, "", "", "")
-		}
-		st.mu.Lock()
-		body := workflow.Substitute(bindLoopVar(t.Command, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
-		env := taskEnv(st.outputs, opts.Params, opts.State, st.prev, st.exitCodes, st.loopVar, st.loopVal)
-		st.mu.Unlock()
-		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			return runShell(ctx, t, body, env, st.workDir)
-		})
+		return dispatchShell(ctx, wf, t, st, hooks, opts, baseDelay)
 	case workflow.BodyScript:
-		if hooks.OnStart != nil {
-			hooks.OnStart(*t, st.iteration, "", "", "")
-		}
-		st.mu.Lock()
-		path := workflow.Substitute(bindLoopVar(t.Script, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
-		args := make([]string, len(t.Args))
-		for i, a := range t.Args {
-			args[i] = workflow.Substitute(bindLoopVar(a, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
-		}
-		env := taskEnv(st.outputs, opts.Params, opts.State, st.prev, st.exitCodes, st.loopVar, st.loopVal)
-		st.mu.Unlock()
-		res, runErr = runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			return runScript(ctx, t, path, args, env, st.workDir)
-		})
+		return dispatchScript(ctx, wf, t, st, hooks, opts, baseDelay)
 	case workflow.BodyPrompt:
-		rt, model, effort := wf.Effective(t)
-		runner, ok := runtime.Lookup(rt)
-		if !ok {
-			return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
-		}
-		sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, opts.Params, opts.State, nil, nil)
-		if hooks.OnStart != nil {
-			hooks.OnStart(*t, st.iteration, rt, model, effort)
-		}
-		st.mu.Lock()
-		body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.outputs, opts.Params, opts.State, st.prev, st.exitCodes)
-		st.mu.Unlock()
-		send := func() (TaskResult, error) {
-			return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-				r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt, st.workDir)
-				if err != nil {
-					return r, err
-				}
-				// A tolerated non-zero exit (ok_exit) means the runtime did not produce
-				// a real response, so there is no JSON output to validate against a
-				// schema; skip validation and let the empty output flow downstream.
-				if r.ExitCode != 0 {
-					return r, nil
-				}
-				return r, validateSchema(t, r.Output)
-			})
-		}
-		if opts.Cache != nil && wf.CacheEnabled(t) {
-			res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, send)
-		} else {
-			res, runErr = send()
-		}
+		return dispatchLLM(ctx, wf, t, st, hooks, opts, baseDelay)
 	default:
 		// BodyInvalid: the task set none or more than one body form. The parser
 		// rejects this, so reaching it means a hand-built or corrupted Task; fail
 		// fast rather than silently dispatching down an arbitrary branch.
 		return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", t.ID)
+	}
+}
+
+// dispatchShell is the BodyShell arm of dispatch: it substitutes the command
+// line and env, then runs sh -c with retry.
+func dispatchShell(ctx context.Context, _ *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
+	if hooks.OnStart != nil {
+		hooks.OnStart(*t, st.iteration, "", "", "")
+	}
+	st.mu.Lock()
+	body := workflow.Substitute(bindLoopVar(t.Command, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+	env := taskEnv(st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
+	st.mu.Unlock()
+	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+		return runShell(ctx, t, body, env, st.workDir)
+	})
+	return res, runErr, nil
+}
+
+// dispatchScript is the BodyScript arm of dispatch: it substitutes the script
+// path and args, then execs the file directly with retry.
+func dispatchScript(ctx context.Context, _ *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
+	if hooks.OnStart != nil {
+		hooks.OnStart(*t, st.iteration, "", "", "")
+	}
+	st.mu.Lock()
+	path := workflow.Substitute(bindLoopVar(t.Script, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+	args := make([]string, len(t.Args))
+	for i, a := range t.Args {
+		args[i] = workflow.Substitute(bindLoopVar(a, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+	}
+	env := taskEnv(st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
+	st.mu.Unlock()
+	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+		return runScript(ctx, t, path, args, env, st.workDir)
+	})
+	return res, runErr, nil
+}
+
+// dispatchLLM is the BodyPrompt arm of dispatch: it looks up the runtime,
+// substitutes the prompt, and calls the LLM (with cache and schema validation).
+func dispatchLLM(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
+	rt, model, effort := wf.Effective(t)
+	resolver := opts.Resolver
+	if resolver == nil {
+		resolver = RunnerResolverFunc(runtime.Lookup)
+	}
+	runner, ok := resolver.Resolve(rt)
+	if !ok {
+		return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
+	}
+	sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, opts.Params, opts.State, nil, nil)
+	if hooks.OnStart != nil {
+		hooks.OnStart(*t, st.iteration, rt, model, effort)
+	}
+	st.mu.Lock()
+	body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+	st.mu.Unlock()
+	send := func() (TaskResult, error) {
+		return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+			r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt, st.workDir)
+			if err != nil {
+				return r, err
+			}
+			// A tolerated non-zero exit (ok_exit) means the runtime did not produce
+			// a real response, so there is no JSON output to validate against a
+			// schema; skip validation and let the empty output flow downstream.
+			if r.ExitCode != 0 {
+				return r, nil
+			}
+			return r, validateSchema(t, r.Output)
+		})
+	}
+	var res TaskResult
+	var runErr error
+	if opts.Cache != nil && wf.CacheEnabled(t) {
+		res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, send)
+	} else {
+		res, runErr = send()
 	}
 	return res, runErr, nil
 }

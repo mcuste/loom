@@ -8,24 +8,24 @@ import (
 // `at` subcommands create schedules (recurring and one-off); `ls`, `rm`,
 // `enable`, and `disable` inspect and edit them. The records are read by
 // `loom daemon`, which fires the runs.
-func newScheduleCmd() *cobra.Command {
+func newScheduleCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "schedule",
 		Short: "Manage workflow schedules fired by `loom daemon`",
 	}
 	cmd.AddCommand(
-		newScheduleCronCmd(),
-		newScheduleAtCmd(),
-		newScheduleListCmd(),
-		newScheduleRemoveCmd(),
-		newScheduleToggleCmd("enable", "Enable a disabled schedule", true),
-		newScheduleToggleCmd("disable", "Disable a schedule without removing it", false),
-		newScheduleSyncCmd(),
+		newScheduleCronCmd(env),
+		newScheduleAtCmd(env),
+		newScheduleListCmd(env),
+		newScheduleRemoveCmd(env),
+		newScheduleToggleCmd(env, "enable", "Enable a disabled schedule", true),
+		newScheduleToggleCmd(env, "disable", "Disable a schedule without removing it", false),
+		newScheduleSyncCmd(env),
 	)
 	return cmd
 }
 
-func newScheduleCronCmd() *cobra.Command {
+func newScheduleCronCmd(env *cliEnv) *cobra.Command {
 	var o cronOpts
 	cmd := &cobra.Command{
 		Use:               "cron <workflow>",
@@ -33,7 +33,7 @@ func newScheduleCronCmd() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleCron(cmd.OutOrStdout(), args[0], o)
+			return doScheduleCron(cmd.OutOrStdout(), env.home, args[0], o)
 		},
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
@@ -45,7 +45,7 @@ func newScheduleCronCmd() *cobra.Command {
 	return cmd
 }
 
-func newScheduleAtCmd() *cobra.Command {
+func newScheduleAtCmd(env *cliEnv) *cobra.Command {
 	var o atOpts
 	cmd := &cobra.Command{
 		Use:               "at <workflow>",
@@ -53,7 +53,7 @@ func newScheduleAtCmd() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleAt(cmd.OutOrStdout(), args[0], o)
+			return doScheduleAt(cmd.OutOrStdout(), env.home, args[0], o)
 		},
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
@@ -65,27 +65,27 @@ func newScheduleAtCmd() *cobra.Command {
 	return cmd
 }
 
-func newScheduleListCmd() *cobra.Command {
+func newScheduleListCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ls [workflow]",
 		Aliases: []string{"list"},
 		Short:   "List schedules as a plain table",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleList(cmd.OutOrStdout(), firstArg(args))
+			return doScheduleList(cmd.OutOrStdout(), env.home, firstArg(args))
 		},
 	}
 	return cmd
 }
 
-func newScheduleRemoveCmd() *cobra.Command {
+func newScheduleRemoveCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "rm <id>",
 		Aliases: []string{"remove"},
 		Short:   "Remove a schedule by id",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleRemove(cmd.OutOrStdout(), args[0])
+			return doScheduleRemove(cmd.OutOrStdout(), env.home, args[0])
 		},
 	}
 	return cmd
@@ -93,18 +93,18 @@ func newScheduleRemoveCmd() *cobra.Command {
 
 // newScheduleToggleCmd builds the `enable`/`disable` pair: identical save for the
 // verb and the enabled bit they flip, so one factory serves both.
-func newScheduleToggleCmd(use, short string, enabled bool) *cobra.Command {
+func newScheduleToggleCmd(env *cliEnv, use, short string, enabled bool) *cobra.Command {
 	return &cobra.Command{
 		Use:   use + " <id>",
 		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleToggle(cmd.OutOrStdout(), args[0], enabled)
+			return doScheduleToggle(cmd.OutOrStdout(), env.home, args[0], enabled)
 		},
 	}
 }
 
-func newScheduleSyncCmd() *cobra.Command {
+func newScheduleSyncCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync [workflow]",
 		Short: "Reconcile inline workflow `schedule:` blocks into the schedule store",
@@ -115,7 +115,7 @@ func newScheduleSyncCmd() *cobra.Command {
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeWorkflowRef,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doScheduleSync(cmd.OutOrStdout(), firstArg(args))
+			return doScheduleSync(cmd.OutOrStdout(), env.home, firstArg(args))
 		},
 	}
 	return cmd

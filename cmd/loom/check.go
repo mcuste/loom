@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newCheckCmd() *cobra.Command {
+func newCheckCmd(env *cliEnv) *cobra.Command {
 	var paramArgs []string
 	cmd := &cobra.Command{
 		Use:   "check <workflow>",
@@ -23,7 +23,11 @@ func newCheckCmd() *cobra.Command {
 // doCheck runs the shared validation phase only: validate and print the plan,
 // then stop without executing.
 func doCheck(w io.Writer, path string, paramArgs []string) (err error) {
-	wf, _, _, err := loadWorkflow(path)
+	home, err := loomHome()
+	if err != nil {
+		return err
+	}
+	wf, _, _, err := loadWorkflow(home, path)
 	if err != nil {
 		return err
 	}

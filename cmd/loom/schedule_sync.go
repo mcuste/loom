@@ -11,11 +11,7 @@ import (
 // doScheduleSync reconciles inline schedules. With a workflow argument it syncs
 // that one; with none it walks the registry, skipping (with a note) any
 // workflow that fails to load so one broken file does not abort the sweep.
-func doScheduleSync(w io.Writer, ref string) error {
-	home, err := loomHome()
-	if err != nil {
-		return err
-	}
+func doScheduleSync(w io.Writer, home, ref string) error {
 	if ref == "" {
 		return syncAll(w, home)
 	}
@@ -34,7 +30,7 @@ func doScheduleSync(w io.Writer, ref string) error {
 // (with a note) any workflow that fails to load so one broken file does not
 // abort the sweep. It reports when nothing had an inline block to sync.
 func syncAll(w io.Writer, home string) error {
-	refs, err := listRegistryWorkflows()
+	refs, err := listRegistryWorkflows(home)
 	if err != nil {
 		return err
 	}
@@ -63,11 +59,11 @@ func syncAll(w io.Writer, home string) error {
 // displayName is the ref recorded on the schedule and shown in messages, which
 // differs from loadRef in the sweep (a path loads, the colon-name displays).
 func syncOne(home, loadRef, displayName string) (string, error) {
-	wf, _, path, err := loadWorkflow(loadRef)
+	wf, _, path, err := loadWorkflow(home, loadRef)
 	if err != nil {
 		return "", err
 	}
-	res, err := schedule.SyncInline(home, wf, absPath(path), displayName)
+	res, err := schedule.SyncInline(home, wf, path, displayName)
 	if err != nil {
 		return "", err
 	}

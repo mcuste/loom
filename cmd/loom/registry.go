@@ -12,14 +12,10 @@ import (
 // a workflow name: the project-local .loom/workflows directories walking up
 // from the current working directory to the git root, then the global
 // $LOOM_HOME/workflows last.
-func registrySearchRoots() ([]string, error) {
+func registrySearchRoots(home string) ([]string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("get working directory: %w", err)
-	}
-	home, err := loomHome()
-	if err != nil {
-		return nil, err
 	}
 	return append(registry.LocalDirs(cwd), workflowsDir(home)), nil
 }
@@ -28,8 +24,8 @@ func registrySearchRoots() ([]string, error) {
 // workflow YAML path. Path-mode args are returned verbatim; registry-name args
 // are resolved against the ordered registry roots (nearest-local to global).
 // See registry.Resolve for the full precedence rules.
-func resolveWorkflowRef(arg string) (string, error) {
-	roots, err := registrySearchRoots()
+func resolveWorkflowRef(home, arg string) (string, error) {
+	roots, err := registrySearchRoots(home)
 	if err != nil {
 		return "", err
 	}
@@ -40,8 +36,8 @@ func resolveWorkflowRef(arg string) (string, error) {
 // resolveWorkflowRef returns path-mode args verbatim, so when the returned
 // value equals ref the arg was a filesystem path that needs anchoring to
 // parentDir (unless it is already absolute).
-func resolveSubWorkflowRef(ref, parentDir string) (string, error) {
-	resolved, err := resolveWorkflowRef(ref)
+func resolveSubWorkflowRef(home, ref, parentDir string) (string, error) {
+	resolved, err := resolveWorkflowRef(home, ref)
 	if err != nil {
 		return "", err
 	}
@@ -56,8 +52,8 @@ func resolveSubWorkflowRef(ref, parentDir string) (string, error) {
 // listRegistryWorkflows resolves the ordered registry roots and walks them into
 // the merged local+global workflow set. It is the shared prelude behind
 // completion, `workflows ls`, and `schedule sync`.
-func listRegistryWorkflows() ([]registry.Ref, error) {
-	roots, err := registrySearchRoots()
+func listRegistryWorkflows(home string) ([]registry.Ref, error) {
+	roots, err := registrySearchRoots(home)
 	if err != nil {
 		return nil, err
 	}

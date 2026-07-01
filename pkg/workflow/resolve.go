@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mcuste/loom/pkg/runtime"
+	"gopkg.in/yaml.v3"
 )
 
 // ParamValues is a resolved-param bag: every entry is the final string value
@@ -283,4 +284,87 @@ type InvalidParamValueError struct{ Name string }
 
 func (e *InvalidParamValueError) Error() string {
 	return fmt.Sprintf("param %q: value contains invalid UTF-8 or NUL", e.Name)
+}
+
+// parseParams validates the raw params: block and returns the resolved
+// Params slice in declaration order plus an index from name to slice position.
+func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
+	if node.Kind == 0 {
+		return nil, nil, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, nil, fmt.Errorf("params: must be a sequence of param entries")
+	}
+	params := make([]Param, 0, len(node.Content))
+	idx := make(map[ParamName]int, len(node.Content))
+	for _, entry := range node.Content {
+		rp, defNode, err := decodeRawParam(entry)
+		if err != nil {
+			return nil, nil, err
+		}
+		if rp.Name == "" {
+			return nil, nil, ErrMissingParamName
+		}
+		name, err := NewParamName(rp.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, dup := idx[name]; dup {
+			return nil, nil, &DuplicateParamNameError{Name: name}
+		}
+		p := Param{
+			Name:        name,
+			Description: rp.Description,
+			Required:    rp.Required,
+		}
+		if defNode != nil {
+			if rp.Required {
+				return nil, nil, &ConflictingParamSpecError{Name: name}
+			}
+			if defNode.Kind != yaml.ScalarNode {
+				return nil, nil, &InvalidParamDefaultError{Name: name, Reason: "must be a scalar string"}
+			}
+			if defNode.Tag == "!!null" {
+				return nil, nil, &InvalidParamDefaultError{Name: name, Reason: "null default is not allowed"}
+			}
+			p.Default = defNode.Value
+			p.HasDefault = true
+		}
+		idx[name] = len(params)
+		params = append(params, p)
+	}
+	return params, idx, nil
+}
+
+// decodeRawParam destructures a single params: mapping entry.
+func decodeRawParam(entry *yaml.Node) (rawParam, *yaml.Node, error) {
+	var rp rawParam
+	if entry.Kind != yaml.MappingNode {
+		return rp, nil, fmt.Errorf("params: entry must be a mapping")
+	}
+	var defNode *yaml.Node
+	if err := eachMapEntry(entry, "params: entry", func(key string, v *yaml.Node) error {
+		switch key {
+		case "name":
+			if err := v.Decode(&rp.Name); err != nil {
+				return fmt.Errorf("params.name: %w", err)
+			}
+		case "description":
+			if err := v.Decode(&rp.Description); err != nil {
+				return fmt.Errorf("params.description: %w", err)
+			}
+		case "required":
+			if err := v.Decode(&rp.Required); err != nil {
+				return fmt.Errorf("params.required: %w", err)
+			}
+		case "default":
+			defNode = v
+		default:
+			return fmt.Errorf("params: unknown field %q", key)
+		}
+		return nil
+	}); err != nil {
+		return rp, nil, err
+	}
+	return rp, defNode, nil
 }
