@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mcuste/loom/pkg/runtime"
@@ -208,70 +207,8 @@ type Options struct {
 // of the caller's ctx propagates the same way.
 func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
 	prog := compileProgram(wf)
-	rep := &Report{
-		Tasks:   make([]TaskResult, 0, len(prog.order)),
-		Outputs: make(map[workflow.TaskID]string, len(prog.order)),
-		Params:  opts.Params, // stash once before any g.Go; goroutines only read it
-	}
-
-	gates := make(map[workflow.TaskID]chan struct{}, len(prog.order))
-	for _, tid := range prog.order {
-		gates[tid] = make(chan struct{})
-	}
-
-	// succeeded records, per completed task, whether it ran to completion;
-	// skipped records, per task, whether its `when:` guard skipped it. The two
-	// are distinct so failed()/succeeded() never conflate a skip with a failure.
-	// Both are read under mu like rep.Outputs.
-	succeeded := make(map[workflow.TaskID]bool, len(prog.order))
-	skipped := make(map[workflow.TaskID]bool, len(prog.order))
-	// exitCodes records, per completed task, its process exit code (0 for every
-	// non-script task), consulted for `{{id.exit}}` substitution and `.exit`
-	// conditions. Read under mu like the other state maps.
-	exitCodes := make(map[workflow.TaskID]int, len(prog.order))
-
-	// Close seeded gates and stamp their outputs before spawning any
-	// goroutine. Downstream waiters see the seed via {{id}} substitution
-	// just as if the task had run this invocation. Unknown ids are ignored.
-	for _, tid := range prog.order {
-		if v, ok := opts.Seed[tid]; ok {
-			rep.Outputs[tid] = v
-			succeeded[tid] = true
-			if code, ok := opts.SeedExitCodes[tid]; ok {
-				exitCodes[tid] = code
-			}
-			close(gates[tid])
-		}
-	}
-
-	var mu sync.Mutex
-
-	// The workflow's own working_dir wins; opts.WorkDir is the inherited fallback
-	// a parent passes to a linked child, so a child without its own working_dir
-	// runs in the parent's effective directory.
-	workDir := opts.WorkDir
-	if wf.WorkingDir != "" {
-		workDir = wf.WorkingDir
-	}
-
-	sh := &runShared{
-		rep: rep,
-		scope: scopeState{
-			outputs:   rep.Outputs,
-			succeeded: succeeded,
-			skipped:   skipped,
-			exitCodes: exitCodes,
-		},
-		mu:      &mu,
-		budget:  &budgetGate{ready: sync.NewCond(&mu)},
-		workDir: workDir,
-	}
-	st := &runState{
-		runShared: sh,
-		loopCtx: loopCtx{
-			gates: gates,
-		},
-	}
+	rep := newReport(prog.order, opts)
+	st := newRootFrame(wf, rep, prog.order, opts)
 	interp := newInterpreter(prog, hooks, opts)
 	return rep, interp.run(ctx, st)
 }
