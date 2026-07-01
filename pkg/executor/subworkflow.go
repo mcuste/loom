@@ -23,8 +23,16 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 	}
 	st.mu.Lock()
 	vals := make(map[string]string, len(t.With))
-	for _, a := range t.With {
-		vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
+	if action, ok := t.ParsedAction(); ok {
+		if wfAction, ok := action.(workflow.WorkflowAction); ok {
+			for _, a := range wfAction.WithTemplates {
+				vals[string(a.Name)] = renderTemplate(a.Value, st, i.opts)
+			}
+		}
+	} else {
+		for _, a := range t.With {
+			vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
+		}
 	}
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {

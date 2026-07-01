@@ -84,30 +84,34 @@ func buildTask(st *parseState, lt loopTask) error {
 	if err != nil {
 		return err
 	}
+	loopVar := st.asByLoop[lt.loop]
+	action := taskActionFromRaw(rt, withArgs, loopVar)
 	wf.byID[tid] = len(wf.Tasks)
 	wf.Tasks = append(wf.Tasks, Task{
-		ID:           tid,
-		Prompt:       rt.Prompt,
-		Command:      rt.Command,
-		Description:  rt.Description,
-		Runtime:      runtime.Name(rt.Runtime),
-		Model:        runtime.Model(rt.Model),
-		Effort:       runtime.Effort(rt.Effort),
-		SystemPrompt: rt.SystemPrompt,
-		DependsOn:    meta.deps,
-		When:         rt.When,
-		Cond:         meta.cond,
-		Retry:        meta.retry,
-		WritesState:  rt.WritesState,
-		Budget:       meta.budget,
-		Schema:       meta.schema,
-		Cache:        rt.Cache,
-		Loop:         lt.loop,
-		Workflow:     rt.Workflow,
-		With:         withArgs,
-		Script:       rt.Script,
-		Args:         rt.Args,
-		OkExit:       rt.OkExit,
+		ID:                   tid,
+		Prompt:               rt.Prompt,
+		Command:              rt.Command,
+		Description:          rt.Description,
+		Runtime:              runtime.Name(rt.Runtime),
+		Model:                runtime.Model(rt.Model),
+		Effort:               runtime.Effort(rt.Effort),
+		SystemPrompt:         rt.SystemPrompt,
+		systemPromptTemplate: ParseTemplate(rt.SystemPrompt),
+		DependsOn:            meta.deps,
+		When:                 rt.When,
+		Cond:                 meta.cond,
+		Retry:                meta.retry,
+		WritesState:          rt.WritesState,
+		Budget:               meta.budget,
+		Schema:               meta.schema,
+		Cache:                rt.Cache,
+		Loop:                 lt.loop,
+		Workflow:             rt.Workflow,
+		With:                 withArgs,
+		Script:               rt.Script,
+		Args:                 rt.Args,
+		OkExit:               rt.OkExit,
+		action:               action,
 	})
 	return nil
 }

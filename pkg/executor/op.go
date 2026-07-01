@@ -41,13 +41,67 @@ func compileOp(t *workflow.Task) op {
 	}
 }
 
+func renderTemplate(tpl workflow.Template, st *frame, opts Options) string {
+	loopVars := map[string]string(nil)
+	if st.loopVar != "" {
+		loopVars = map[string]string{st.loopVar: st.loopVal}
+	}
+	return tpl.Render(workflow.RenderContext{
+		Outputs:   st.scope.outputs,
+		Params:    opts.Params,
+		State:     opts.State,
+		Prev:      st.prev,
+		ExitCodes: st.scope.exitCodes,
+		LoopVars:  loopVars,
+	})
+}
+
+func renderLegacyText(text string, st *frame, opts Options) string {
+	return workflow.Substitute(bindLoopVar(text, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+}
+
+func renderPrompt(t *workflow.Task, st *frame, opts Options) string {
+	if action, ok := t.ParsedAction(); ok {
+		if prompt, ok := action.(workflow.PromptAction); ok {
+			return renderTemplate(prompt.Prompt, st, opts)
+		}
+	}
+	return renderLegacyText(t.Prompt, st, opts)
+}
+
+func renderCommand(t *workflow.Task, st *frame, opts Options) string {
+	if action, ok := t.ParsedAction(); ok {
+		if command, ok := action.(workflow.CommandAction); ok {
+			return renderTemplate(command.Command, st, opts)
+		}
+	}
+	return renderLegacyText(t.Command, st, opts)
+}
+
+func renderScript(t *workflow.Task, st *frame, opts Options) (string, []string) {
+	if action, ok := t.ParsedAction(); ok {
+		if script, ok := action.(workflow.ScriptAction); ok {
+			args := make([]string, len(script.Args))
+			for idx, arg := range script.Args {
+				args[idx] = renderTemplate(arg, st, opts)
+			}
+			return renderTemplate(script.Path, st, opts), args
+		}
+	}
+	args := make([]string, len(t.Args))
+	for idx, a := range t.Args {
+		args[idx] = renderLegacyText(a, st, opts)
+	}
+	return renderLegacyText(t.Script, st, opts), args
+}
+
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := n.task
 	if i.hooks.OnStart != nil {
 		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
 	st.mu.Lock()
-	body := workflow.Substitute(bindLoopVar(t.Command, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
+	body := renderCommand(t, st, i.opts)
 	env := taskEnv(st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
@@ -62,11 +116,7 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
 	st.mu.Lock()
-	path := workflow.Substitute(bindLoopVar(t.Script, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
-	args := make([]string, len(t.Args))
-	for idx, a := range t.Args {
-		args[idx] = workflow.Substitute(bindLoopVar(a, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
-	}
+	path, args := renderScript(t, st, i.opts)
 	env := taskEnv(st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
@@ -83,12 +133,15 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 	if !ok {
 		return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 	}
-	sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, i.opts.Params, i.opts.State, nil, nil)
+	sysPrompt := wf.EffectiveSystemPromptTemplate(t).Render(workflow.RenderContext{
+		Params: i.opts.Params,
+		State:  i.opts.State,
+	})
 	if i.hooks.OnStart != nil {
 		i.hooks.OnStart(*t, st.iteration, rt, model, effort)
 	}
 	st.mu.Lock()
-	body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
+	body := renderPrompt(t, st, i.opts)
 	st.mu.Unlock()
 	send := func() (TaskResult, error) {
 		return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {

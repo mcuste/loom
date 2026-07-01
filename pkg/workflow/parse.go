@@ -36,17 +36,29 @@
 package workflow
 
 import (
-	"bytes"
 	"fmt"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/syntax"
 )
+
+// ParseOptions configures conversion from syntax draft to Workflow.
+type ParseOptions struct {
+	Source syntax.Source
+}
 
 // Parse decodes a workflow YAML document and returns the validated Workflow.
 func Parse(data []byte) (*Workflow, error) {
-	raw, id, err := decodeRawWorkflow(data)
+	draft, err := syntax.Decode(data, syntax.Source{})
+	if err != nil {
+		return nil, err
+	}
+	return FromDraft(draft, ParseOptions{})
+}
+
+// FromDraft constructs a validated Workflow from a decoded syntax draft.
+func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
+	raw, id, err := rawFromDraft(draft, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -74,19 +86,84 @@ func Parse(data []byte) (*Workflow, error) {
 }
 
 func decodeRawWorkflow(data []byte) (rawWorkflow, WorkflowID, error) {
-	var raw rawWorkflow
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&raw); err != nil {
-		return rawWorkflow{}, "", fmt.Errorf("yaml: %w", err)
+	draft, err := syntax.Decode(data, syntax.Source{})
+	if err != nil {
+		return rawWorkflow{}, "", err
 	}
+	return rawFromDraft(draft, ParseOptions{})
+}
 
+func rawFromDraft(draft *syntax.Draft, opts ParseOptions) (rawWorkflow, WorkflowID, error) {
+	if draft == nil {
+		return rawWorkflow{}, "", fmt.Errorf("workflow draft is nil")
+	}
+	if opts.Source.Path != "" {
+		draft.Source = opts.Source
+	}
+	raw := rawWorkflow{
+		Name:         draft.Name,
+		Description:  draft.Description,
+		Runtime:      draft.Runtime,
+		Model:        draft.Model,
+		Effort:       draft.Effort,
+		SystemPrompt: draft.SystemPrompt,
+		Params:       draft.Params,
+		Tasks:        rawTasksFromDraft(draft.Tasks),
+		Budget:       draft.Budget,
+		WorkingDir:   draft.WorkingDir,
+		Output:       draft.Output,
+	}
+	if draft.Cache != nil {
+		raw.Cache = *draft.Cache
+	}
+	if draft.Schedule != nil {
+		raw.Schedule = &rawSchedule{
+			Cron: draft.Schedule.Cron,
+			TZ:   draft.Schedule.TZ,
+		}
+	}
 	id, err := NewWorkflowID(raw.Name)
 	if err != nil {
 		return rawWorkflow{}, "", err
 	}
-
 	return raw, id, nil
+}
+
+func rawTasksFromDraft(in []syntax.DraftTask) []rawTask {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]rawTask, len(in))
+	for i, t := range in {
+		out[i] = rawTask{
+			ID:               t.ID,
+			Description:      t.Description,
+			Runtime:          t.Runtime,
+			Model:            t.Model,
+			Effort:           t.Effort,
+			Prompt:           t.Prompt,
+			Command:          t.Command,
+			SystemPrompt:     t.SystemPrompt,
+			SystemPromptFile: t.SystemPromptFile,
+			Workflow:         t.Workflow,
+			Script:           t.Script,
+			Args:             t.Args,
+			OkExit:           t.OkExit,
+			PromptFile:       t.PromptFile,
+			DependsOn:        t.DependsOn,
+			WritesState:      t.WritesState,
+			When:             t.When,
+			Retry:            t.Retry,
+			ForEach:          t.ForEach,
+			ForEachParallel:  t.ForEachParallel,
+			Budget:           t.Budget,
+			Schema:           t.Schema,
+			Cache:            t.Cache,
+			Loop:             t.Loop,
+			With:             t.With,
+		}
+	}
+	return out
 }
 
 func prepareRawLoops(id WorkflowID, rawTasks []rawTask) ([]rawTask, []rawLoop, error) {
@@ -114,18 +191,19 @@ func newWorkflowSkeleton(raw rawWorkflow, id WorkflowID) (*Workflow, map[ParamNa
 	}
 
 	wf := &Workflow{
-		ID:           id,
-		Description:  raw.Description,
-		Runtime:      runtime.Name(raw.Runtime),
-		Model:        runtime.Model(raw.Model),
-		Effort:       runtime.Effort(raw.Effort),
-		SystemPrompt: raw.SystemPrompt,
-		Cache:        raw.Cache,
-		WorkingDir:   raw.WorkingDir,
-		Params:       params,
-		Tasks:        make([]Task, 0, len(raw.Tasks)),
-		byID:         make(map[TaskID]int, len(raw.Tasks)),
-		paramByName:  paramIdx,
+		ID:                   id,
+		Description:          raw.Description,
+		Runtime:              runtime.Name(raw.Runtime),
+		Model:                runtime.Model(raw.Model),
+		Effort:               runtime.Effort(raw.Effort),
+		SystemPrompt:         raw.SystemPrompt,
+		systemPromptTemplate: ParseTemplate(raw.SystemPrompt),
+		Cache:                raw.Cache,
+		WorkingDir:           raw.WorkingDir,
+		Params:               params,
+		Tasks:                make([]Task, 0, len(raw.Tasks)),
+		byID:                 make(map[TaskID]int, len(raw.Tasks)),
+		paramByName:          paramIdx,
 	}
 
 	// Set membership reused by buildDeps' param scan; the index map's value type

@@ -178,6 +178,8 @@ type Workflow struct {
 	// keeping this package free of a cron dependency.
 	Schedule *Schedule
 
+	systemPromptTemplate Template
+
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;
 	// nil for hand-constructed Workflow values, in which case ByID falls back
 	// to a linear scan.
@@ -291,6 +293,11 @@ type Task struct {
 	// code (its exit is data), while a command or LLM task tolerates only 0.
 	// Rejected on sub-workflow and loop-wrapper tasks, which have no process exit.
 	OkExit []int
+
+	// action is the typed body form produced by Parse. It shadows the public
+	// legacy fields above until callers migrate.
+	action               Action
+	systemPromptTemplate Template
 }
 
 // WithArg is one `with:` entry on a sub-workflow task: a child param name and
@@ -332,6 +339,13 @@ const (
 // BodyKind reports which body form t carries, returning BodyInvalid when t sets
 // none or more than one of Prompt, Command, Workflow, and Script.
 func (t Task) BodyKind() BodyKind {
+	if t.action != nil {
+		return bodyKindForAction(t.action)
+	}
+	return bodyKindFromFields(t)
+}
+
+func bodyKindFromFields(t Task) BodyKind {
 	n := 0
 	kind := BodyInvalid
 	if t.Prompt != "" {

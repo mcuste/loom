@@ -9,18 +9,16 @@ import (
 // scanPlaceholders walks text in a SINGLE pass with combinedPlaceholderRe and
 // returns the task-id, param, and state placeholder names in source order.
 func scanPlaceholders(text string) (taskRefs, paramRefs, stateRefs []string) {
-	for _, m := range combinedPlaceholderRe.FindAllStringSubmatch(text, -1) {
-		switch {
-		case m[1] != "":
-			paramRefs = append(paramRefs, m[1])
-		case m[2] != "":
-			stateRefs = append(stateRefs, m[2])
-		case m[3] != "":
-			// prev ref: neither a task edge nor a param reference.
-		case m[5] != "":
-			taskRefs = append(taskRefs, m[5])
-		default:
-			taskRefs = append(taskRefs, m[4])
+	for _, ref := range ParseTemplate(text).Refs() {
+		switch r := ref.(type) {
+		case ParamRef:
+			paramRefs = append(paramRefs, string(r.Name))
+		case StateRef:
+			stateRefs = append(stateRefs, r.Key)
+		case TaskOutputRef:
+			taskRefs = append(taskRefs, string(r.ID))
+		case TaskExitRef:
+			taskRefs = append(taskRefs, string(r.ID))
 		}
 	}
 	return taskRefs, paramRefs, stateRefs
@@ -130,8 +128,12 @@ func checkPrevPlaceholders(wf *Workflow, memberByLoop map[LoopID]map[TaskID]bool
 	for i := range wf.Tasks {
 		t := &wf.Tasks[i]
 		for _, text := range t.TextBodies() {
-			for _, m := range prevPlaceholderRe.FindAllStringSubmatch(text, -1) {
-				name := m[1]
+			for _, ref := range ParseTemplate(text).Refs() {
+				prev, ok := ref.(PrevRef)
+				if !ok {
+					continue
+				}
+				name := string(prev.ID)
 				if t.Loop == "" {
 					return &PrevOutsideLoopError{Task: t.ID, Name: name}
 				}
@@ -165,33 +167,43 @@ type refScope struct {
 // seen is updated with any new edges added (so the caller can union further
 // scans without re-scanning). deps receives any new edges in order.
 func (rs refScope) resolveRefs(text string, implicit bool, seen map[TaskID]struct{}, deps *[]TaskID) error {
-	taskRefs, paramRefs, _ := scanPlaceholders(text)
-	for _, name := range taskRefs {
-		if name == rs.loopVar {
+	for _, ref := range ParseTemplateInScope(text, rs.loopVar).Refs() {
+		switch r := ref.(type) {
+		case LoopVarRef:
 			continue
-		}
-		id := TaskID(name)
-		if _, inSeen := seen[id]; inSeen {
-			continue
-		}
-		if !implicit {
-			err := &UnknownPlaceholderError{Task: rs.tid, Name: name}
-			if _, isParam := rs.params[ParamName(name)]; isParam {
-				err.Hint = fmt.Sprintf("did you mean {{params.%s}}?", name)
+		case TaskOutputRef:
+			if err := rs.resolveTaskRef(string(r.ID), implicit, seen, deps); err != nil {
+				return err
 			}
-			return err
-		}
-		// implicit: add if known, error if not
-		if _, ok := rs.known[id]; !ok {
-			return &UnknownPlaceholderError{Task: rs.tid, Name: name}
-		}
-		seen[id] = struct{}{}
-		*deps = append(*deps, id)
-	}
-	for _, name := range paramRefs {
-		if _, ok := rs.params[ParamName(name)]; !ok {
-			return &UnknownParamError{Task: rs.tid, Name: name}
+		case TaskExitRef:
+			if err := rs.resolveTaskRef(string(r.ID), implicit, seen, deps); err != nil {
+				return err
+			}
+		case ParamRef:
+			if _, ok := rs.params[r.Name]; !ok {
+				return &UnknownParamError{Task: rs.tid, Name: string(r.Name)}
+			}
 		}
 	}
+	return nil
+}
+
+func (rs refScope) resolveTaskRef(name string, implicit bool, seen map[TaskID]struct{}, deps *[]TaskID) error {
+	id := TaskID(name)
+	if _, inSeen := seen[id]; inSeen {
+		return nil
+	}
+	if !implicit {
+		err := &UnknownPlaceholderError{Task: rs.tid, Name: name}
+		if _, isParam := rs.params[ParamName(name)]; isParam {
+			err.Hint = fmt.Sprintf("did you mean {{params.%s}}?", name)
+		}
+		return err
+	}
+	if _, ok := rs.known[id]; !ok {
+		return &UnknownPlaceholderError{Task: rs.tid, Name: name}
+	}
+	seen[id] = struct{}{}
+	*deps = append(*deps, id)
 	return nil
 }

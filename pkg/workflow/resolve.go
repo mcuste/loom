@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -102,6 +101,20 @@ func (w *Workflow) EffectiveSystemPrompt(t *Task) string {
 	return w.SystemPrompt
 }
 
+// EffectiveSystemPromptTemplate returns the parsed effective system prompt.
+func (w *Workflow) EffectiveSystemPromptTemplate(t *Task) Template {
+	if t.SystemPrompt != "" {
+		if t.systemPromptTemplate.parsed {
+			return t.systemPromptTemplate
+		}
+		return ParseTemplate(t.SystemPrompt)
+	}
+	if w.systemPromptTemplate.parsed {
+		return w.systemPromptTemplate
+	}
+	return ParseTemplate(w.SystemPrompt)
+}
+
 // CacheEnabled reports whether t opts into output memoization. The task's own
 // `cache:` override wins when set (*true opts in, *false opts out); a nil
 // override inherits the workflow-level Cache default. Shell-ness is not checked
@@ -136,51 +149,13 @@ func (w *Workflow) CacheEnabled(t *Task) bool {
 // first loop iteration), so the placeholder must collapse rather than leak
 // braces.
 func Substitute(prompt string, outputs map[TaskID]string, params ParamValues, state map[string]string, prev map[TaskID]string, exitCodes map[TaskID]int) string {
-	matches := combinedPlaceholderRe.FindAllStringSubmatchIndex(prompt, -1)
-	if len(matches) == 0 {
-		return prompt
-	}
-	var b strings.Builder
-	b.Grow(len(prompt))
-	last := 0
-	for _, m := range matches {
-		// m: [matchStart, matchEnd, paramStart, paramEnd, stateStart, stateEnd,
-		// prevStart, prevEnd, taskStart, taskEnd, exitStart, exitEnd].
-		b.WriteString(prompt[last:m[0]])
-		matched := prompt[m[0]:m[1]]
-		switch {
-		case m[2] >= 0: // param branch.
-			name := ParamName(prompt[m[2]:m[3]])
-			if v, ok := params[name]; ok {
-				b.WriteString(v)
-			} else {
-				b.WriteString(matched)
-			}
-		case m[4] >= 0: // state branch: missing key -> empty string.
-			b.WriteString(state[prompt[m[4]:m[5]]])
-		case m[6] >= 0: // prev branch: missing id -> empty string.
-			b.WriteString(prev[TaskID(prompt[m[6]:m[7]])])
-		case m[10] >= 0: // exit branch: `{{id.exit}}` -> decimal exit code.
-			id := TaskID(prompt[m[10]:m[11]])
-			if v, ok := exitCodes[id]; ok {
-				b.WriteString(strconv.Itoa(v))
-			} else {
-				b.WriteString(matched)
-			}
-		case m[8] >= 0: // task branch.
-			id := TaskID(prompt[m[8]:m[9]])
-			if v, ok := outputs[id]; ok {
-				b.WriteString(v)
-			} else {
-				b.WriteString(matched)
-			}
-		default:
-			b.WriteString(matched)
-		}
-		last = m[1]
-	}
-	b.WriteString(prompt[last:])
-	return b.String()
+	return ParseTemplate(prompt).Render(RenderContext{
+		Outputs:   outputs,
+		Params:    params,
+		State:     state,
+		Prev:      prev,
+		ExitCodes: exitCodes,
+	})
 }
 
 // ResolveParams merges declared defaults, file-supplied values, and CLI
