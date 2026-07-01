@@ -19,8 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/task"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -274,28 +272,8 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 			gates: gates,
 		},
 	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	for _, scheduled := range prog.units {
-		switch u := scheduled.(type) {
-		case loopUnit:
-			lg := &wf.Loops[u.index]
-			g.Go(func() error {
-				return runLoop(gctx, wf, lg, st, hooks, opts)
-			})
-		case taskUnit:
-			if _, seeded := opts.Seed[u.id]; seeded {
-				continue
-			}
-			t := wf.ByID(u.id)
-			g.Go(func() error {
-				return runTask(gctx, wf, t, st, hooks, opts)
-			})
-		}
-	}
-
-	err := g.Wait()
-	return rep, err
+	interp := newInterpreter(prog, hooks, opts)
+	return rep, interp.run(ctx, st)
 }
 
 // runCached wraps an LLM dispatch with hash-based memoization. It consults the

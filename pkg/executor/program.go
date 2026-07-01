@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -32,15 +31,3 @@ type taskUnit struct {
 type loopUnit struct {
 	index int
 }
-
-func (u taskUnit) run(context.Context, *interpreter, *runState) error {
-	return fmt.Errorf("task unit %q has no interpreter runner", u.id)
-}
-
-func (u loopUnit) run(context.Context, *interpreter, *runState) error {
-	return fmt.Errorf("loop unit %d has no interpreter runner", u.index)
-}
-
-// interpreter is the future program runner that will evaluate a compiled
-// program without changing the executor's public API.
-type interpreter struct{}
