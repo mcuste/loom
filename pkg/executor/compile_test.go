@@ -98,9 +98,9 @@ func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
 
 	wf := &workflow.Workflow{
 		Tasks: []workflow.Task{
-			{ID: "a"},
-			{ID: "b", DependsOn: []workflow.TaskID{"a"}},
-			{ID: "c", DependsOn: []workflow.TaskID{"a", "b"}},
+			{ID: "a", Prompt: "a"},
+			{ID: "b", Prompt: "b", DependsOn: []workflow.TaskID{"a"}},
+			{ID: "c", Prompt: "c", DependsOn: []workflow.TaskID{"a", "b"}},
 		},
 	}
 
@@ -129,8 +129,8 @@ func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
 				t.Fatalf("nodes[%q].deps[%d] = %q, want %q", task.ID, j, n.deps[j], task.DependsOn[j])
 			}
 		}
-		if _, ok := n.op.(legacyOp); !ok {
-			t.Fatalf("nodes[%q].op = %T, want legacyOp", task.ID, n.op)
+		if _, ok := n.op.(invalidOp); ok {
+			t.Fatalf("nodes[%q].op = %T, want compiled body op", task.ID, n.op)
 		}
 	}
 }
@@ -150,6 +150,62 @@ func TestCompileProgramBuildsIndependentNodeDeps(t *testing.T) {
 
 	if got := prog.nodes["b"].deps[0]; got != "a" {
 		t.Fatalf("nodes[b].deps[0] = %q, want %q", got, "a")
+	}
+}
+
+func TestCompileProgramCompilesBodyOpByKind(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Tasks: []workflow.Task{
+			{ID: "prompt", Prompt: "hello"},
+			{ID: "shell", Command: "echo hi"},
+			{ID: "script", Script: "/tmp/task.sh"},
+			{ID: "sub", Workflow: "child"},
+			{ID: "invalid"},
+		},
+	}
+
+	prog := compileProgram(wf)
+
+	tests := []struct {
+		id   workflow.TaskID
+		want any
+	}{
+		{id: "prompt", want: promptOp{}},
+		{id: "shell", want: shellOp{}},
+		{id: "script", want: scriptOp{}},
+		{id: "sub", want: subWorkflowOp{}},
+		{id: "invalid", want: invalidOp{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(string(tc.id), func(t *testing.T) {
+			switch tc.want.(type) {
+			case promptOp:
+				if _, ok := prog.nodes[tc.id].op.(promptOp); !ok {
+					t.Fatalf("nodes[%q].op = %T, want promptOp", tc.id, prog.nodes[tc.id].op)
+				}
+			case shellOp:
+				if _, ok := prog.nodes[tc.id].op.(shellOp); !ok {
+					t.Fatalf("nodes[%q].op = %T, want shellOp", tc.id, prog.nodes[tc.id].op)
+				}
+			case scriptOp:
+				if _, ok := prog.nodes[tc.id].op.(scriptOp); !ok {
+					t.Fatalf("nodes[%q].op = %T, want scriptOp", tc.id, prog.nodes[tc.id].op)
+				}
+			case subWorkflowOp:
+				if _, ok := prog.nodes[tc.id].op.(subWorkflowOp); !ok {
+					t.Fatalf("nodes[%q].op = %T, want subWorkflowOp", tc.id, prog.nodes[tc.id].op)
+				}
+			case invalidOp:
+				if _, ok := prog.nodes[tc.id].op.(invalidOp); !ok {
+					t.Fatalf("nodes[%q].op = %T, want invalidOp", tc.id, prog.nodes[tc.id].op)
+				}
+			default:
+				t.Fatalf("unexpected want type %T", tc.want)
+			}
+		})
 	}
 }
 

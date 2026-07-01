@@ -2,10 +2,8 @@ package executor
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -181,111 +179,6 @@ func (st *runState) recordResult(t *workflow.Task, res TaskResult) {
 	st.rep.Usage.Add(res.Usage)
 	st.mu.Unlock()
 	close(st.gates[t.ID])
-}
-
-// dispatch substitutes t's body and runs it against the right backend, selected
-// by t.BodyKind(): a sub-workflow recurses via Run, a shell task forks `sh -c`,
-// a script task execs its file directly (capturing the exit code as data), an
-// LLM task calls its runtime (with cache and schema validation). It returns
-// the result and any dispatch (runErr) outcome; fatal is a non-nil setup error
-// (unknown runtime, unlinked sub-workflow, invalid body) detected before OnStart
-// fires and already wrapped with the task id, which the caller returns as-is.
-//
-// A for_each member binds its loop variable to the current element before the
-// normal placeholder substitution, so a {{loopVar}} value containing
-// placeholder-looking text is spliced before (not re-expanded across) it.
-func dispatch(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (res TaskResult, runErr, fatal error) {
-	switch t.BodyKind() {
-	case workflow.BodySubWorkflow:
-		return dispatchSubWorkflow(ctx, wf, t, st, hooks, opts, baseDelay)
-	case workflow.BodyShell:
-		return dispatchShell(ctx, wf, t, st, hooks, opts, baseDelay)
-	case workflow.BodyScript:
-		return dispatchScript(ctx, wf, t, st, hooks, opts, baseDelay)
-	case workflow.BodyPrompt:
-		return dispatchLLM(ctx, wf, t, st, hooks, opts, baseDelay)
-	default:
-		// BodyInvalid: the task set none or more than one body form. The parser
-		// rejects this, so reaching it means a hand-built or corrupted Task; fail
-		// fast rather than silently dispatching down an arbitrary branch.
-		return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", t.ID)
-	}
-}
-
-// dispatchShell is the BodyShell arm of dispatch: it substitutes the command
-// line and env, then runs sh -c with retry.
-func dispatchShell(ctx context.Context, _ *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
-	if hooks.OnStart != nil {
-		hooks.OnStart(*t, st.iteration, "", "", "")
-	}
-	st.mu.Lock()
-	body := workflow.Substitute(bindLoopVar(t.Command, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
-	env := taskEnv(st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
-	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-		return runShell(ctx, t, body, env, st.workDir)
-	})
-	return res, runErr, nil
-}
-
-// dispatchScript is the BodyScript arm of dispatch: it substitutes the script
-// path and args, then execs the file directly with retry.
-func dispatchScript(ctx context.Context, _ *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
-	if hooks.OnStart != nil {
-		hooks.OnStart(*t, st.iteration, "", "", "")
-	}
-	st.mu.Lock()
-	path := workflow.Substitute(bindLoopVar(t.Script, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
-	args := make([]string, len(t.Args))
-	for i, a := range t.Args {
-		args[i] = workflow.Substitute(bindLoopVar(a, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
-	}
-	env := taskEnv(st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
-	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-		return runScript(ctx, t, path, args, env, st.workDir)
-	})
-	return res, runErr, nil
-}
-
-// dispatchLLM is the BodyPrompt arm of dispatch: it looks up the runtime,
-// substitutes the prompt, and calls the LLM (with cache and schema validation).
-func dispatchLLM(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
-	rt, model, effort := wf.EffectiveWithParams(t, opts.Params)
-	runner, ok := resolveRunner(opts, rt)
-	if !ok {
-		return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
-	}
-	sysPrompt := workflow.Substitute(wf.EffectiveSystemPrompt(t), nil, opts.Params, opts.State, nil, nil)
-	if hooks.OnStart != nil {
-		hooks.OnStart(*t, st.iteration, rt, model, effort)
-	}
-	st.mu.Lock()
-	body := workflow.Substitute(bindLoopVar(t.Prompt, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
-	st.mu.Unlock()
-	send := func() (TaskResult, error) {
-		return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
-			r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt, st.workDir)
-			if err != nil {
-				return r, err
-			}
-			// A tolerated non-zero exit (ok_exit) means the runtime did not produce
-			// a real response, so there is no JSON output to validate against a
-			// schema; skip validation and let the empty output flow downstream.
-			if r.ExitCode != 0 {
-				return r, nil
-			}
-			return r, validateSchema(t, r.Output)
-		})
-	}
-	var res TaskResult
-	var runErr error
-	if opts.Cache != nil && wf.CacheEnabled(t) {
-		res, runErr = runCached(opts.Cache, t, rt, model, effort, sysPrompt, body, send)
-	} else {
-		res, runErr = send()
-	}
-	return res, runErr, nil
 }
 
 func resolveRunner(opts Options, name runtime.Name) (runtime.Runner, bool) {

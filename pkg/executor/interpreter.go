@@ -56,10 +56,6 @@ func (i *interpreter) retryBaseDelay() time.Duration {
 	return baseDelay
 }
 
-func (legacyOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	return dispatch(ctx, i.program.wf, n.task, st, i.hooks, i.opts, baseDelay)
-}
-
 func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 	if n == nil || n.task == nil {
 		return fmt.Errorf("compiled node missing")

@@ -10,49 +10,37 @@ import (
 	"github.com/mcuste/loom/pkg/workflowcheck"
 )
 
-// dispatchSubWorkflow dispatches a sub-workflow task: it recursively runs the linked
-// child via Run and captures its result. It is the BodySubWorkflow arm of dispatch.
-func dispatchSubWorkflow(ctx context.Context, wf *workflow.Workflow, t *workflow.Task, st *runState, hooks Hooks, opts Options, baseDelay time.Duration) (TaskResult, error, error) {
-	// A sub-workflow task is a leaf in this DAG: at dispatch it recursively
-	// runs the linked child via Run and captures its result. The child brings
-	// its own runtime, so there is no runtime.Lookup here (like a shell task).
-	// wf.Subs is the authoritative link source: the executor already holds the
-	// parent workflow, so callers need not copy the links into Options.
-	child := wf.Subs[t.ID]
+// eval runs a compiled sub-workflow task by resolving its linked child, then
+// executing that child via the public Run path.
+func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
+	t := n.task
+	child := i.program.wf.Subs[t.ID]
 	if child == nil {
 		return TaskResult{}, nil, fmt.Errorf("task %q: sub-workflow %q not linked", t.ID, t.Workflow)
 	}
-	if hooks.OnStart != nil {
-		hooks.OnStart(*t, st.iteration, "", "", "")
+	if i.hooks.OnStart != nil {
+		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
-	// with-values are substituted against the PARENT context first, then
-	// handed to the child as its CLI-tier param values.
 	st.mu.Lock()
 	vals := make(map[string]string, len(t.With))
 	for _, a := range t.With {
-		vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+		vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
 	}
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 		start := time.Now()
-		cp, err := workflowcheck.ResolveAndValidateParams(child, vals, nil, catalogValidator(opts))
+		cp, err := workflowcheck.ResolveAndValidateParams(child, vals, nil, catalogValidator(i.opts))
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err
 		}
 		childRep, err := Run(ctx, child, Hooks{}, Options{
-			Params: cp,
-			// Child shares the parent's cross-run state so {{state.x}} placeholders in
-			// child prompts resolve the same store. Write-back (writes_state) is a
-			// CLI-layer pass over the top-level report only, so the child never mutates
-			// the map here.
-			State:          opts.State,
-			Cache:          opts.Cache,
-			RetryBaseDelay: opts.RetryBaseDelay,
-			// The parent's effective cwd is the child's inherited fallback; the
-			// child's own working_dir (if any) overrides it inside Run.
-			WorkDir:  st.workDir,
-			Catalog:  opts.Catalog,
-			Resolver: opts.Resolver,
+			Params:         cp,
+			State:          i.opts.State,
+			Cache:          i.opts.Cache,
+			WorkDir:        st.workDir,
+			Catalog:        i.opts.Catalog,
+			Resolver:       i.opts.Resolver,
+			RetryBaseDelay: i.opts.RetryBaseDelay,
 		})
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err

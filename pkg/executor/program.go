@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"time"
 
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -25,14 +24,6 @@ type node struct {
 	deps []workflow.TaskID
 	op   op
 }
-
-// op is the executable behavior of one task body form. Phase 6 keeps a single
-// legacy implementation that delegates to the existing dispatcher.
-type op interface {
-	eval(context.Context, *interpreter, *frame, *node, time.Duration) (TaskResult, error, error)
-}
-
-type legacyOp struct{}
 
 // unit is one schedulable top-level item in a compiled program. Loop members
 // are intentionally not top-level units: their owning loop unit drives them.

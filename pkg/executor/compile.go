@@ -21,7 +21,7 @@ func compileNodes(wf *workflow.Workflow) map[workflow.TaskID]*node {
 			id:   t.ID,
 			task: t,
 			deps: append([]workflow.TaskID(nil), t.DependsOn...),
-			op:   legacyOp{},
+			op:   compileOp(t),
 		}
 	}
 	return nodes
