@@ -125,10 +125,11 @@ func (i *interpreter) runForEachLoop(ctx context.Context, st *frame, lp *loopPro
 
 // runForEachParallel resolves the loop's list once and runs the body for every
 // element concurrently, binding the loop variable per element. Each pass runs
-// over a private snapshot of the member outputs (see forParallelIteration), so
-// passes never observe or clobber one another; after a pass completes its member
-// outputs are merged back into the shared report. The first pass to error
-// cancels the rest via the errgroup context. An empty list runs no passes.
+// in a child frame with a private snapshot of the member store (see
+// childFrameForParallelLoopPass), so passes never observe or clobber one
+// another; after a pass completes its member outputs are merged back into the
+// shared report. The first pass to error cancels the rest via the errgroup
+// context. An empty list runs no passes.
 func (i *interpreter) runForEachParallel(ctx context.Context, st *frame, lp *loopProgram) error {
 	list := i.forEachList(st, lp)
 	pg, pgctx := errgroup.WithContext(ctx)
@@ -156,7 +157,7 @@ func (i *interpreter) runLoopMembers(ctx context.Context, st *frame, lp *loopPro
 }
 
 // runParallelPass runs one pass of a parallel for_each body: a fresh gate per
-// member plus the aliased entry-dependency gates, over an isolated runState.
+// member plus the aliased entry-dependency gates, over an isolated child frame.
 // After the members complete it merges their outputs and succeeded/skipped
 // dispositions back into the shared report under st.mu so exit consumers (and
 // outer status guards) observe a member value.
@@ -172,7 +173,7 @@ func (i *interpreter) runLoopMembers(ctx context.Context, st *frame, lp *loopPro
 // element, not the loop member.
 func (i *interpreter) runParallelPass(ctx context.Context, st *frame, lp *loopProgram, iter int, loopVar, loopVal string) error {
 	innerGates := lp.buildInnerGates(st.gates)
-	inner := st.forParallelIteration(innerGates, iter, loopVar, loopVal)
+	inner := st.childFrameForParallelLoopPass(innerGates, iter, loopVar, loopVal)
 	if err := i.runLoopMembers(ctx, inner, lp); err != nil {
 		return err
 	}
@@ -187,12 +188,13 @@ func (i *interpreter) runParallelPass(ctx context.Context, st *frame, lp *loopPr
 // (interpreter.evalNode closes the gate it owns, so a member cannot reuse a
 // gate across iterations) plus the already-closed outer entry-dependency gates
 // aliased in so members satisfy their external waits immediately. Members are
-// dispatched concurrently; the pass returns their body outputs, which feed the
-// while convergence check and become the next pass's prev. loopVar/loopVal
-// bind a for_each iteration variable ("" for a while loop).
+// dispatched concurrently in a child frame that shares the outer report and
+// store; the pass returns their body outputs, which feed the while convergence
+// check and become the next pass's prev. loopVar/loopVal bind a for_each
+// iteration variable ("" for a while loop).
 func (i *interpreter) runLoopPass(ctx context.Context, st *frame, lp *loopProgram, prev map[workflow.TaskID]string, iter int, loopVar, loopVal string) (map[workflow.TaskID]string, error) {
 	innerGates := lp.buildInnerGates(st.gates)
-	inner := st.forLoopIteration(innerGates, prev, iter, loopVar, loopVal)
+	inner := st.childFrameForLoopPass(innerGates, prev, iter, loopVar, loopVal)
 	if err := i.runLoopMembers(ctx, inner, lp); err != nil {
 		return nil, err
 	}

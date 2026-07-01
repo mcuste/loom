@@ -23,6 +23,13 @@ func newReport(order []workflow.TaskID, opts Options) *Report {
 	}
 }
 
+// newRootFrame builds the root interpreter frame for one public Run call. The
+// root frame owns the shared report and store for that run; derived sequential
+// loop passes reuse both directly, while parallel for_each passes snapshot the
+// store but still share the report's rows, usage, and budget gate. A
+// sub-workflow runs through its own public Run call, so it gets an independent
+// report and root store even when it inherits options like state, cache, and
+// working directory from its parent.
 func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, opts Options) *frame {
 	gates := make(map[workflow.TaskID]chan struct{}, len(order))
 	for _, tid := range order {

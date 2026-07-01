@@ -20,8 +20,9 @@ func bindLoopVar(body string, st *runState) string {
 	return strings.ReplaceAll(body, "{{"+st.loopVar+"}}", st.loopVal)
 }
 
-// runShared holds the run-global invariant state shared across all iterations.
-// Every field is read or written under mu, except workDir (immutable after init).
+// runShared holds the report/store pair shared by every frame in one Run call.
+// Every field is read or written under mu, except workDir (immutable after
+// init).
 type runShared struct {
 	rep *Report
 	// scope is the current frame store: the four run-scope maps (outputs,
@@ -67,10 +68,10 @@ type loopCtx struct {
 	loopVal string
 }
 
-// runState is the current interpreter frame. It combines a pointer to the
-// shared run invariants with the per-pass context so executor helpers get
-// direct field access (st.mu, st.scope, st.gates, st.iteration) without
-// changing stable call sites.
+// runState is the current interpreter frame. It combines the shared run state
+// with one frame's loop/pass context so executor helpers get direct field
+// access (st.mu, st.scope, st.gates, st.iteration) without changing stable
+// call sites.
 type runState struct {
 	*runShared
 	loopCtx
@@ -93,6 +94,14 @@ func (st *runState) forLoopIteration(gates map[workflow.TaskID]chan struct{}, pr
 			loopVal:   loopVal,
 		},
 	}
+}
+
+// childFrameForLoopPass is the interpreter-facing name for deriving a
+// sequential loop-pass frame. The child frame reuses the parent's report,
+// store, mutex, and budget gate, but swaps in pass-local gates and loop
+// bindings.
+func (st *runState) childFrameForLoopPass(gates map[workflow.TaskID]chan struct{}, prev map[workflow.TaskID]string, iteration int, loopVar, loopVal string) *runState {
+	return st.forLoopIteration(gates, prev, iteration, loopVar, loopVal)
 }
 
 // forParallelIteration derives a runState for one pass of a parallel for_each.
@@ -121,6 +130,14 @@ func (st *runState) forParallelIteration(gates map[workflow.TaskID]chan struct{}
 			loopVal:   loopVal,
 		},
 	}
+}
+
+// childFrameForParallelLoopPass is the interpreter-facing name for deriving a
+// parallel for_each pass frame. The child frame snapshots the store so sibling
+// passes do not observe or clobber one another's member state, while still
+// sharing the parent report, mutex, and budget gate.
+func (st *runState) childFrameForParallelLoopPass(gates map[workflow.TaskID]chan struct{}, iteration int, loopVar, loopVal string) *runState {
+	return st.forParallelIteration(gates, iteration, loopVar, loopVal)
 }
 
 // waitDeps blocks until every dependency gate has closed, or returns ctx.Err
