@@ -61,19 +61,8 @@ func buildTask(st *parseState, lt loopTask) error {
 	if len(rt.Args) > 0 && rt.Script == "" {
 		return fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
 	}
-	// ok_exit applies to tasks that run a process (prompt/command/script); a
-	// sub-workflow has no process exit code. Each entry must be a valid Unix
-	// exit code (0-255); a negative or out-of-range value can never match a real
-	// exit and is almost certainly a mistake.
-	if len(rt.OkExit) > 0 {
-		if rt.Workflow != "" {
-			return fmt.Errorf("task %q: %w", tid, ErrOkExitOnSubWorkflow)
-		}
-		for _, code := range rt.OkExit {
-			if code < 0 || code > 255 {
-				return fmt.Errorf("task %q: %w: %d", tid, ErrOkExitOutOfRange, code)
-			}
-		}
+	if err := validateOkExit(tid, rt); err != nil {
+		return err
 	}
 
 	body, withArgs, err := normalizeTaskBody(tid, rt)
@@ -113,6 +102,21 @@ func buildTask(st *parseState, lt loopTask) error {
 		OkExit:               rt.OkExit,
 		action:               action,
 	})
+	return nil
+}
+
+func validateOkExit(tid TaskID, rt rawTask) error {
+	if len(rt.OkExit) == 0 {
+		return nil
+	}
+	if rt.Workflow != "" {
+		return fmt.Errorf("task %q: %w", tid, ErrOkExitOnSubWorkflow)
+	}
+	for _, code := range rt.OkExit {
+		if code < 0 || code > 255 {
+			return fmt.Errorf("task %q: %w: %d", tid, ErrOkExitOutOfRange, code)
+		}
+	}
 	return nil
 }
 

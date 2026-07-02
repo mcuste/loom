@@ -85,14 +85,6 @@ func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
 	return finalizeWorkflow(raw, wf, paramSet, memberByLoop)
 }
 
-func decodeRawWorkflow(data []byte) (rawWorkflow, WorkflowID, error) {
-	draft, err := syntax.Decode(data, syntax.Source{})
-	if err != nil {
-		return rawWorkflow{}, "", err
-	}
-	return rawFromDraft(draft, ParseOptions{})
-}
-
 func rawFromDraft(draft *syntax.Draft, opts ParseOptions) (rawWorkflow, WorkflowID, error) {
 	if draft == nil {
 		return rawWorkflow{}, "", fmt.Errorf("workflow draft is nil")
@@ -206,12 +198,7 @@ func newWorkflowSkeleton(raw rawWorkflow, id WorkflowID) (*Workflow, map[ParamNa
 		paramByName:          paramIdx,
 	}
 
-	// Set membership reused by buildDeps' param scan; the index map's value type
-	// is irrelevant for membership, so wrap it once here.
-	paramSet := make(map[ParamName]struct{}, len(paramIdx))
-	for n := range paramIdx {
-		paramSet[n] = struct{}{}
-	}
+	paramSet := paramSetFromIndex(paramIdx)
 	if err := validateRoutingField("", "runtime", raw.Runtime, paramSet); err != nil {
 		return nil, nil, nil, err
 	}
@@ -223,6 +210,14 @@ func newWorkflowSkeleton(raw rawWorkflow, id WorkflowID) (*Workflow, map[ParamNa
 	}
 
 	return wf, paramSet, paramIdx, nil
+}
+
+func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
+	paramSet := make(map[ParamName]struct{}, len(paramIdx))
+	for name := range paramIdx {
+		paramSet[name] = struct{}{}
+	}
+	return paramSet
 }
 
 func prepareLoopedTasks(topTasks []rawTask, rawLoops []rawLoop, wf *Workflow, paramSet map[ParamName]struct{}, paramIdx map[ParamName]int) ([]loopTask, *parseState, map[LoopID]map[TaskID]bool, error) {
@@ -272,11 +267,11 @@ func buildAllTasks(st *parseState, allTasks []loopTask) error {
 
 func finalizeWorkflow(raw rawWorkflow, wf *Workflow, paramSet map[ParamName]struct{}, memberByLoop map[LoopID]map[TaskID]bool) (*Workflow, error) {
 	if raw.Output != "" {
-		ot := TaskID(raw.Output)
-		if _, ok := wf.byID[ot]; !ok {
-			return nil, &UnknownOutputTaskError{Task: ot}
+		outputTask := TaskID(raw.Output)
+		if _, ok := wf.byID[outputTask]; !ok {
+			return nil, &UnknownOutputTaskError{Task: outputTask}
 		}
-		wf.Output = ot
+		wf.Output = outputTask
 	}
 
 	if err := checkPrevPlaceholders(wf, memberByLoop); err != nil {
@@ -437,7 +432,10 @@ func validateLoopNamespace(rawLoops []rawLoop, ids map[TaskID]struct{}, paramIdx
 // its own), so they are skipped here and reached only through the w.Subs
 // recursion.
 func (w *Workflow) ValidateRouting() error {
-	params, _ := ResolveParams(w, nil, nil)
+	params, err := ResolveParams(w, nil, nil)
+	if err != nil {
+		params = nil
+	}
 	return w.ValidateRoutingWithParams(params, true)
 }
 
@@ -467,7 +465,10 @@ func (w *Workflow) ValidateRoutingWithParams(params ParamValues, allowUnresolved
 		}
 	}
 	for _, child := range w.Subs {
-		childParams, _ := ResolveParams(child, nil, nil)
+		childParams, err := ResolveParams(child, nil, nil)
+		if err != nil {
+			childParams = nil
+		}
 		if err := child.ValidateRoutingWithParams(childParams, true); err != nil {
 			return err
 		}

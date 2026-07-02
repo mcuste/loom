@@ -22,18 +22,7 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
 	st.mu.Lock()
-	vals := make(map[string]string, len(t.With))
-	if action, ok := t.ParsedAction(); ok {
-		if wfAction, ok := action.(workflow.WorkflowAction); ok {
-			for _, a := range wfAction.WithTemplates {
-				vals[string(a.Name)] = renderTemplate(a.Value, st, i.opts)
-			}
-		}
-	} else {
-		for _, a := range t.With {
-			vals[string(a.Name)] = workflow.Substitute(bindLoopVar(a.Value, st), st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes)
-		}
-	}
+	vals := renderWorkflowArgs(t, st, i.opts)
 	st.mu.Unlock()
 	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
 		start := time.Now()
@@ -53,17 +42,37 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err
 		}
-		ot, err := child.OutputTask()
+		outputTask, err := child.OutputTask()
 		if err != nil {
 			return TaskResult{TaskID: t.ID}, err
 		}
-		out := childRep.Outputs[ot]
+		out := childRep.Outputs[outputTask]
 		// One parent row, child result + SUMMED child usage; schema (if any)
 		// validates the child result uniformly with the LLM branch.
 		r := TaskResult{TaskID: t.ID, Output: out, Usage: childRep.Usage, Elapsed: time.Since(start)}
 		return r, validateSchema(t, out)
 	})
 	return res, runErr, nil
+}
+
+func renderWorkflowArgs(t *workflow.Task, st *frame, opts Options) map[string]string {
+	if action, ok := t.ParsedAction(); ok {
+		wfAction, ok := action.(workflow.WorkflowAction)
+		if !ok {
+			return nil
+		}
+		vals := make(map[string]string, len(wfAction.WithTemplates))
+		for _, arg := range wfAction.WithTemplates {
+			vals[string(arg.Name)] = renderTemplate(arg.Value, st, opts)
+		}
+		return vals
+	}
+
+	vals := make(map[string]string, len(t.With))
+	for _, arg := range t.With {
+		vals[string(arg.Name)] = workflow.Substitute(bindLoopVar(arg.Value, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+	}
+	return vals
 }
 
 func catalogValidator(opts Options) runtime.Validator {

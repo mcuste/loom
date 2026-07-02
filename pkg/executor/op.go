@@ -81,18 +81,26 @@ func renderCommand(t *workflow.Task, st *frame, opts Options) string {
 func renderScript(t *workflow.Task, st *frame, opts Options) (string, []string) {
 	if action, ok := t.ParsedAction(); ok {
 		if script, ok := action.(workflow.ScriptAction); ok {
-			args := make([]string, len(script.Args))
-			for idx, arg := range script.Args {
-				args[idx] = renderTemplate(arg, st, opts)
-			}
-			return renderTemplate(script.Path, st, opts), args
+			return renderTemplate(script.Path, st, opts), renderTemplates(script.Args, st, opts)
 		}
 	}
-	args := make([]string, len(t.Args))
-	for idx, a := range t.Args {
-		args[idx] = renderLegacyText(a, st, opts)
+	return renderLegacyText(t.Script, st, opts), renderLegacyTexts(t.Args, st, opts)
+}
+
+func renderTemplates(values []workflow.Template, st *frame, opts Options) []string {
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = renderTemplate(value, st, opts)
 	}
-	return renderLegacyText(t.Script, st, opts), args
+	return out
+}
+
+func renderLegacyTexts(values []string, st *frame, opts Options) []string {
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = renderLegacyText(value, st, opts)
+	}
+	return out
 }
 
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {

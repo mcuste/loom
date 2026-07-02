@@ -138,6 +138,7 @@ func Compile(wf *workflow.Workflow, opts CompileOptions) (*Plan, error) {
 		}
 		pl.Steps[step.ID] = step
 	}
+	rootBlock := pl.Blocks[root]
 	for i := range wf.Loops {
 		lg := wf.Loops[i]
 		bodyID := BlockID(lg.ID)
@@ -151,18 +152,15 @@ func Compile(wf *workflow.Workflow, opts CompileOptions) (*Plan, error) {
 			Action: loopAction(lg, bodyID),
 		}
 		pl.Steps[step.ID] = step
-		rootBlock := pl.Blocks[root]
 		rootBlock.Steps = append(rootBlock.Steps, step.ID)
-		pl.Blocks[root] = rootBlock
 	}
 	for _, id := range pl.Order {
 		if _, ok := memberOf[workflow.TaskID(id)]; ok {
 			continue
 		}
-		rootBlock := pl.Blocks[root]
 		rootBlock.Steps = append(rootBlock.Steps, id)
-		pl.Blocks[root] = rootBlock
 	}
+	pl.Blocks[root] = rootBlock
 	return pl, nil
 }
 
