@@ -30,11 +30,23 @@ import (
 	"time"
 
 	"github.com/adhocore/gronx"
+
+	"github.com/mcuste/loom/pkg/interpreter"
 )
+
+// ScheduleID identifies a persisted schedule.
+type ScheduleID string
 
 // Overlap is the policy for a fire that arrives while the schedule's previous
 // run is still in flight.
 type Overlap string
+
+// OverlapPolicy is the architecture-level name for overlap handling.
+type OverlapPolicy = Overlap
+
+// CatchupPolicy records whether missed fires should be caught up on daemon
+// startup. It aliases bool because the current policy is intentionally binary.
+type CatchupPolicy bool
 
 const (
 	// OverlapSkip drops the new fire if the previous run is still running. The
@@ -59,6 +71,17 @@ func ParseOverlap(s string) (Overlap, error) {
 	}
 }
 
+// CronTrigger is a recurring cron trigger.
+type CronTrigger struct {
+	Expr string
+	TZ   string
+}
+
+// OneShotTrigger is a one-off trigger at an absolute instant.
+type OneShotTrigger struct {
+	At time.Time
+}
+
 // Trigger is a schedule's timing rule. Exactly one of Cron or At is set: Cron
 // is a recurring gronx expression, At is a one-off fire instant (stored UTC).
 // TZ is the IANA location name the cron expression is evaluated in; empty means
@@ -67,6 +90,18 @@ type Trigger struct {
 	Cron string    `json:"cron,omitempty"`
 	At   time.Time `json:"at,omitzero"`
 	TZ   string    `json:"tz,omitempty"`
+}
+
+// NewCronTrigger adapts the explicit CronTrigger value object to the persisted
+// Trigger DTO.
+func NewCronTrigger(t CronTrigger) Trigger {
+	return Trigger{Cron: t.Expr, TZ: t.TZ}
+}
+
+// NewOneShotTrigger adapts the explicit OneShotTrigger value object to the
+// persisted Trigger DTO.
+func NewOneShotTrigger(t OneShotTrigger) Trigger {
+	return Trigger{At: t.At}
 }
 
 // IsCron reports whether the trigger is a recurring cron rule.
@@ -87,6 +122,9 @@ func (t Trigger) Summary() string {
 	}
 	return "at " + t.At.Format("2006-01-02 15:04 MST")
 }
+
+// Schedule is the scheduler-domain name for a single persisted schedule.
+type Schedule = Record
 
 // Record is a single persisted schedule.
 type Record struct {
@@ -122,6 +160,25 @@ type Record struct {
 	LastRunID string `json:"last_run_id,omitempty"`
 	// CreatedAt is when the schedule was added (UTC).
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Invocation returns the opaque workflow request this schedule fires. The
+// daemon passes this value to an interpreter.RunLauncher without inspecting the
+// referenced workflow's tasks, graph, runtimes, or reports.
+func (r Record) Invocation(defaultCwd string) interpreter.WorkflowInvocation {
+	ref := r.Path
+	if ref == "" {
+		ref = r.Ref
+	}
+	params := make(map[string]string, len(r.Params))
+	for k, v := range r.Params {
+		params[k] = v
+	}
+	return interpreter.WorkflowInvocation{
+		Ref:    interpreter.WorkflowRef(ref),
+		Params: params,
+		Cwd:    defaultCwd,
+	}
 }
 
 // EffectiveOverlap returns the record's overlap policy, defaulting an empty

@@ -14,6 +14,9 @@ type BlockID string
 // StepID identifies one executable step.
 type StepID string
 
+// Program is the compiled interpreter IR for a workflow.
+type Program = Plan
+
 // Plan is the executable graph compiled from a Workflow.
 type Plan struct {
 	Root   BlockID
@@ -28,6 +31,9 @@ type Block struct {
 	Steps  []StepID
 	Output OutputExpr
 }
+
+// ExecutableUnit is the architecture-level name for one compiled unit.
+type ExecutableUnit = Step
 
 // Step is one executable item.
 type Step struct {
@@ -200,7 +206,7 @@ func compileAction(wf *workflow.Workflow, t *workflow.Task) (Action, error) {
 		return RunCommand{Command: action.Command}, nil
 	case workflow.ScriptAction:
 		return RunScript{Path: action.Path, Args: append([]workflow.Template(nil), action.Args...)}, nil
-	case workflow.WorkflowAction:
+	case workflow.SubWorkflowAction:
 		return CallWorkflow{
 			Ref:           action.Ref,
 			With:          append([]workflow.WithArg(nil), action.With...),

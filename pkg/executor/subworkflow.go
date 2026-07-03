@@ -50,14 +50,14 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 		// One parent row, child result + SUMMED child usage; schema (if any)
 		// validates the child result uniformly with the LLM branch.
 		r := TaskResult{TaskID: t.ID, Output: out, Usage: childRep.Usage, Elapsed: time.Since(start)}
-		return r, validateSchema(t, out)
+		return r, evaluateSchemaGate(ctx, t, out, r.ExitCode)
 	})
 	return res, runErr, nil
 }
 
 func renderWorkflowArgs(t *workflow.Task, st *frame, opts Options) map[string]string {
 	if action, ok := t.ParsedAction(); ok {
-		wfAction, ok := action.(workflow.WorkflowAction)
+		wfAction, ok := action.(workflow.SubWorkflowAction)
 		if !ok {
 			return nil
 		}

@@ -107,6 +107,12 @@ tasks:
 	if got := flaky.callCount(); got != 3 {
 		t.Errorf("attempts = %d, want 3 (1 initial + 2 retries)", got)
 	}
+	if got := len(rep.Tasks[0].Attempts); got != 3 {
+		t.Fatalf("recorded attempts = %d, want 3", got)
+	}
+	if rep.Tasks[0].Attempts[0].Err == "" || rep.Tasks[0].Attempts[2].Err != "" {
+		t.Fatalf("attempt errors = %#v, want failures followed by success", rep.Tasks[0].Attempts)
+	}
 }
 
 // TestRun_StopsAfterMaxRetries: a runtime that always fails transiently is

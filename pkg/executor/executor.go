@@ -56,6 +56,20 @@ type TaskResult struct {
 	// non-zero exit is data rather than a failure: it is recorded here and
 	// readable downstream via `{{id.exit}}`, and the task still succeeds.
 	ExitCode int
+	// Attempts records every effect attempt made for this task when retry policy
+	// is involved. For a non-retried task it contains the single attempt that
+	// produced this result. Cache hits do not add attempts because no effect ran.
+	Attempts []Attempt
+}
+
+// Attempt is one concrete try within a task execution.
+type Attempt struct {
+	Index    int
+	Output   string
+	Usage    runtime.Usage
+	Elapsed  time.Duration
+	ExitCode int
+	Err      string
 }
 
 // Cache memoizes LLM task outputs across runs. The executor consults it before
@@ -79,6 +93,8 @@ const (
 	StatusOK      = task.StatusOK
 	StatusSkipped = task.StatusSkipped
 )
+
+var execCommandContext = exec.CommandContext
 
 // ShellError reports a non-zero exit from a shell task. The wrapped command's
 // stderr is captured verbatim so callers can surface it without re-running
@@ -297,7 +313,8 @@ func runLLM(ctx context.Context, t *workflow.Task, prompt string, runner runtime
 // result either way, so a failure still surfaces it to the store and TUI.
 func runShell(ctx context.Context, t *workflow.Task, line string, env []string, workDir string) (TaskResult, error) {
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "sh", "-c", line)
+	// Workflow command tasks intentionally execute user-authored shell bodies.
+	cmd := execCommandContext(ctx, "sh", "-c", line)
 	cmd.Env = env
 	cmd.Dir = workDir
 	var stderr bytes.Buffer
@@ -339,7 +356,8 @@ func runShell(ctx context.Context, t *workflow.Task, line string, env []string, 
 // written through to the parent so a script's diagnostics remain visible.
 func runScript(ctx context.Context, t *workflow.Task, path string, args, env []string, workDir string) (TaskResult, error) {
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, path, args...)
+	// Workflow script tasks intentionally execute the user-authored script path.
+	cmd := execCommandContext(ctx, path, args...)
 	cmd.Env = env
 	cmd.Dir = workDir
 	cmd.Stderr = os.Stderr

@@ -95,27 +95,17 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 		return err
 	}
 
-	if t.Cond != nil {
-		run, err := st.evalWhen(t)
-		if err != nil {
-			traceErr = fmt.Errorf("task %q: when: %w", t.ID, err)
-			return traceErr
-		}
-		if !run {
-			traceRes = TaskResult{TaskID: t.ID, Status: StatusSkipped, Iteration: st.iteration}
-			st.recordSkip(t, i.hooks)
-			return nil
-		}
+	release, skipped, err := i.evaluatePreStepGates(ctx, st, t)
+	if err != nil {
+		traceErr = err
+		return err
 	}
-
-	if i.program.wf.Budget != nil {
-		release, err := st.admitBudget(ctx, i.program.wf)
-		if err != nil {
-			traceErr = err
-			return err
-		}
-		defer release()
+	if skipped {
+		traceRes = TaskResult{TaskID: t.ID, Status: StatusSkipped, Iteration: st.iteration}
+		st.recordSkip(t, i.hooks)
+		return nil
 	}
+	defer release()
 
 	res, runErr, fatal := n.op.eval(ctx, i, st, n, baseDelay)
 	if fatal != nil {

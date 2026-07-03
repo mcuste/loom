@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/run"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -49,11 +50,11 @@ type RunMeta struct {
 }
 
 // Observer is runner's presentation seam. Callers own observer construction
-// and teardown; the execution core only drives the run header, progress hooks,
-// summary, and best-effort store-error reporting.
+// and teardown; the execution core only drives the run header, execution event
+// stream, summary, and best-effort store-error reporting.
 type Observer interface {
 	Header(meta RunMeta) error
-	Hooks() executor.Hooks
+	Events() run.EventSink
 	Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error
 	StoreError(err error)
 }
@@ -109,7 +110,7 @@ type runExec struct {
 // one genuinely new root at this layer); rs is the seed material the run honors.
 func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (runID string, runErr error) {
 	wf := x.req.Wf
-	run, err := store.Open(wf.ID, x.req.Manifest, store.Config{
+	record, err := store.Open(wf.ID, x.req.Manifest, store.Config{
 		Root:        x.req.Home,
 		Cwd:         cwd,
 		OnError:     x.obs.StoreError,
@@ -120,7 +121,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	if err != nil {
 		return "", err
 	}
-	runID = run.ID()
+	runID = record.ID()
 
 	// Close is idempotent and must run even if the executor panics, so defer
 	// it. rep and runErr are read at defer time, after the executor returns:
@@ -129,7 +130,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	// no error channel, so its own write error is intentionally discarded.
 	var rep *executor.Report
 	defer func() {
-		if closeErr := run.Close(summaryFor(rep), runErr); closeErr != nil {
+		if closeErr := record.Close(summaryFor(rep), runErr); closeErr != nil {
 			x.obs.StoreError(closeErr)
 		}
 	}()
@@ -139,7 +140,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	// records the denominator.
 	expected := len(wf.Tasks) - len(rs.set)
 	if err := x.obs.Header(RunMeta{
-		RunFile: run.Path(),
+		RunFile: record.Path(),
 		Cwd:     cwd,
 		Seeded:  len(rs.set),
 		Total:   expected,
@@ -149,14 +150,14 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 
 	// One store-hooks instance drives both the seeded-task stamping and the
 	// executor below, so the run is never double-wrapped.
-	sh := storeHooks(run)
+	sh := storeHooks(record)
 	stampSeeded(sh, wf, rs)
 	seedExit := seededExitCodes(rs)
 
-	rep, runErr = executor.Run(ctx, wf, executor.JoinHooks(
-		x.obs.Hooks(),
-		sh,
-	), executor.Options{
+	rep, runErr = executor.Run(ctx, wf, run.HooksFromSink(run.JoinSinks(
+		x.obs.Events(),
+		storeEvents(record),
+	)), executor.Options{
 		Params:        x.req.Resolved,
 		Seed:          rs.seed,
 		SeedExitCodes: seedExit,
@@ -239,8 +240,8 @@ func toRecord(res executor.TaskResult) store.TaskRecord {
 }
 
 // storeHooks binds store.Run.OnStart as a direct method value and wraps
-// OnFinish with toRecord so the executor's TaskResult is converted before it
-// reaches the store.
+// OnFinish with toRecord so seeded task stamping can reuse the same store write
+// path as execution events.
 func storeHooks(run *store.Run) executor.Hooks {
 	return executor.Hooks{
 		OnStart: run.OnStart,
@@ -248,6 +249,18 @@ func storeHooks(run *store.Run) executor.Hooks {
 			run.OnFinish(t, iter, toRecord(res), err)
 		},
 	}
+}
+
+// storeEvents records live executor events into the run store.
+func storeEvents(record *store.Run) run.EventSink {
+	return run.EventSinkFunc(func(e run.Event) {
+		switch ev := e.(type) {
+		case run.StepStarted:
+			record.OnStart(ev.Task, ev.Iteration, ev.Runtime, ev.Model, ev.Effort)
+		case run.StepFinished:
+			record.OnFinish(ev.Task, ev.Iteration, toRecord(ev.Result), ev.Err)
+		}
+	})
 }
 
 // summaryFor returns nil when rep is nil so store.Run.Close leaves totals unset.

@@ -23,6 +23,11 @@ import (
 // Name identifies a runtime in workflow YAML, e.g. "claude-code".
 type Name string
 
+// RuntimeName is the public value-object spelling used by the interpreter
+// architecture. It aliases Name so existing runtime registrations remain the
+// single catalog key type.
+type RuntimeName = Name
+
 // Model identifies the model a runtime should use for a task. The value is
 // opaque to this package; each runtime interprets it (e.g. "sonnet" for
 // claude-code, "gpt-5" for openai-api, "llama3.1:70b" for ollama). Validity
@@ -60,6 +65,12 @@ type Request struct {
 	WorkingDir string
 }
 
+// RuntimeRequest is the architecture-level name for a resolved runtime call.
+type RuntimeRequest = Request
+
+// RuntimeResponse is the architecture-level name for a runtime result.
+type RuntimeResponse = Response
+
 // Runner is the contract every registered runtime satisfies. It validates a
 // Request's routing fields and executes the task end-to-end.
 //
@@ -70,6 +81,16 @@ type Request struct {
 type Runner interface {
 	Validate(Request) error
 	Run(ctx context.Context, req Request) (Response, error)
+}
+
+// RuntimeProvider is the named provider contract used at interpreter package
+// boundaries. The registry continues to store Runner implementations under an
+// explicit name, while adapters that carry their own identity can satisfy this
+// interface directly.
+type RuntimeProvider interface {
+	Name() RuntimeName
+	Validate(RuntimeRequest) error
+	Run(context.Context, RuntimeRequest) (RuntimeResponse, error)
 }
 
 // Sentinel errors. Validation failures wrap one of these so callers can use

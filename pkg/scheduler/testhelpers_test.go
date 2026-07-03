@@ -2,12 +2,32 @@ package scheduler
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mcuste/loom/pkg/interpreter"
+	"github.com/mcuste/loom/pkg/runner"
+	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/tui"
 )
+
+func newTestDaemon(home, cwd string, catalog runtime.Catalog, out io.Writer) *daemon {
+	launcher := interpreter.FileRunLauncher{
+		Home:    home,
+		Cwd:     cwd,
+		Catalog: catalog,
+		NewObserver: func(w io.Writer) runner.Observer {
+			return tui.New(w)
+		},
+		LogRoot: filepath.Join(schedule.SchedulesDir(home), "logs"),
+	}
+	return New(home, cwd, launcher, out)
+}
 
 // fixedClock returns a deterministic clock so the daemon's firing decision is
 // reproducible without depending on wall time.

@@ -157,12 +157,7 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 			if err != nil {
 				return r, err
 			}
-			// A tolerated non-zero exit produced no structured model output, so
-			// schema validation has nothing meaningful to validate.
-			if r.ExitCode != 0 {
-				return r, nil
-			}
-			return r, validateSchema(t, r.Output)
+			return r, evaluateSchemaGate(ctx, t, r.Output, r.ExitCode)
 		})
 	}
 	var (

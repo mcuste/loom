@@ -19,10 +19,13 @@ import (
 // fake that records the steps. The platform Install functions supply it.
 type commandRunner func(w io.Writer, args []string) error
 
+var execCommand = exec.Command
+
 // execRunner is the production commandRunner: it runs args as a real process
 // with its output streamed to w.
 func execRunner(w io.Writer, args []string) error {
-	cmd := exec.Command(args[0], args[1:]...)
+	// Platform installers pass fixed launchctl/systemctl argv through this seam.
+	cmd := execCommand(args[0], args[1:]...)
 	cmd.Stdout = w
 	cmd.Stderr = w
 	return cmd.Run()

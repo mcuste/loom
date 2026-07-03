@@ -5,10 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"time"
 
-	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/interpreter"
 	"github.com/mcuste/loom/pkg/schedule"
 )
 
@@ -25,24 +24,25 @@ const minWait = time.Second
 // decision deterministically; running tracks in-flight fires per schedule id
 // so the overlap policy can skip or serialize them.
 type daemon struct {
-	home    string
-	cwd     string
-	catalog runtime.Catalog
-	out     io.Writer
-	now     func() time.Time
-	running *runningSet
+	home     string
+	cwd      string
+	launcher interpreter.RunLauncher
+	out      io.Writer
+	now      func() time.Time
+	running  *runningSet
 }
 
 // New returns a daemon ready to run. home is the loom data directory that owns
 // the schedules and run records; cwd is the daemon process working directory.
-func New(home, cwd string, catalog runtime.Catalog, out io.Writer) *daemon {
+// launcher is the interpreter application port used to start runs.
+func New(home, cwd string, launcher interpreter.RunLauncher, out io.Writer) *daemon {
 	return &daemon{
-		home:    home,
-		cwd:     cwd,
-		catalog: catalog,
-		out:     out,
-		now:     time.Now,
-		running: newRunningSet(),
+		home:     home,
+		cwd:      cwd,
+		launcher: launcher,
+		out:      out,
+		now:      time.Now,
+		running:  newRunningSet(),
 	}
 }
 
@@ -55,7 +55,7 @@ func (d *daemon) Run(ctx context.Context) error {
 	results := make(chan fireResult, 16)
 	firstScan := true
 	for {
-		soonest := d.scan(firstScan, results)
+		soonest := d.scan(ctx, firstScan, results)
 		firstScan = false
 
 		wait := pollCap
@@ -84,7 +84,7 @@ func (d *daemon) Run(ctx context.Context) error {
 // scan evaluates every enabled schedule once and fires those that are due,
 // returning the soonest future NextFire so the caller knows how long to sleep.
 // It owns all NextFire writes; LastFire/LastRunID writes happen in complete.
-func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
+func (d *daemon) scan(ctx context.Context, firstScan bool, results chan<- fireResult) time.Time {
 	recs, err := schedule.List(d.home, "")
 	if err != nil {
 		d.logf("scan: %v", err)
@@ -96,7 +96,7 @@ func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
 		if !rec.Enabled {
 			continue
 		}
-		soonest = earliest(soonest, d.processRecord(rec, now, firstScan, results))
+		soonest = earliest(soonest, d.processRecord(ctx, rec, now, firstScan, results))
 	}
 	return soonest
 }
@@ -106,7 +106,7 @@ func (d *daemon) scan(firstScan bool, results chan<- fireResult) time.Time {
 // persists a freshly computed NextFire for one not yet due. It returns this
 // record's contribution to the scan's soonest-NextFire, or the zero time when
 // it contributes none (a decision error or a dropped one-off).
-func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan bool, results chan<- fireResult) time.Time {
+func (d *daemon) processRecord(ctx context.Context, rec schedule.Record, now time.Time, firstScan bool, results chan<- fireResult) time.Time {
 	fire, remove, next, err := decideFire(rec, now, firstScan)
 	if err != nil {
 		d.logf("schedule %s: %v", rec.ID, err)
@@ -120,7 +120,7 @@ func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan boo
 		return time.Time{}
 	}
 	if fire {
-		if !d.startFire(rec, now, remove, next, results) {
+		if !d.startFire(ctx, rec, now, remove, next, results) {
 			// Blocked by the overlap policy (queue): leave NextFire untouched so
 			// the next scan retries once the in-flight run completes.
 			return now.Add(minWait)
@@ -140,7 +140,7 @@ func (d *daemon) processRecord(rec schedule.Record, now time.Time, firstScan boo
 // schedule running, persists the post-fire record state, and launches the
 // run. It returns false when the queue policy must hold the fire for a later
 // scan.
-func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next time.Time, results chan<- fireResult) bool {
+func (d *daemon) startFire(ctx context.Context, rec schedule.Record, now time.Time, remove bool, next time.Time, results chan<- fireResult) bool {
 	switch rec.EffectiveOverlap() {
 	case schedule.OverlapSkip:
 		if d.running.active(rec.ID) {
@@ -164,7 +164,7 @@ func (d *daemon) startFire(rec schedule.Record, now time.Time, remove bool, next
 	if remove {
 		d.removeRecord(rec.ID)
 	}
-	go d.execute(rec, now, results)
+	go d.execute(ctx, rec, now, results)
 	d.logf("schedule %s: firing %s", rec.ID, rec.WorkflowID)
 	return true
 }
@@ -217,9 +217,4 @@ func (d *daemon) logf(format string, a ...any) {
 // schedulesDir returns the on-disk directory that holds schedule records.
 func (d *daemon) schedulesDir() string {
 	return schedule.SchedulesDir(d.home)
-}
-
-// scheduleLogDir returns the per-schedule log directory.
-func (d *daemon) scheduleLogDir(id string) string {
-	return filepath.Join(schedule.SchedulesDir(d.home), "logs", id)
 }

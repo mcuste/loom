@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/run"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -34,8 +35,8 @@ func (o *testObserver) Header(meta RunMeta) error {
 	return err
 }
 
-func (o *testObserver) Hooks() executor.Hooks {
-	return executor.Hooks{
+func (o *testObserver) Events() run.EventSink {
+	return run.SinkFromHooks(executor.Hooks{
 		OnStart: func(t workflow.Task, iter int, _ runtime.Name, _ runtime.Model, _ runtime.Effort) {
 			o.mu.Lock()
 			defer o.mu.Unlock()
@@ -54,7 +55,7 @@ func (o *testObserver) Hooks() executor.Hooks {
 			}
 			_, _ = fmt.Fprintf(o.w, "  %s done\n", t.ID)
 		},
-	}
+	})
 }
 
 func (o *testObserver) Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error {

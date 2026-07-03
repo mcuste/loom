@@ -294,8 +294,9 @@ type Task struct {
 	// Rejected on sub-workflow and loop-wrapper tasks, which have no process exit.
 	OkExit []int
 
-	// action is the typed body form produced by Parse. It shadows the public
-	// legacy fields above until callers migrate.
+	// action is the typed body form produced by Parse and used as the task's
+	// authoritative executable body. The public scalar fields are retained as
+	// materialized YAML data for diagnostics, persistence, and hand-built tests.
 	action               Action
 	systemPromptTemplate Template
 }
@@ -313,7 +314,7 @@ type WithArg struct {
 // set) rather than carrying a prompt, command, or loop body. The parser
 // enforces that Workflow is mutually exclusive with every other body form, so
 // this is a reliable discriminator at the executor and CLI layers.
-func (t Task) IsSubWorkflow() bool { return t.Workflow != "" }
+func (t Task) IsSubWorkflow() bool { return t.BodyKind() == BodySubWorkflow }
 
 // BodyKind names the single body form a Task carries. A valid task sets exactly
 // one of Prompt, Command, Workflow, or Script; BodyKind is the discriminator the
@@ -446,13 +447,13 @@ func (r Retry) Enabled() bool {
 // IsShell reports whether t is a shell task (has Command set) rather than an
 // LLM task. The parser enforces XOR between Prompt and Command, so this is a
 // reliable discriminator at the executor, CLI, and store layers.
-func (t Task) IsShell() bool { return t.Command != "" }
+func (t Task) IsShell() bool { return t.BodyKind() == BodyShell }
 
 // IsScript reports whether t is a script task (has Script set) that runs an
 // executable file directly. The parser enforces Script is mutually exclusive
 // with every other body form, so this is a reliable discriminator at the
 // executor, CLI, and TUI layers.
-func (t Task) IsScript() bool { return t.Script != "" }
+func (t Task) IsScript() bool { return t.BodyKind() == BodyScript }
 
 // ExitTolerated reports whether process exit code is a success for t rather than
 // a failure. Exit 0 is always success. When OkExit is set, exactly the listed
@@ -486,28 +487,27 @@ func (t Task) ExitTolerated(code int) bool {
 // the body-form discrimination here keeps placeholder scanning from drifting as
 // new body forms are added.
 func (t Task) TextBodies() []string {
-	var body string
-	switch t.BodyKind() {
-	case BodyPrompt:
-		body = t.Prompt
-	case BodyShell:
-		body = t.Command
-	case BodyScript:
-		body = t.Script
-	case BodySubWorkflow, BodyInvalid:
-		// A sub-workflow carries its refs in the with-values, not a prompt body;
-		// an invalid task has no single body to scan.
-		body = ""
-	}
+	action := t.Action()
 	bodies := make([]string, 0, 1+len(t.Args)+len(t.With))
-	if body != "" {
-		bodies = append(bodies, body)
+	add := func(text string) {
+		if text != "" {
+			bodies = append(bodies, text)
+		}
 	}
-	// A script task's argv entries carry placeholders too, so they must be scanned
-	// alongside the path.
-	bodies = append(bodies, t.Args...)
-	for _, a := range t.With {
-		bodies = append(bodies, a.Value)
+	switch a := action.(type) {
+	case PromptAction:
+		add(a.Prompt.String())
+	case CommandAction:
+		add(a.Command.String())
+	case ScriptAction:
+		add(a.Path.String())
+		for _, arg := range a.Args {
+			bodies = append(bodies, arg.String())
+		}
+	case SubWorkflowAction:
+		for _, arg := range a.WithTemplates {
+			bodies = append(bodies, arg.Value.String())
+		}
 	}
 	return bodies
 }

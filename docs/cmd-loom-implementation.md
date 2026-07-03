@@ -38,10 +38,12 @@ flowchart TD
   WF --> TUI
 
   SC --> SCHED["pkg/schedule<br/>JSON records"]
-  D --> IS["internal/scheduler"]
+  D --> IS["pkg/scheduler"]
+  D --> INT["interpreter.FileRunLauncher"]
   IS --> SCHED
-  IS --> L
-  IS --> RUN
+  IS --> INT
+  INT --> L
+  INT --> RUN
 ```
 
 ## Command Surface
@@ -239,7 +241,7 @@ Handles:
 - `loom daemon`
 - `loom daemon install`
 
-`loom daemon` creates `internal/scheduler` daemon and runs foreground loop.
+`loom daemon` creates `pkg/scheduler` daemon and runs foreground loop.
 
 `daemon install` delegates launchd/systemd unit creation to
 `internal/daemoninstall`.
@@ -315,13 +317,19 @@ Handles:
 - next-fire computation
 - inline schedule sync
 
-`internal/scheduler` owns daemon behavior:
+`pkg/scheduler` owns daemon behavior:
 
 - scan/sleep loop
 - catch-up handling
 - overlap policy
-- per-fire logs
-- scheduled invocation of `runner.Run`
+- scheduled workflow invocations through `interpreter.RunLauncher`
+
+`pkg/interpreter` owns launch adapters:
+
+- workflow ref loading
+- param and routing validation
+- per-fire logs for scheduled runs
+- runner invocation with provenance
 
 ## Fresh Run Sequence
 
@@ -380,9 +388,8 @@ sequenceDiagram
   participant User
   participant CLI as cmd/loom
   participant Sched as pkg/schedule
-  participant Daemon as internal/scheduler
-  participant Load as workflowload
-  participant Runner as runner
+  participant Daemon as pkg/scheduler
+  participant Interp as interpreter.RunLauncher
 
   User->>CLI: loom schedule cron workflow --expr "0 15 * * *"
   CLI->>Sched: Add(record)
@@ -390,8 +397,7 @@ sequenceDiagram
   CLI->>Daemon: Run(ctx)
   Daemon->>Sched: List()
   Daemon->>Daemon: decide due fires
-  Daemon->>Load: Load(path)
-  Daemon->>Runner: Run(ctx, file logger renderer, provenance)
-  Runner-->>Daemon: run id
+  Daemon->>Interp: Launch(invocation, provenance)
+  Interp-->>Daemon: run id
   Daemon->>Sched: update LastFire / LastRunID / NextFire
 ```

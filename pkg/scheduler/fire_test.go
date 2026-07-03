@@ -70,11 +70,11 @@ func TestDaemonExecuteUnloadableWorkflowRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	res := awaitResult(t, results)
 	if res.err == nil {
@@ -117,11 +117,11 @@ func TestDaemonExecuteMissingRequiredParamRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	res := awaitResult(t, results)
 	if res.err == nil {
@@ -162,11 +162,11 @@ func TestDaemonExecuteInvalidRoutingRecordsNoRun(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	res := awaitResult(t, results)
 	if res.err == nil {
@@ -219,11 +219,11 @@ tasks:
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", reg, io.Discard)
+	d := newTestDaemon(home, "", reg, io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	res := awaitResult(t, results)
 	if res.err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mcuste/loom/pkg/executor"
+	"github.com/mcuste/loom/pkg/run"
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -36,11 +37,13 @@ type Renderer interface {
 	// through the renderer keeps every stdout byte flowing through the seam rather
 	// than around it via a separate writer.
 	Warn(msg string) error
-	// Hooks returns the executor progress hooks. Header MUST have been called
-	// first: the per-task lines read the progress denominator
-	// (runner.RunMeta.Total) set by Header, so calling Hooks() first renders
-	// every line as [N/0]. The hooks serialize their writes so concurrent task
-	// callbacks never interleave mid-line.
+	// Events returns the run event sink consumed by the runner. Header MUST have
+	// been called first: the per-task lines read the progress denominator
+	// (runner.RunMeta.Total) set by Header. The sink serializes writes so
+	// concurrent task events never interleave mid-line.
+	Events() run.EventSink
+	// Hooks returns the executor progress hooks for tests and lower-level
+	// adapters that still exercise the renderer at the callback seam.
 	Hooks() executor.Hooks
 	// Summary prints the closing totals-and-status block.
 	Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error
@@ -314,6 +317,16 @@ func childIDWidth(child *workflow.Workflow) int {
 		}
 	}
 	return w
+}
+
+// Events adapts the renderer's callback implementation to the run event seam.
+func (p *plainRenderer) Events() run.EventSink {
+	return run.SinkFromHooks(p.Hooks())
+}
+
+// Events adapts the renderer's callback implementation to the run event seam.
+func (t *ttyRenderer) Events() run.EventSink {
+	return run.SinkFromHooks(t.Hooks())
 }
 
 // Hooks serializes concurrent OnStart/OnFinish writes behind a mutex so output

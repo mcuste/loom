@@ -24,16 +24,11 @@ type ScriptAction struct {
 	Args []Template
 }
 
-// WorkflowAction calls a linked child workflow.
-type WorkflowAction struct {
+// SubWorkflowAction calls a linked child workflow.
+type SubWorkflowAction struct {
 	Ref           WorkflowRef
 	With          []WithArg
 	WithTemplates []WithTemplate
-}
-
-// LoopAction represents a scoped loop block.
-type LoopAction struct {
-	Group LoopGroup
 }
 
 // WithTemplate is one parsed with-value.
@@ -42,14 +37,13 @@ type WithTemplate struct {
 	Value Template
 }
 
-func (PromptAction) action()   {}
-func (CommandAction) action()  {}
-func (ScriptAction) action()   {}
-func (WorkflowAction) action() {}
-func (LoopAction) action()     {}
+func (PromptAction) action()      {}
+func (CommandAction) action()     {}
+func (ScriptAction) action()      {}
+func (SubWorkflowAction) action() {}
 
-// Action returns the task body action. Hand-built legacy tasks are converted
-// from public fields on demand.
+// Action returns the task body action. Parsed tasks carry this value directly;
+// hand-built tasks are normalized from their materialized YAML fields on demand.
 func (t Task) Action() Action {
 	if t.action != nil {
 		return t.action
@@ -62,7 +56,7 @@ func (t Task) Action() Action {
 	case BodyScript:
 		return ScriptAction{Path: ParseTemplate(t.Script), Args: parseTemplates(t.Args, "")}
 	case BodySubWorkflow:
-		return WorkflowAction{
+		return SubWorkflowAction{
 			Ref:           WorkflowRef(t.Workflow),
 			With:          append([]WithArg(nil), t.With...),
 			WithTemplates: parseWithTemplates(t.With, ""),
@@ -92,7 +86,7 @@ func taskActionFromRaw(rt rawTask, withArgs []WithArg, loopVar string) Action {
 			Args: parseTemplates(rt.Args, loopVar),
 		}
 	case rt.Workflow != "":
-		return WorkflowAction{
+		return SubWorkflowAction{
 			Ref:           WorkflowRef(rt.Workflow),
 			With:          append([]WithArg(nil), withArgs...),
 			WithTemplates: parseWithTemplates(withArgs, loopVar),
@@ -140,7 +134,7 @@ func bodyKindForAction(action Action) BodyKind {
 		return BodyShell
 	case ScriptAction:
 		return BodyScript
-	case WorkflowAction:
+	case SubWorkflowAction:
 		return BodySubWorkflow
 	default:
 		return BodyInvalid

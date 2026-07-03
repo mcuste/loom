@@ -39,11 +39,11 @@ func TestDaemonScanFiresDueSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	res := awaitResult(t, results)
 	if res.err != nil {
@@ -104,12 +104,12 @@ func TestDaemonScanSkipsWhenRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // pretend a prior run is still going
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	// The skip policy launches no `go execute`, so no run goroutine is ever
 	// started and the empty run index is deterministic the moment scan returns.
@@ -143,12 +143,12 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 	}
 	dueAt, _ := schedule.Get(home, added.ID)
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	// Held: the queue policy launches no `go execute` while the prior run is
 	// in flight, so the empty run index is deterministic the moment scan returns.
@@ -162,7 +162,7 @@ func TestDaemonScanQueueHoldsThenFires(t *testing.T) {
 
 	// The prior run completes; the next scan fires the held tick.
 	d.running.clear(added.ID)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 	res := awaitResult(t, results)
 	if res.err != nil {
 		t.Fatalf("fire error: %v", res.err)
@@ -191,12 +191,12 @@ func TestDaemonScanAllowFiresWhileRunning(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 	d.running.mark(added.ID) // a prior run is still going; allow ignores it
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	res := awaitResult(t, results)
 	if res.err != nil {
@@ -225,11 +225,11 @@ func TestDaemonScanSkipsDisabledSchedule(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z") // past the 10:01:00 tick
 
 	results := make(chan fireResult, 1)
-	d.scan(false, results)
+	d.scan(context.Background(), false, results)
 
 	// A disabled schedule is skipped before any `go execute`, so the empty run
 	// index is deterministic the moment scan returns.
@@ -257,7 +257,7 @@ func TestDaemonRunLoopFiresThenStopsOnCancel(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	d := New(home, "", runtime.Default(), io.Discard)
+	d := newTestDaemon(home, "", runtime.Default(), io.Discard)
 	d.now = fixedClock("2026-06-28T10:01:05Z")
 
 	ctx, cancel := context.WithCancel(context.Background())

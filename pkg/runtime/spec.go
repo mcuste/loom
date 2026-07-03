@@ -89,6 +89,8 @@ func (s Spec) Validate(req Request) error {
 	return nil
 }
 
+var execCommandContext = exec.CommandContext
+
 // Binary returns the executable name expected on $PATH.
 func (s Spec) Binary() string { return s.BinaryName }
 
@@ -105,7 +107,8 @@ func (s Spec) Run(ctx context.Context, req Request) (Response, error) {
 	if s.Args == nil || s.Decode == nil {
 		return Response{}, fmt.Errorf("%s: incomplete Spec: Args and Decode must be non-nil", s.Name)
 	}
-	cmd := exec.CommandContext(ctx, s.BinaryName, s.Args(req)...)
+	// Runtime specs execute their configured provider binary by design.
+	cmd := execCommandContext(ctx, s.BinaryName, s.Args(req)...)
 	// An empty Dir leaves the child in loom's process cwd (the prior behavior);
 	// a set WorkingDir runs the runtime against the workflow's resolved cwd.
 	cmd.Dir = req.WorkingDir
