@@ -178,6 +178,13 @@ type Workflow struct {
 	// keeping this package free of a cron dependency.
 	Schedule *Schedule
 
+	// definition is the semantic node model produced by Parse. The public scalar
+	// fields above remain as the legacy materialized view for callers that have
+	// not moved to Definition yet; parsed workflows use definition as the
+	// authoritative planning model.
+	definition    WorkflowDefinition
+	hasDefinition bool
+
 	systemPromptTemplate Template
 
 	// byID maps TaskID → index into Tasks for O(1) lookup. Populated by Parse;

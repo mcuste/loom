@@ -74,11 +74,10 @@ func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
 // dependency and placeholder validation, the param name set, and the per-loop
 // metadata derived from the decoded loop declarations.
 type parseState struct {
-	wf           *Workflow
-	ids          map[TaskID]struct{}
-	paramSet     map[ParamName]struct{}
-	asByLoop     map[LoopID]string
-	memberByLoop map[LoopID]map[TaskID]bool
+	wf       *Workflow
+	ids      map[TaskID]struct{}
+	paramSet map[ParamName]struct{}
+	asByLoop map[LoopID]string
 }
 
 type taskMeta struct {

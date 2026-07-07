@@ -9,27 +9,40 @@
 // linking the child workflows referenced by workflow: is a separate CLI step
 // so this package stays filesystem-free.
 //
-// Validation pipeline, in order:
+// The load-time pipeline is intentionally layered:
+//
+//  1. pkg/syntax decodes YAML into syntax.Document without assigning domain
+//     meaning.
+//  2. collectDeclarations validates identifiers and lowers raw syntax into
+//     parser declarations, preserving raw values for semantic fields such as
+//     retry:, budget:, schema:, loop:, and with:.
+//  3. validateDeclarations validates cross-declaration invariants such as task
+//     uniqueness, loop namespaces, loop membership, and loop convergence.
+//  4. lowerWorkflow builds the validated Workflow/Definition model, parsing
+//     templates, conditions, retry, budget, schema, and dependency references.
+//  5. Invocation-time checks that need resolved params, linked sub-workflows, or
+//     a runtime catalog stay outside Parse in pkg/workflowcheck/pkg/workflowload.
+//
+// Validation performed by Parse includes:
 //
 //  1. Workflow name and every task id satisfy [A-Za-z0-9_]+.
 //  2. Task ids are unique.
 //  3. Param block: names are valid, unique, required-vs-default is exclusive,
 //     defaults are scalar strings.
-//  4. Every task sets exactly one of prompt: or command:. A task with
-//     command: (a shell task) must not set task-level runtime, model, or
-//     effort.
+//  4. Every task sets exactly one body form. A shell/script task must not set
+//     task-level runtime, model, effort, system_prompt, or schema.
 //  5. Every depends_on entry names a known task and appears at most once.
-//  6. Every {{id}} placeholder in a prompt or command is a member of that
-//     task's depends_on. Placeholders are pure templating; they never extend
-//     the dependency graph implicitly.
-//  7. Every {{params.x}} placeholder (in prompt, command, system_prompt, or a
-//     whole routing field) references a declared param.
-//  8. The task graph has no cycles.
-//  9. Every prompt, command, and system_prompt (workflow- or task-level) is
-//     free of malformed {{params.}} tokens; a system_prompt is free of
-//     task-id placeholders.
-//  10. Every declared param is referenced by at least one prompt, command,
-//     routing field, or system_prompt (workflow- or task-level).
+//  6. Every {{id}} placeholder in a prompt, command, script, or with-value is a
+//     member of that task's depends_on. Placeholders are pure templating; they
+//     never extend the dependency graph implicitly.
+//  7. Every {{params.x}} placeholder references a declared param.
+//  8. Loop wrappers, loop namespaces, and loop convergence targets are valid.
+//  9. The task graph has no cycles.
+//  10. Every prompt, command, script, with-value, and system_prompt is free of
+//     malformed {{params.}} tokens; a system_prompt is free of task-id
+//     placeholders.
+//  11. Every declared param is referenced by at least one prompt, command,
+//     script, with-value, routing field, or system_prompt.
 //
 // Runtime-catalog validation is intentionally outside this parser; callers use
 // pkg/workflowcheck after params are resolved and sub-workflows are linked.
@@ -48,12 +61,42 @@ type ParseOptions struct {
 }
 
 type parser struct {
-	doc          *syntax.Document
+	doc *syntax.Document
+	id  WorkflowID
+}
+
+// workflowDecl is the parser's declaration model. It is no longer raw YAML, but
+// it is not executable yet: syntax.Value fields are retained until the semantic
+// lowering phase can validate them with the full task/param/loop scope.
+type workflowDecl struct {
 	id           WorkflowID
-	wf           *Workflow
-	paramSet     map[ParamName]struct{}
+	description  string
+	runtime      runtime.Name
+	model        runtime.Model
+	effort       runtime.Effort
+	systemPrompt string
+	params       []Param
 	paramIdx     map[ParamName]int
+	paramSet     map[ParamName]struct{}
+	topTasks     []syntax.DraftTask
+	rawLoops     []rawLoop
+	budget       syntax.Value
+	cache        bool
+	workingDir   string
+	output       string
+	schedule     *syntax.DraftSchedule
+}
+
+// checkedWorkflowDecl is the validated declaration graph ready to lower into
+// the workflow semantic model. It keeps graph/loop lookup tables beside the
+// declarations so the lowering step does not reach back into syntax.Document.
+type checkedWorkflowDecl struct {
+	decl         workflowDecl
+	tasks        []taskDecl
+	ids          map[TaskID]struct{}
+	loops        []LoopGroup
 	memberByLoop map[LoopID]map[TaskID]bool
+	asByLoop     map[LoopID]string
 }
 
 // Parse decodes a workflow YAML document and returns the validated Workflow.
@@ -94,32 +137,64 @@ func newParser(doc *syntax.Document, opts ParseOptions) (*parser, error) {
 }
 
 func (p *parser) parse() (*Workflow, error) {
-	topTasks, rawLoops, err := p.collectDeclarations()
+	decl, err := p.collectDeclarations()
 	if err != nil {
 		return nil, err
 	}
 
-	allTasks, st, err := p.resolveLoopScopes(topTasks, rawLoops)
+	checked, err := validateDeclarations(decl)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := lowerAllTasks(st, allTasks); err != nil {
-		return nil, err
-	}
-
-	return p.validateAndFinalize()
+	return lowerWorkflow(checked)
 }
 
-func (p *parser) collectDeclarations() ([]syntax.DraftTask, []rawLoop, error) {
+func (p *parser) collectDeclarations() (workflowDecl, error) {
 	topTasks, rawLoops, err := prepareDraftLoops(p.id, p.doc.Tasks)
 	if err != nil {
-		return nil, nil, err
+		return workflowDecl{}, err
 	}
-	if err := p.buildSkeleton(); err != nil {
-		return nil, nil, err
+
+	params, paramIdx, err := parseParams(p.doc.Params)
+	if err != nil {
+		return workflowDecl{}, err
 	}
-	return topTasks, rawLoops, nil
+
+	cache := false
+	if p.doc.Cache != nil {
+		cache = *p.doc.Cache
+	}
+	decl := workflowDecl{
+		id:           p.id,
+		description:  p.doc.Description,
+		runtime:      runtime.Name(p.doc.Runtime),
+		model:        runtime.Model(p.doc.Model),
+		effort:       runtime.Effort(p.doc.Effort),
+		systemPrompt: p.doc.SystemPrompt,
+		params:       params,
+		paramIdx:     paramIdx,
+		paramSet:     paramSetFromIndex(paramIdx),
+		topTasks:     topTasks,
+		rawLoops:     rawLoops,
+		budget:       p.doc.Budget,
+		cache:        cache,
+		workingDir:   p.doc.WorkingDir,
+		output:       p.doc.Output,
+		schedule:     p.doc.Schedule,
+	}
+
+	if err := validateRoutingField("", "runtime", p.doc.Runtime, decl.paramSet); err != nil {
+		return workflowDecl{}, err
+	}
+	if err := validateRoutingField("", "model", p.doc.Model, decl.paramSet); err != nil {
+		return workflowDecl{}, err
+	}
+	if err := validateRoutingField("", "effort", p.doc.Effort, decl.paramSet); err != nil {
+		return workflowDecl{}, err
+	}
+
+	return decl, nil
 }
 
 func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {
@@ -140,47 +215,6 @@ func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]syntax.D
 	return topTasks, rawLoops, nil
 }
 
-func (p *parser) buildSkeleton() error {
-	params, paramIdx, err := parseParams(p.doc.Params)
-	if err != nil {
-		return err
-	}
-
-	cache := false
-	if p.doc.Cache != nil {
-		cache = *p.doc.Cache
-	}
-	p.wf = &Workflow{
-		ID:                   p.id,
-		Description:          p.doc.Description,
-		Runtime:              runtime.Name(p.doc.Runtime),
-		Model:                runtime.Model(p.doc.Model),
-		Effort:               runtime.Effort(p.doc.Effort),
-		SystemPrompt:         p.doc.SystemPrompt,
-		systemPromptTemplate: ParseTemplate(p.doc.SystemPrompt),
-		Cache:                cache,
-		WorkingDir:           p.doc.WorkingDir,
-		Params:               params,
-		Tasks:                make([]Task, 0, len(p.doc.Tasks)),
-		byID:                 make(map[TaskID]int, len(p.doc.Tasks)),
-		paramByName:          paramIdx,
-	}
-
-	p.paramIdx = paramIdx
-	p.paramSet = paramSetFromIndex(paramIdx)
-	if err := validateRoutingField("", "runtime", p.doc.Runtime, p.paramSet); err != nil {
-		return err
-	}
-	if err := validateRoutingField("", "model", p.doc.Model, p.paramSet); err != nil {
-		return err
-	}
-	if err := validateRoutingField("", "effort", p.doc.Effort, p.paramSet); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
 	paramSet := make(map[ParamName]struct{}, len(paramIdx))
 	for name := range paramIdx {
@@ -189,22 +223,20 @@ func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
 	return paramSet
 }
 
-func (p *parser) resolveLoopScopes(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]taskDecl, *parseState, error) {
-	allTasks, ids, err := flattenLoopTasks(topTasks, rawLoops)
+func validateDeclarations(decl workflowDecl) (checkedWorkflowDecl, error) {
+	allTasks, ids, err := flattenLoopTasks(decl.topTasks, decl.rawLoops)
 	if err != nil {
-		return nil, nil, err
+		return checkedWorkflowDecl{}, err
 	}
 
-	if err := validateLoopNamespace(rawLoops, ids, p.paramIdx); err != nil {
-		return nil, nil, err
+	if err := validateLoopNamespace(decl.rawLoops, ids, decl.paramIdx); err != nil {
+		return checkedWorkflowDecl{}, err
 	}
 
-	loops, memberByLoop, err := buildLoopGroups(rawLoops, ids, p.paramSet)
+	loops, memberByLoop, err := buildLoopGroups(decl.rawLoops, ids, decl.paramSet)
 	if err != nil {
-		return nil, nil, err
+		return checkedWorkflowDecl{}, err
 	}
-	p.wf.Loops = loops
-	p.memberByLoop = memberByLoop
 
 	// asByLoop maps each loop id to its for_each loop variable ("" for a while
 	// loop), so the per-task build below can exempt a member's {{as}}
@@ -215,15 +247,53 @@ func (p *parser) resolveLoopScopes(topTasks []syntax.DraftTask, rawLoops []rawLo
 		asByLoop[loops[i].ID] = loops[i].As
 	}
 
-	st := &parseState{
-		wf:           p.wf,
+	return checkedWorkflowDecl{
+		decl:         decl,
+		tasks:        allTasks,
 		ids:          ids,
-		paramSet:     p.paramSet,
-		asByLoop:     asByLoop,
+		loops:        loops,
 		memberByLoop: memberByLoop,
+		asByLoop:     asByLoop,
+	}, nil
+}
+
+func lowerWorkflow(checked checkedWorkflowDecl) (*Workflow, error) {
+	wf := checked.decl.newWorkflow(len(checked.tasks))
+	wf.Loops = checked.loops
+
+	st := &parseState{
+		wf:       wf,
+		ids:      checked.ids,
+		paramSet: checked.decl.paramSet,
+		asByLoop: checked.asByLoop,
+	}
+	if err := lowerAllTasks(st, checked.tasks); err != nil {
+		return nil, err
 	}
 
-	return allTasks, st, nil
+	return finalizeWorkflow(wf, checked)
+}
+
+func (d workflowDecl) newWorkflow(taskCap int) *Workflow {
+	paramIdx := make(map[ParamName]int, len(d.paramIdx))
+	for name, idx := range d.paramIdx {
+		paramIdx[name] = idx
+	}
+	return &Workflow{
+		ID:                   d.id,
+		Description:          d.description,
+		Runtime:              d.runtime,
+		Model:                d.model,
+		Effort:               d.effort,
+		SystemPrompt:         d.systemPrompt,
+		systemPromptTemplate: ParseTemplate(d.systemPrompt),
+		Cache:                d.cache,
+		WorkingDir:           d.workingDir,
+		Params:               append([]Param(nil), d.params...),
+		Tasks:                make([]Task, 0, taskCap),
+		byID:                 make(map[TaskID]int, taskCap),
+		paramByName:          paramIdx,
+	}
 }
 
 func lowerAllTasks(st *parseState, allTasks []taskDecl) error {
@@ -235,45 +305,48 @@ func lowerAllTasks(st *parseState, allTasks []taskDecl) error {
 	return nil
 }
 
-func (p *parser) validateAndFinalize() (*Workflow, error) {
-	if p.doc.Output != "" {
-		outputTask := TaskID(p.doc.Output)
-		if _, ok := p.wf.byID[outputTask]; !ok {
+func finalizeWorkflow(wf *Workflow, checked checkedWorkflowDecl) (*Workflow, error) {
+	decl := checked.decl
+	if decl.output != "" {
+		outputTask := TaskID(decl.output)
+		if _, ok := wf.byID[outputTask]; !ok {
 			return nil, &UnknownOutputTaskError{Task: outputTask}
 		}
-		p.wf.Output = outputTask
+		wf.Output = outputTask
 	}
 
-	if err := checkPrevPlaceholders(p.wf, p.memberByLoop); err != nil {
+	if err := checkPrevPlaceholders(wf, checked.memberByLoop); err != nil {
 		return nil, err
 	}
 
-	if err := validateSystemPrompt(p.wf.SystemPrompt, p.paramSet); err != nil {
+	if err := validateSystemPrompt(wf.SystemPrompt, decl.paramSet); err != nil {
 		return nil, err
 	}
 
-	if cycle, ok := findCycle(p.wf); ok {
+	if cycle, ok := findCycle(wf); ok {
 		return nil, &CycleError{Cycle: cycle}
 	}
 
-	if err := checkUnusedParams(p.wf); err != nil {
+	if err := checkUnusedParams(wf); err != nil {
 		return nil, err
 	}
 
-	budget, err := parseBudget(p.doc.Budget)
+	budget, err := parseBudget(decl.budget)
 	if err != nil {
 		return nil, err
 	}
-	p.wf.Budget = budget
+	wf.Budget = budget
 
-	if p.doc.Schedule != nil {
-		if p.doc.Schedule.Cron == "" {
+	if decl.schedule != nil {
+		if decl.schedule.Cron == "" {
 			return nil, fmt.Errorf("schedule: cron is required")
 		}
-		p.wf.Schedule = &Schedule{Cron: p.doc.Schedule.Cron, TZ: p.doc.Schedule.TZ}
+		wf.Schedule = &Schedule{Cron: decl.schedule.Cron, TZ: decl.schedule.TZ}
 	}
 
-	return p.wf, nil
+	// Freeze the semantic node model after the legacy view is fully materialized.
+	wf.storeDefinition()
+	return wf, nil
 }
 
 func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -349,14 +349,25 @@ type ttyRenderer struct {
 }
 
 // newTTYRenderer builds a live renderer for w. Pressing q or ctrl-c is wired to
-// raise SIGINT at this process, matching the signal a terminal already delivers
-// for ctrl-c, so the run unwinds through the caller's signal-cancelled context
-// without the renderer needing a direct handle to it.
+// signal an interrupt at this process, matching the signal a terminal already
+// delivers for ctrl-c where the platform supports it, so the run unwinds through
+// the caller's signal-cancelled context without the renderer needing a direct
+// handle to it.
 func newTTYRenderer(w io.Writer) *ttyRenderer {
 	return &ttyRenderer{
 		w:      w,
 		plain:  plainRenderer{w: w},
-		cancel: func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGINT) },
+		cancel: interruptSelf,
+	}
+}
+
+func interruptSelf() {
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return
+	}
+	if err := proc.Signal(os.Interrupt); err != nil {
+		return
 	}
 }
 
