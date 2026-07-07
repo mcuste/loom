@@ -99,8 +99,8 @@ func rejectLoopWrapperFields(tid TaskID, rt syntax.DraftTask, wrapper string) er
 	case rt.Runtime != "" || rt.Model != "" || rt.Effort != "":
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithRuntime)
 	case len(rt.DependsOn) > 0 || rt.When != "" || rt.WritesState != "" ||
-		rt.Schema.Kind != 0 || rt.Retry.Kind != 0 ||
-		rt.Budget.Kind != 0 || rt.Cache != nil ||
+		rt.Schema.Present() || rt.Retry.Present() ||
+		rt.Budget.Present() || rt.Cache != nil ||
 		rt.SystemPrompt != "" || rt.SystemPromptFile != "" || len(rt.OkExit) > 0:
 		return fmt.Errorf("task %q: %w", tid, ErrLoopTaskWithFields)
 	}

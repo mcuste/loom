@@ -1,110 +1,49 @@
 package workflow
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/syntax"
 )
 
-// TestSyntaxDraftMirrorsPublic guards against silent drift between the
-// YAML-decode structs in pkg/syntax and the validated domain types (Workflow,
-// Task): adding or renaming a field on one without the other would otherwise
-// be a silent data loss. Aliases capture intentional renamings (e.g. YAML
-// `name:` decodes into syntax.DraftWorkflow.Name but lives on Workflow.ID).
-func TestSyntaxDraftMirrorsPublic(t *testing.T) {
-	cases := []struct {
-		name        string
-		raw         any
-		public      any
-		aliases     map[string]string   // raw field name -> public field name
-		extraPublic map[string]struct{} // public fields with no raw counterpart (derived)
-		extraRaw    map[string]struct{} // raw fields with no public counterpart (parse-only)
-	}{
-		{
-			name:    "workflow",
-			raw:     syntax.DraftWorkflow{},
-			public:  Workflow{},
-			aliases: map[string]string{"Name": "ID"},
-			// Loops is derived: there is no top-level `loops:` YAML key. Loops are
-			// declared inline as tasks carrying a `loop:` block (syntax.DraftTask.Loop)
-			// and folded into Workflow.Loops during parse, so the public field has no
-			// DraftWorkflow counterpart. Subs is populated by the CLI link step
-			// (linkSubWorkflows), never by Parse, so it too has no draft counterpart.
-			extraPublic: map[string]struct{}{"Loops": {}, "Subs": {}},
-			extraRaw:    map[string]struct{}{"Source": {}},
-		},
-		{
-			name:   "task",
-			raw:    syntax.DraftTask{},
-			public: Task{},
-			// Cond is compiled by ParseCondition from the raw `when:` text.
-			// Task.Loop is derived from the enclosing `loop:`/`for_each:` wrapper
-			// a task is nested under, not a task-level YAML key. Neither has a
-			// separate raw field.
-			extraPublic: map[string]struct{}{"Cond": {}, "Loop": {}},
-			// DraftTask.Loop, DraftTask.ForEach, and DraftTask.ForEachParallel are the
-			// per-task scoped-block wrappers: parse-only nodes folded into a
-			// LoopGroup that never become a Task, so they have no public counterpart
-			// (DraftTask.Loop shares the name with the derived Task.Loop above only by
-			// coincidence). DraftTask.PromptFile and DraftTask.SystemPromptFile are
-			// parse-only too: InlinePromptFiles rewrites them to `prompt:` /
-			// `system_prompt:` before Parse, so neither reaches a public Task field.
-			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "ForEachParallel": {}, "PromptFile": {}, "SystemPromptFile": {}},
-		},
-		{
-			name:   "param",
-			raw:    syntax.DraftParam{},
-			public: Param{},
-			// `default:` is decoded by hand from the raw yaml.Node so the
-			// scalar text survives without coercion (e.g. `default: 1` stays
-			// "1"); it has no DraftParam field. Default and HasDefault both
-			// receive their values that way.
-			extraPublic: map[string]struct{}{"Default": {}, "HasDefault": {}},
-		},
+// TestSyntaxDraftCapturesSemanticBlocksRaw pins the syntax/workflow boundary:
+// YAML-only fields are decoded as raw syntax values first, then interpreted by
+// the workflow parser. The syntax structs intentionally do not mirror Workflow
+// and Task field-for-field.
+func TestSyntaxDraftCapturesSemanticBlocksRaw(t *testing.T) {
+	draft, err := syntax.Decode([]byte(`
+name: wf
+params:
+  - name: topic
+    default: 1
+budget:
+  max_cost_usd: 1.25
+tasks:
+  - id: a
+    prompt: "{{params.topic}}"
+    retry:
+      max: 1
+    schema:
+      type: object
+`), syntax.Source{})
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assertFieldParity(t, reflect.TypeOf(tc.raw), reflect.TypeOf(tc.public), tc.aliases, tc.extraPublic, tc.extraRaw)
-		})
+	if !draft.Params.Present() || draft.Params.Kind() != syntax.SequenceNode {
+		t.Fatalf("Params raw kind = (%v, %v), want present sequence", draft.Params.Present(), draft.Params.Kind())
 	}
-}
-
-func assertFieldParity(t *testing.T, raw, public reflect.Type, aliases map[string]string, extraPublic, extraRaw map[string]struct{}) {
-	t.Helper()
-
-	pubFields := map[string]struct{}{}
-	for f := range public.Fields() {
-		// Unexported fields are internal caches (e.g. parse-built indices), not
-		// part of the YAML-to-domain schema, and must not trigger drift alarms.
-		if !f.IsExported() {
-			continue
-		}
-		if _, ok := extraPublic[f.Name]; ok {
-			continue
-		}
-		pubFields[f.Name] = struct{}{}
+	if !draft.Budget.Present() || draft.Budget.Kind() != syntax.MappingNode {
+		t.Fatalf("Budget raw kind = (%v, %v), want present mapping", draft.Budget.Present(), draft.Budget.Kind())
 	}
-
-	for rf := range raw.Fields() {
-		if _, ok := extraRaw[rf.Name]; ok {
-			continue
-		}
-		want := rf.Name
-		if alias, ok := aliases[rf.Name]; ok {
-			want = alias
-		}
-		if _, ok := pubFields[want]; !ok {
-			t.Errorf("%s.%s has no matching field %q on %s — schema drift",
-				raw.Name(), rf.Name, want, public.Name())
-			continue
-		}
-		delete(pubFields, want)
+	if len(draft.Tasks) != 1 {
+		t.Fatalf("Tasks len = %d, want 1", len(draft.Tasks))
 	}
-	for name := range pubFields {
-		t.Errorf("%s.%s has no matching field on %s — schema drift",
-			public.Name(), name, raw.Name())
+	task := draft.Tasks[0]
+	if !task.Retry.Present() || task.Retry.Kind() != syntax.MappingNode {
+		t.Fatalf("Retry raw kind = (%v, %v), want present mapping", task.Retry.Present(), task.Retry.Kind())
+	}
+	if !task.Schema.Present() || task.Schema.Kind() != syntax.MappingNode {
+		t.Fatalf("Schema raw kind = (%v, %v), want present mapping", task.Schema.Present(), task.Schema.Kind())
 	}
 }
 

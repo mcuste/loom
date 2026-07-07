@@ -55,7 +55,7 @@ func buildTask(st *parseState, lt loopTask) error {
 		return fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
 	}
 	// with: is only meaningful alongside workflow:.
-	if rt.With.Kind != 0 && rt.Workflow == "" {
+	if rt.With.Present() && rt.Workflow == "" {
 		return fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
 	}
 	// args: is only meaningful alongside script:.

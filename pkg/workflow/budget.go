@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"gopkg.in/yaml.v3"
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
 // Budget caps cumulative cost in US dollars. At the workflow level it limits
@@ -47,15 +47,15 @@ func (e *MalformedBudgetError) Error() string {
 // *Budget. An absent block (zero-value node) yields nil: no limit. A present
 // block requires `max_cost_usd` to be a positive float; zero, negative, or
 // absent is rejected with InvalidBudgetError.
-func parseBudget(node yaml.Node) (*Budget, error) {
-	if node.Kind == 0 {
+func parseBudget(node syntax.Value) (*Budget, error) {
+	if !node.Present() {
 		return nil, nil
 	}
-	if node.Kind != yaml.MappingNode {
+	if node.Kind() != syntax.MappingNode {
 		return nil, &MalformedBudgetError{Reason: "must be a mapping"}
 	}
 	b := &Budget{}
-	if err := eachMapEntry(&node, "budget:", func(key string, v *yaml.Node) error {
+	if err := node.EachMapEntry("budget:", func(key string, v syntax.Value) error {
 		switch key {
 		case "max_cost_usd":
 			if err := v.Decode(&b.MaxCostUSD); err != nil {

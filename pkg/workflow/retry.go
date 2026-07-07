@@ -3,19 +3,19 @@ package workflow
 import (
 	"fmt"
 
-	"gopkg.in/yaml.v3"
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
 // parseRetry decodes a task's retry: mapping into a Retry policy.
-func parseRetry(tid TaskID, node yaml.Node) (Retry, error) {
-	if node.Kind == 0 {
+func parseRetry(tid TaskID, node syntax.Value) (Retry, error) {
+	if !node.Present() {
 		return Retry{}, nil
 	}
-	if node.Kind != yaml.MappingNode {
+	if node.Kind() != syntax.MappingNode {
 		return Retry{}, fmt.Errorf("task %q: retry must be a mapping", tid)
 	}
 	r := Retry{Backoff: BackoffExponential, On: []string{string(RetryClassTransient)}}
-	if err := eachMapEntry(&node, fmt.Sprintf("task %q: retry", tid), func(key string, v *yaml.Node) error {
+	if err := node.EachMapEntry(fmt.Sprintf("task %q: retry", tid), func(key string, v syntax.Value) error {
 		switch key {
 		case "max":
 			if err := v.Decode(&r.Max); err != nil {

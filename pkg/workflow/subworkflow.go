@@ -3,7 +3,7 @@ package workflow
 import (
 	"fmt"
 
-	"gopkg.in/yaml.v3"
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
 // buildSubWorkflowDeps computes a sub-workflow task's dependency list. It
@@ -25,15 +25,15 @@ func buildSubWorkflowDeps(dc depsCtx, declared []string, withArgs []WithArg) ([]
 
 // decodeWith decodes a sub-workflow task's with: mapping into ordered
 // WithArg entries.
-func decodeWith(tid TaskID, node yaml.Node) ([]WithArg, error) {
-	if node.Kind == 0 {
+func decodeWith(tid TaskID, node syntax.Value) ([]WithArg, error) {
+	if !node.Present() {
 		return nil, nil
 	}
-	if node.Kind != yaml.MappingNode {
+	if node.Kind() != syntax.MappingNode {
 		return nil, fmt.Errorf("task %q: with must be a mapping", tid)
 	}
-	args := make([]WithArg, 0, len(node.Content)/2)
-	if err := eachMapEntry(&node, fmt.Sprintf("task %q: with", tid), func(key string, v *yaml.Node) error {
+	args := make([]WithArg, 0)
+	if err := node.EachMapEntry(fmt.Sprintf("task %q: with", tid), func(key string, v syntax.Value) error {
 		name, err := NewParamName(key)
 		if err != nil {
 			return fmt.Errorf("task %q: with: %w", tid, err)

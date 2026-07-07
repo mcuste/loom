@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/mcuste/loom/pkg/syntax"
-	"gopkg.in/yaml.v3"
 )
 
 // LoopID is a validated scoped-loop identifier: non-empty, [A-Za-z0-9_]+. It
@@ -109,17 +108,23 @@ type rawLoop struct {
 	tasks         []syntax.DraftTask
 }
 
+var (
+	errLoopMustBeMapping              = errors.New("loop: must be a mapping")
+	errForEachMustBeMapping           = errors.New("for_each: must be a mapping")
+	errForEachListEntriesMustBeScalar = errors.New("for_each: in list entries must be scalars")
+)
+
 // decodeLoopBody decodes a `loop:` block's fields from a mapping node into rl.
 // The loop's id and description come from the wrapping task, not the block, so
 // only the convergence/iteration fields (until_empty, until, max, tasks) are
 // recognized here; any other key (including id or description) is an unknown
 // field. Cross-task validation (collisions, uniqueness, connectivity,
 // convergence) happens in Parse once the full task set is known.
-func decodeLoopBody(entry *yaml.Node, rl *rawLoop) error {
-	if entry.Kind != yaml.MappingNode {
-		return errors.New("loop: must be a mapping")
+func decodeLoopBody(entry syntax.Value, rl *rawLoop) error {
+	if entry.Kind() != syntax.MappingNode {
+		return errLoopMustBeMapping
 	}
-	return eachMapEntry(entry, "loop:", func(key string, v *yaml.Node) error {
+	return entry.EachMapEntry("loop:", func(key string, v syntax.Value) error {
 		switch key {
 		case "until_empty":
 			if err := v.Decode(&rl.untilEmpty); err != nil {
@@ -153,34 +158,36 @@ func decodeLoopBody(entry *yaml.Node, rl *rawLoop) error {
 // exactly one `{{...}}` placeholder (dynamic source -> ListSource). Cross-task
 // validation (the `as` alphabet/collision, list-ref existence) happens in
 // buildLoopGroups once the full task set is known.
-func decodeForEachBody(entry *yaml.Node, rl *rawLoop) error {
-	if entry.Kind != yaml.MappingNode {
-		return errors.New("for_each: must be a mapping")
+func decodeForEachBody(entry syntax.Value, rl *rawLoop) error {
+	if entry.Kind() != syntax.MappingNode {
+		return errForEachMustBeMapping
 	}
 	hasIn := false
-	if err := eachMapEntry(entry, "for_each:", func(key string, v *yaml.Node) error {
+	if err := entry.EachMapEntry("for_each:", func(key string, v syntax.Value) error {
 		switch key {
 		case "in":
 			hasIn = true
-			switch v.Kind {
-			case yaml.SequenceNode:
-				vals := make([]string, 0, len(v.Content))
-				for _, item := range v.Content {
-					if item.Kind != yaml.ScalarNode {
-						return errors.New("for_each: in list entries must be scalars")
+			switch v.Kind() {
+			case syntax.SequenceNode:
+				items := v.SequenceValues()
+				vals := make([]string, 0, len(items))
+				for _, item := range items {
+					if item.Kind() != syntax.ScalarNode {
+						return errForEachListEntriesMustBeScalar
 					}
-					vals = append(vals, item.Value)
+					vals = append(vals, item.Scalar())
 				}
 				rl.list = vals
 				rl.hasList = true
-			case yaml.ScalarNode:
-				taskRefs, paramRefs, stateRefs := scanPlaceholders(v.Value)
+			case syntax.ScalarNode:
+				source := v.Scalar()
+				taskRefs, paramRefs, stateRefs := scanPlaceholders(source)
 				if len(taskRefs)+len(paramRefs)+len(stateRefs) != 1 {
-					return &InvalidForEachListError{Loop: rl.id, Source: v.Value}
+					return &InvalidForEachListError{Loop: rl.id, Source: source}
 				}
-				rl.listSource = v.Value
+				rl.listSource = source
 			default:
-				return &InvalidForEachListError{Loop: rl.id, Source: v.Value}
+				return &InvalidForEachListError{Loop: rl.id, Source: v.Scalar()}
 			}
 		case "as":
 			if err := v.Decode(&rl.as); err != nil {
@@ -212,7 +219,11 @@ func ListSourceTaskRef(source string) (TaskID, bool) {
 	if source == "" {
 		return "", false
 	}
-	if taskRefs, _, _ := scanPlaceholders(source); len(taskRefs) == 1 {
+	taskRefs, paramRefs, stateRefs := scanPlaceholders(source)
+	if len(paramRefs) > 0 || len(stateRefs) > 0 {
+		return "", false
+	}
+	if len(taskRefs) == 1 {
 		return TaskID(taskRefs[0]), true
 	}
 	return "", false
@@ -335,7 +346,7 @@ func resolveForEach(lg *LoopGroup, rl rawLoop, ids map[TaskID]struct{}, params m
 	// Dynamic source: a `{{id}}` source must name a known task and a
 	// `{{params.x}}` source a declared param; a `{{state.x}}` source needs
 	// neither (it resolves against cross-run state at run time).
-	taskRefs, paramRefs, _ := scanPlaceholders(rl.listSource)
+	taskRefs, paramRefs, stateRefs := scanPlaceholders(rl.listSource)
 	if len(taskRefs) == 1 {
 		if _, ok := ids[TaskID(taskRefs[0])]; !ok {
 			return &UnknownForEachListRefError{Loop: rl.id, Ref: taskRefs[0]}
@@ -345,6 +356,10 @@ func resolveForEach(lg *LoopGroup, rl rawLoop, ids map[TaskID]struct{}, params m
 		if _, ok := params[ParamName(paramRefs[0])]; !ok {
 			return &UnknownForEachListRefError{Loop: rl.id, Ref: paramRefs[0]}
 		}
+	}
+	if len(stateRefs) == 1 {
+		lg.ListSource = rl.listSource
+		return nil
 	}
 	lg.ListSource = rl.listSource
 	return nil

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"gopkg.in/yaml.v3"
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
 // Schema is a minimal JSON Schema subset attached to an LLM task via the
@@ -47,8 +47,8 @@ type rawProperty struct {
 
 // parseSchema decodes a task's `schema:` node into a *Schema. An absent block
 // (zero-value node) yields nil, the no-validation default.
-func parseSchema(node yaml.Node) (*Schema, error) {
-	if node.Kind == 0 {
+func parseSchema(node syntax.Value) (*Schema, error) {
+	if !node.Present() {
 		return nil, nil
 	}
 	var rs rawSchema

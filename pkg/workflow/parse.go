@@ -48,7 +48,7 @@ type ParseOptions struct {
 }
 
 type parser struct {
-	draft        *syntax.Draft
+	doc          *syntax.Document
 	id           WorkflowID
 	wf           *Workflow
 	paramSet     map[ParamName]struct{}
@@ -58,56 +58,68 @@ type parser struct {
 
 // Parse decodes a workflow YAML document and returns the validated Workflow.
 func Parse(data []byte) (*Workflow, error) {
-	draft, err := syntax.Decode(data, syntax.Source{})
+	doc, err := syntax.Decode(data, syntax.Source{})
 	if err != nil {
 		return nil, err
 	}
-	return FromDraft(draft, ParseOptions{})
+	return FromDocument(doc, ParseOptions{})
 }
 
 // FromDraft constructs a validated Workflow from a decoded syntax draft.
 func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
-	p, err := newParser(draft, opts)
+	return FromDocument((*syntax.Document)(draft), opts)
+}
+
+// FromDocument constructs a validated Workflow from a decoded syntax document.
+func FromDocument(doc *syntax.Document, opts ParseOptions) (*Workflow, error) {
+	p, err := newParser(doc, opts)
 	if err != nil {
 		return nil, err
 	}
 	return p.parse()
 }
 
-func newParser(draft *syntax.Draft, opts ParseOptions) (*parser, error) {
-	if draft == nil {
-		return nil, fmt.Errorf("workflow draft is nil")
+func newParser(doc *syntax.Document, opts ParseOptions) (*parser, error) {
+	if doc == nil {
+		return nil, fmt.Errorf("workflow document is nil")
 	}
 	if opts.Source.Path != "" {
-		draft.Source = opts.Source
+		doc.Source = opts.Source
 	}
-	id, err := NewWorkflowID(draft.Name)
+	id, err := NewWorkflowID(doc.Name)
 	if err != nil {
 		return nil, err
 	}
-	return &parser{draft: draft, id: id}, nil
+	return &parser{doc: doc, id: id}, nil
 }
 
 func (p *parser) parse() (*Workflow, error) {
-	topTasks, rawLoops, err := prepareDraftLoops(p.id, p.draft.Tasks)
+	topTasks, rawLoops, err := p.collectDeclarations()
 	if err != nil {
 		return nil, err
 	}
 
+	allTasks, st, err := p.resolveLoopScopes(topTasks, rawLoops)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := lowerAllTasks(st, allTasks); err != nil {
+		return nil, err
+	}
+
+	return p.validateAndFinalize()
+}
+
+func (p *parser) collectDeclarations() ([]syntax.DraftTask, []rawLoop, error) {
+	topTasks, rawLoops, err := prepareDraftLoops(p.id, p.doc.Tasks)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := p.buildSkeleton(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	allTasks, st, err := p.prepareLoopedTasks(topTasks, rawLoops)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := buildAllTasks(st, allTasks); err != nil {
-		return nil, err
-	}
-
-	return p.finalize()
+	return topTasks, rawLoops, nil
 }
 
 func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {
@@ -129,40 +141,40 @@ func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]syntax.D
 }
 
 func (p *parser) buildSkeleton() error {
-	params, paramIdx, err := parseParams(p.draft.Params)
+	params, paramIdx, err := parseParams(p.doc.Params)
 	if err != nil {
 		return err
 	}
 
 	cache := false
-	if p.draft.Cache != nil {
-		cache = *p.draft.Cache
+	if p.doc.Cache != nil {
+		cache = *p.doc.Cache
 	}
 	p.wf = &Workflow{
 		ID:                   p.id,
-		Description:          p.draft.Description,
-		Runtime:              runtime.Name(p.draft.Runtime),
-		Model:                runtime.Model(p.draft.Model),
-		Effort:               runtime.Effort(p.draft.Effort),
-		SystemPrompt:         p.draft.SystemPrompt,
-		systemPromptTemplate: ParseTemplate(p.draft.SystemPrompt),
+		Description:          p.doc.Description,
+		Runtime:              runtime.Name(p.doc.Runtime),
+		Model:                runtime.Model(p.doc.Model),
+		Effort:               runtime.Effort(p.doc.Effort),
+		SystemPrompt:         p.doc.SystemPrompt,
+		systemPromptTemplate: ParseTemplate(p.doc.SystemPrompt),
 		Cache:                cache,
-		WorkingDir:           p.draft.WorkingDir,
+		WorkingDir:           p.doc.WorkingDir,
 		Params:               params,
-		Tasks:                make([]Task, 0, len(p.draft.Tasks)),
-		byID:                 make(map[TaskID]int, len(p.draft.Tasks)),
+		Tasks:                make([]Task, 0, len(p.doc.Tasks)),
+		byID:                 make(map[TaskID]int, len(p.doc.Tasks)),
 		paramByName:          paramIdx,
 	}
 
 	p.paramIdx = paramIdx
 	p.paramSet = paramSetFromIndex(paramIdx)
-	if err := validateRoutingField("", "runtime", p.draft.Runtime, p.paramSet); err != nil {
+	if err := validateRoutingField("", "runtime", p.doc.Runtime, p.paramSet); err != nil {
 		return err
 	}
-	if err := validateRoutingField("", "model", p.draft.Model, p.paramSet); err != nil {
+	if err := validateRoutingField("", "model", p.doc.Model, p.paramSet); err != nil {
 		return err
 	}
-	if err := validateRoutingField("", "effort", p.draft.Effort, p.paramSet); err != nil {
+	if err := validateRoutingField("", "effort", p.doc.Effort, p.paramSet); err != nil {
 		return err
 	}
 
@@ -177,7 +189,7 @@ func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
 	return paramSet
 }
 
-func (p *parser) prepareLoopedTasks(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]loopTask, *parseState, error) {
+func (p *parser) resolveLoopScopes(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]loopTask, *parseState, error) {
 	allTasks, ids, err := flattenLoopTasks(topTasks, rawLoops)
 	if err != nil {
 		return nil, nil, err
@@ -214,7 +226,7 @@ func (p *parser) prepareLoopedTasks(topTasks []syntax.DraftTask, rawLoops []rawL
 	return allTasks, st, nil
 }
 
-func buildAllTasks(st *parseState, allTasks []loopTask) error {
+func lowerAllTasks(st *parseState, allTasks []loopTask) error {
 	for _, lt := range allTasks {
 		if err := buildTask(st, lt); err != nil {
 			return err
@@ -223,9 +235,9 @@ func buildAllTasks(st *parseState, allTasks []loopTask) error {
 	return nil
 }
 
-func (p *parser) finalize() (*Workflow, error) {
-	if p.draft.Output != "" {
-		outputTask := TaskID(p.draft.Output)
+func (p *parser) validateAndFinalize() (*Workflow, error) {
+	if p.doc.Output != "" {
+		outputTask := TaskID(p.doc.Output)
 		if _, ok := p.wf.byID[outputTask]; !ok {
 			return nil, &UnknownOutputTaskError{Task: outputTask}
 		}
@@ -248,17 +260,17 @@ func (p *parser) finalize() (*Workflow, error) {
 		return nil, err
 	}
 
-	budget, err := parseBudget(p.draft.Budget)
+	budget, err := parseBudget(p.doc.Budget)
 	if err != nil {
 		return nil, err
 	}
 	p.wf.Budget = budget
 
-	if p.draft.Schedule != nil {
-		if p.draft.Schedule.Cron == "" {
+	if p.doc.Schedule != nil {
+		if p.doc.Schedule.Cron == "" {
 			return nil, fmt.Errorf("schedule: cron is required")
 		}
-		p.wf.Schedule = &Schedule{Cron: p.draft.Schedule.Cron, TZ: p.draft.Schedule.TZ}
+		p.wf.Schedule = &Schedule{Cron: p.doc.Schedule.Cron, TZ: p.doc.Schedule.TZ}
 	}
 
 	return p.wf, nil
@@ -272,9 +284,9 @@ func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []raw
 	var rawLoops []rawLoop
 	topTasks := make([]syntax.DraftTask, 0, len(draftTasks))
 	for _, rt := range draftTasks {
-		isLoop := rt.Loop.Kind != 0
-		isForEach := rt.ForEach.Kind != 0
-		isForEachParallel := rt.ForEachParallel.Kind != 0
+		isLoop := rt.Loop.Present()
+		isForEach := rt.ForEach.Present()
+		isForEachParallel := rt.ForEachParallel.Present()
 		if !isLoop && !isForEach && !isForEachParallel {
 			topTasks = append(topTasks, rt)
 			continue
@@ -306,17 +318,17 @@ func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []raw
 		switch {
 		case isForEach:
 			rl.kind = LoopForEach
-			if err := decodeForEachBody(&rt.ForEach, &rl); err != nil {
+			if err := decodeForEachBody(rt.ForEach, &rl); err != nil {
 				return nil, nil, fmt.Errorf("task %q: %w", tid, err)
 			}
 		case isForEachParallel:
 			rl.kind = LoopForEach
 			rl.parallel = true
-			if err := decodeForEachBody(&rt.ForEachParallel, &rl); err != nil {
+			if err := decodeForEachBody(rt.ForEachParallel, &rl); err != nil {
 				return nil, nil, fmt.Errorf("task %q: %w", tid, err)
 			}
 		default:
-			if err := decodeLoopBody(&rt.Loop, &rl); err != nil {
+			if err := decodeLoopBody(rt.Loop, &rl); err != nil {
 				return nil, nil, fmt.Errorf("task %q: %w", tid, err)
 			}
 		}

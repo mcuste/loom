@@ -7,7 +7,6 @@ import (
 
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/syntax"
-	"gopkg.in/yaml.v3"
 )
 
 // ParamValues is a resolved-param bag: every entry is the final string value
@@ -298,16 +297,17 @@ func (e *InvalidParamValueError) Error() string {
 
 // parseParams validates the raw params: block and returns the resolved
 // Params slice in declaration order plus an index from name to slice position.
-func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
-	if node.Kind == 0 {
+func parseParams(node syntax.Value) ([]Param, map[ParamName]int, error) {
+	if !node.Present() {
 		return nil, nil, nil
 	}
-	if node.Kind != yaml.SequenceNode {
+	if node.Kind() != syntax.SequenceNode {
 		return nil, nil, fmt.Errorf("params: must be a sequence of param entries")
 	}
-	params := make([]Param, 0, len(node.Content))
-	idx := make(map[ParamName]int, len(node.Content))
-	for _, entry := range node.Content {
+	entries := node.SequenceValues()
+	params := make([]Param, 0, len(entries))
+	idx := make(map[ParamName]int, len(entries))
+	for _, entry := range entries {
 		rp, defNode, err := decodeDraftParam(entry)
 		if err != nil {
 			return nil, nil, err
@@ -327,17 +327,17 @@ func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
 			Description: rp.Description,
 			Required:    rp.Required,
 		}
-		if defNode != nil {
+		if defNode.Present() {
 			if rp.Required {
 				return nil, nil, &ConflictingParamSpecError{Name: name}
 			}
-			if defNode.Kind != yaml.ScalarNode {
+			if defNode.Kind() != syntax.ScalarNode {
 				return nil, nil, &InvalidParamDefaultError{Name: name, Reason: "must be a scalar string"}
 			}
-			if defNode.Tag == "!!null" {
+			if defNode.Tag() == "!!null" {
 				return nil, nil, &InvalidParamDefaultError{Name: name, Reason: "null default is not allowed"}
 			}
-			p.Default = defNode.Value
+			p.Default = defNode.Scalar()
 			p.HasDefault = true
 		}
 		idx[name] = len(params)
@@ -347,13 +347,13 @@ func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
 }
 
 // decodeDraftParam destructures a single params: mapping entry.
-func decodeDraftParam(entry *yaml.Node) (syntax.DraftParam, *yaml.Node, error) {
+func decodeDraftParam(entry syntax.Value) (syntax.DraftParam, syntax.Value, error) {
 	var rp syntax.DraftParam
-	if entry.Kind != yaml.MappingNode {
-		return rp, nil, fmt.Errorf("params: entry must be a mapping")
+	if entry.Kind() != syntax.MappingNode {
+		return rp, syntax.Value{}, fmt.Errorf("params: entry must be a mapping")
 	}
-	var defNode *yaml.Node
-	if err := eachMapEntry(entry, "params: entry", func(key string, v *yaml.Node) error {
+	var defNode syntax.Value
+	if err := entry.EachMapEntry("params: entry", func(key string, v syntax.Value) error {
 		switch key {
 		case "name":
 			if err := v.Decode(&rp.Name); err != nil {
@@ -374,7 +374,7 @@ func decodeDraftParam(entry *yaml.Node) (syntax.DraftParam, *yaml.Node, error) {
 		}
 		return nil
 	}); err != nil {
-		return rp, nil, err
+		return rp, syntax.Value{}, err
 	}
 	return rp, defNode, nil
 }
