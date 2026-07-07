@@ -5,19 +5,20 @@ import (
 	"strings"
 
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
-// loopTask pairs a raw task with the id of its owning loop. The loop field is
-// "" for top-level (non-loop-member) tasks.
+// loopTask pairs a syntax draft task with the id of its owning loop. The loop
+// field is "" for top-level (non-loop-member) tasks.
 type loopTask struct {
-	rt   rawTask
+	rt   syntax.DraftTask
 	loop LoopID
 }
 
 // parseState bundles the mutable state threaded through the per-task build
 // loop: the workflow being assembled, the global task-id set used for
 // dependency and placeholder validation, the param name set, and the per-loop
-// metadata derived from the raw loop declarations.
+// metadata derived from the decoded loop declarations.
 type parseState struct {
 	wf           *Workflow
 	ids          map[TaskID]struct{}
@@ -34,8 +35,8 @@ type taskMeta struct {
 	budget *Budget
 }
 
-// buildTask constructs one Task from a raw task (paired with its owning loop
-// id, "" for top-level tasks) and appends it to st.wf. It performs all
+// buildTask constructs one Task from a syntax draft task (paired with its owning
+// loop id, "" for top-level tasks) and appends it to st.wf. It performs all
 // per-task validation: body-form checks, dependency graph edges, placeholder
 // validation, schema, when-expression, etc.
 func buildTask(st *parseState, lt loopTask) error {
@@ -74,7 +75,7 @@ func buildTask(st *parseState, lt loopTask) error {
 		return err
 	}
 	loopVar := st.asByLoop[lt.loop]
-	action := taskActionFromRaw(rt, withArgs, loopVar)
+	action := taskActionFromDraft(rt, withArgs, loopVar)
 	wf.byID[tid] = len(wf.Tasks)
 	wf.Tasks = append(wf.Tasks, Task{
 		ID:                   tid,
@@ -105,7 +106,7 @@ func buildTask(st *parseState, lt loopTask) error {
 	return nil
 }
 
-func validateOkExit(tid TaskID, rt rawTask) error {
+func validateOkExit(tid TaskID, rt syntax.DraftTask) error {
 	if len(rt.OkExit) == 0 {
 		return nil
 	}
@@ -122,7 +123,7 @@ func validateOkExit(tid TaskID, rt rawTask) error {
 
 // normalizeTaskBody picks the single body text placeholder validation runs
 // against and decodes any sub-workflow with: arguments.
-func normalizeTaskBody(tid TaskID, rt rawTask) (string, []WithArg, error) {
+func normalizeTaskBody(tid TaskID, rt syntax.DraftTask) (string, []WithArg, error) {
 	// body is the text that placeholder validation runs against;
 	// substitution targets the same string at execution time. A sub-workflow
 	// task has no prompt body: its placeholder-derived deps come from scanning
@@ -184,7 +185,7 @@ func normalizeTaskBody(tid TaskID, rt rawTask) (string, []WithArg, error) {
 	return body, withArgs, nil
 }
 
-func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt rawTask, body string, withArgs []WithArg) (taskMeta, error) {
+func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt syntax.DraftTask, body string, withArgs []WithArg) (taskMeta, error) {
 	schema, err := parseSchema(rt.Schema)
 	if err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)

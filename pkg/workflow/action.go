@@ -1,5 +1,7 @@
 package workflow
 
+import "github.com/mcuste/loom/pkg/syntax"
+
 // WorkflowRef names a linked child workflow.
 type WorkflowRef string
 
@@ -74,7 +76,7 @@ func (t Task) ParsedAction() (Action, bool) {
 	return t.action, true
 }
 
-func taskActionFromRaw(rt rawTask, withArgs []WithArg, loopVar string) Action {
+func taskActionFromDraft(rt syntax.DraftTask, withArgs []WithArg, loopVar string) Action {
 	switch {
 	case rt.Prompt != "":
 		return PromptAction{Prompt: ParseTemplateInScope(rt.Prompt, loopVar)}

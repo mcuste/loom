@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mcuste/loom/pkg/syntax"
 	"gopkg.in/yaml.v3"
 )
 
@@ -105,7 +106,7 @@ type rawLoop struct {
 	hasList       bool
 	listSource    string
 	as            string
-	tasks         []rawTask
+	tasks         []syntax.DraftTask
 }
 
 // decodeLoopBody decodes a `loop:` block's fields from a mapping node into rl.

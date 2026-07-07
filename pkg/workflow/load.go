@@ -11,9 +11,9 @@ import (
 // relative `script:` paths relative to the YAML's own directory, then parses the
 // resulting self-contained bytes. It returns both the parsed workflow and the
 // inlined manifest (the bytes a caller persists), and deliberately stops before
-// the registry-dependent routing check so it stays a pure function of the file
-// content. [ParseFile] layers ValidateRouting on top; callers that need the
-// manifest (e.g. before a chdir) use ReadAndParse directly.
+// runtime-catalog validation so it stays a pure function of the file content.
+// Callers that need the manifest (e.g. before a chdir) use ReadAndParse
+// directly.
 func ReadAndParse(path string) (*Workflow, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -45,18 +45,13 @@ func ReadAndParse(path string) (*Workflow, []byte, error) {
 	return wf, manifest, nil
 }
 
-// ParseFile reads path and parses it as a workflow YAML.
+// ParseFile reads path and parses it as a workflow YAML. Runtime-catalog
+// validation is an invocation check; callers run pkg/workflowcheck after params
+// are resolved and sub-workflows are linked.
 func ParseFile(path string) (*Workflow, error) {
 	wf, _, err := ReadAndParse(path)
 	if err != nil {
 		return nil, err
-	}
-	// ParseFile loads a workflow for execution, so it runs the registry-dependent
-	// routing check that ReadAndParse deliberately omits. Sub-workflow children
-	// are not linked yet here; the caller re-runs ValidateRouting after linking to
-	// cover them via the w.Subs recursion.
-	if err := wf.ValidateRouting(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return wf, nil
 }

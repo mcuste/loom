@@ -162,7 +162,7 @@ tasks:
 
 // TestParseTaskSystemPromptFileNotInlinedRejected pins that a task-level
 // system_prompt_file reaching Parse uninlined is rejected (mirroring prompt_file)
-// rather than silently dropped, since rawTask.SystemPromptFile never becomes a
+// rather than silently dropped, since syntax.DraftTask.SystemPromptFile never becomes a
 // Task field.
 func TestParseTaskSystemPromptFileNotInlinedRejected(t *testing.T) {
 	src := `

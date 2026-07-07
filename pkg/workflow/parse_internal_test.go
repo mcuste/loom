@@ -3,14 +3,16 @@ package workflow
 import (
 	"reflect"
 	"testing"
+
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
-// TestRawMirrorsPublic guards against silent drift between the YAML-decode
-// structs (rawWorkflow, rawTask) and the validated domain types (Workflow,
+// TestSyntaxDraftMirrorsPublic guards against silent drift between the
+// YAML-decode structs in pkg/syntax and the validated domain types (Workflow,
 // Task): adding or renaming a field on one without the other would otherwise
 // be a silent data loss. Aliases capture intentional renamings (e.g. YAML
-// `name:` decodes into rawWorkflow.Name but lives on Workflow.ID).
-func TestRawMirrorsPublic(t *testing.T) {
+// `name:` decodes into syntax.DraftWorkflow.Name but lives on Workflow.ID).
+func TestSyntaxDraftMirrorsPublic(t *testing.T) {
 	cases := []struct {
 		name        string
 		raw         any
@@ -21,41 +23,42 @@ func TestRawMirrorsPublic(t *testing.T) {
 	}{
 		{
 			name:    "workflow",
-			raw:     rawWorkflow{},
+			raw:     syntax.DraftWorkflow{},
 			public:  Workflow{},
 			aliases: map[string]string{"Name": "ID"},
 			// Loops is derived: there is no top-level `loops:` YAML key. Loops are
-			// declared inline as tasks carrying a `loop:` block (rawTask.Loop) and
-			// folded into Workflow.Loops during parse, so the public field has no
-			// rawWorkflow counterpart. Subs is populated by the CLI link step
-			// (linkSubWorkflows), never by Parse, so it too has no raw counterpart.
+			// declared inline as tasks carrying a `loop:` block (syntax.DraftTask.Loop)
+			// and folded into Workflow.Loops during parse, so the public field has no
+			// DraftWorkflow counterpart. Subs is populated by the CLI link step
+			// (linkSubWorkflows), never by Parse, so it too has no draft counterpart.
 			extraPublic: map[string]struct{}{"Loops": {}, "Subs": {}},
+			extraRaw:    map[string]struct{}{"Source": {}},
 		},
 		{
 			name:   "task",
-			raw:    rawTask{},
+			raw:    syntax.DraftTask{},
 			public: Task{},
 			// Cond is compiled by ParseCondition from the raw `when:` text.
 			// Task.Loop is derived from the enclosing `loop:`/`for_each:` wrapper
 			// a task is nested under, not a task-level YAML key. Neither has a
 			// separate raw field.
 			extraPublic: map[string]struct{}{"Cond": {}, "Loop": {}},
-			// rawTask.Loop, rawTask.ForEach, and rawTask.ForEachParallel are the
+			// DraftTask.Loop, DraftTask.ForEach, and DraftTask.ForEachParallel are the
 			// per-task scoped-block wrappers: parse-only nodes folded into a
 			// LoopGroup that never become a Task, so they have no public counterpart
-			// (rawTask.Loop shares the name with the derived Task.Loop above only by
-			// coincidence). rawTask.PromptFile and rawTask.SystemPromptFile are
+			// (DraftTask.Loop shares the name with the derived Task.Loop above only by
+			// coincidence). DraftTask.PromptFile and DraftTask.SystemPromptFile are
 			// parse-only too: InlinePromptFiles rewrites them to `prompt:` /
 			// `system_prompt:` before Parse, so neither reaches a public Task field.
 			extraRaw: map[string]struct{}{"Loop": {}, "ForEach": {}, "ForEachParallel": {}, "PromptFile": {}, "SystemPromptFile": {}},
 		},
 		{
 			name:   "param",
-			raw:    rawParam{},
+			raw:    syntax.DraftParam{},
 			public: Param{},
 			// `default:` is decoded by hand from the raw yaml.Node so the
 			// scalar text survives without coercion (e.g. `default: 1` stays
-			// "1"); it has no rawParam field. Default and HasDefault both
+			// "1"); it has no DraftParam field. Default and HasDefault both
 			// receive their values that way.
 			extraPublic: map[string]struct{}{"Default": {}, "HasDefault": {}},
 		},

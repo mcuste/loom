@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/mcuste/loom/pkg/syntax"
 )
 
 // Sentinel parse errors. Typed errors below cover structured failures with
@@ -81,7 +83,7 @@ var (
 // id, description, and the loop block: a loop wrapper is not an executable task,
 // so prompt/command, runtime knobs, and every task-only field are rejected at
 // load time rather than silently ignored.
-func rejectLoopWrapperFields(tid TaskID, rt rawTask, wrapper string) error {
+func rejectLoopWrapperFields(tid TaskID, rt syntax.DraftTask, wrapper string) error {
 	switch {
 	case rt.Prompt != "" || rt.Command != "" || rt.Workflow != "" || rt.Script != "":
 		body := "prompt"

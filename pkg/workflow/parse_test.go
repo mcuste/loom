@@ -452,6 +452,27 @@ func TestParseFile(t *testing.T) {
 	}
 }
 
+func TestParseFileDoesNotValidateRouting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wf.yaml")
+	data := []byte(`name: wf_no_routing
+tasks:
+  - id: a
+    prompt: hello
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	wf, err := workflow.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if wf.ID != "wf_no_routing" {
+		t.Errorf("ID = %q, want wf_no_routing", wf.ID)
+	}
+}
+
 func TestParseFileNotFound(t *testing.T) {
 	_, err := workflow.ParseFile(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {

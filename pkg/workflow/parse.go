@@ -30,9 +30,9 @@
 //     task-id placeholders.
 //  10. Every declared param is referenced by at least one prompt, command,
 //     routing field, or system_prompt (workflow- or task-level).
-//  11. The effective runtime/model/effort and system prompt per LLM task are
-//     accepted by the registered runtime spec (checked by ValidateRouting).
-//     Shell and sub-workflow tasks bypass this check.
+//
+// Runtime-catalog validation is intentionally outside this parser; callers use
+// pkg/workflowcheck after params are resolved and sub-workflows are linked.
 package workflow
 
 import (
@@ -47,6 +47,15 @@ type ParseOptions struct {
 	Source syntax.Source
 }
 
+type parser struct {
+	draft        *syntax.Draft
+	id           WorkflowID
+	wf           *Workflow
+	paramSet     map[ParamName]struct{}
+	paramIdx     map[ParamName]int
+	memberByLoop map[LoopID]map[TaskID]bool
+}
+
 // Parse decodes a workflow YAML document and returns the validated Workflow.
 func Parse(data []byte) (*Workflow, error) {
 	draft, err := syntax.Decode(data, syntax.Source{})
@@ -58,22 +67,38 @@ func Parse(data []byte) (*Workflow, error) {
 
 // FromDraft constructs a validated Workflow from a decoded syntax draft.
 func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
-	raw, id, err := rawFromDraft(draft, opts)
+	p, err := newParser(draft, opts)
+	if err != nil {
+		return nil, err
+	}
+	return p.parse()
+}
+
+func newParser(draft *syntax.Draft, opts ParseOptions) (*parser, error) {
+	if draft == nil {
+		return nil, fmt.Errorf("workflow draft is nil")
+	}
+	if opts.Source.Path != "" {
+		draft.Source = opts.Source
+	}
+	id, err := NewWorkflowID(draft.Name)
+	if err != nil {
+		return nil, err
+	}
+	return &parser{draft: draft, id: id}, nil
+}
+
+func (p *parser) parse() (*Workflow, error) {
+	topTasks, rawLoops, err := prepareDraftLoops(p.id, p.draft.Tasks)
 	if err != nil {
 		return nil, err
 	}
 
-	topTasks, rawLoops, err := prepareRawLoops(id, raw.Tasks)
-	if err != nil {
+	if err := p.buildSkeleton(); err != nil {
 		return nil, err
 	}
 
-	wf, paramSet, paramIdx, err := newWorkflowSkeleton(raw, id)
-	if err != nil {
-		return nil, err
-	}
-
-	allTasks, st, memberByLoop, err := prepareLoopedTasks(topTasks, rawLoops, wf, paramSet, paramIdx)
+	allTasks, st, err := p.prepareLoopedTasks(topTasks, rawLoops)
 	if err != nil {
 		return nil, err
 	}
@@ -82,84 +107,11 @@ func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
 		return nil, err
 	}
 
-	return finalizeWorkflow(raw, wf, paramSet, memberByLoop)
+	return p.finalize()
 }
 
-func rawFromDraft(draft *syntax.Draft, opts ParseOptions) (rawWorkflow, WorkflowID, error) {
-	if draft == nil {
-		return rawWorkflow{}, "", fmt.Errorf("workflow draft is nil")
-	}
-	if opts.Source.Path != "" {
-		draft.Source = opts.Source
-	}
-	raw := rawWorkflow{
-		Name:         draft.Name,
-		Description:  draft.Description,
-		Runtime:      draft.Runtime,
-		Model:        draft.Model,
-		Effort:       draft.Effort,
-		SystemPrompt: draft.SystemPrompt,
-		Params:       draft.Params,
-		Tasks:        rawTasksFromDraft(draft.Tasks),
-		Budget:       draft.Budget,
-		WorkingDir:   draft.WorkingDir,
-		Output:       draft.Output,
-	}
-	if draft.Cache != nil {
-		raw.Cache = *draft.Cache
-	}
-	if draft.Schedule != nil {
-		raw.Schedule = &rawSchedule{
-			Cron: draft.Schedule.Cron,
-			TZ:   draft.Schedule.TZ,
-		}
-	}
-	id, err := NewWorkflowID(raw.Name)
-	if err != nil {
-		return rawWorkflow{}, "", err
-	}
-	return raw, id, nil
-}
-
-func rawTasksFromDraft(in []syntax.DraftTask) []rawTask {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]rawTask, len(in))
-	for i, t := range in {
-		out[i] = rawTask{
-			ID:               t.ID,
-			Description:      t.Description,
-			Runtime:          t.Runtime,
-			Model:            t.Model,
-			Effort:           t.Effort,
-			Prompt:           t.Prompt,
-			Command:          t.Command,
-			SystemPrompt:     t.SystemPrompt,
-			SystemPromptFile: t.SystemPromptFile,
-			Workflow:         t.Workflow,
-			Script:           t.Script,
-			Args:             t.Args,
-			OkExit:           t.OkExit,
-			PromptFile:       t.PromptFile,
-			DependsOn:        t.DependsOn,
-			WritesState:      t.WritesState,
-			When:             t.When,
-			Retry:            t.Retry,
-			ForEach:          t.ForEach,
-			ForEachParallel:  t.ForEachParallel,
-			Budget:           t.Budget,
-			Schema:           t.Schema,
-			Cache:            t.Cache,
-			Loop:             t.Loop,
-			With:             t.With,
-		}
-	}
-	return out
-}
-
-func prepareRawLoops(id WorkflowID, rawTasks []rawTask) ([]rawTask, []rawLoop, error) {
-	topTasks, rawLoops, err := splitLoopWrappers(rawTasks)
+func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {
+	topTasks, rawLoops, err := splitLoopWrappers(draftTasks)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -176,40 +128,45 @@ func prepareRawLoops(id WorkflowID, rawTasks []rawTask) ([]rawTask, []rawLoop, e
 	return topTasks, rawLoops, nil
 }
 
-func newWorkflowSkeleton(raw rawWorkflow, id WorkflowID) (*Workflow, map[ParamName]struct{}, map[ParamName]int, error) {
-	params, paramIdx, err := parseParams(raw.Params)
+func (p *parser) buildSkeleton() error {
+	params, paramIdx, err := parseParams(p.draft.Params)
 	if err != nil {
-		return nil, nil, nil, err
+		return err
 	}
 
-	wf := &Workflow{
-		ID:                   id,
-		Description:          raw.Description,
-		Runtime:              runtime.Name(raw.Runtime),
-		Model:                runtime.Model(raw.Model),
-		Effort:               runtime.Effort(raw.Effort),
-		SystemPrompt:         raw.SystemPrompt,
-		systemPromptTemplate: ParseTemplate(raw.SystemPrompt),
-		Cache:                raw.Cache,
-		WorkingDir:           raw.WorkingDir,
+	cache := false
+	if p.draft.Cache != nil {
+		cache = *p.draft.Cache
+	}
+	p.wf = &Workflow{
+		ID:                   p.id,
+		Description:          p.draft.Description,
+		Runtime:              runtime.Name(p.draft.Runtime),
+		Model:                runtime.Model(p.draft.Model),
+		Effort:               runtime.Effort(p.draft.Effort),
+		SystemPrompt:         p.draft.SystemPrompt,
+		systemPromptTemplate: ParseTemplate(p.draft.SystemPrompt),
+		Cache:                cache,
+		WorkingDir:           p.draft.WorkingDir,
 		Params:               params,
-		Tasks:                make([]Task, 0, len(raw.Tasks)),
-		byID:                 make(map[TaskID]int, len(raw.Tasks)),
+		Tasks:                make([]Task, 0, len(p.draft.Tasks)),
+		byID:                 make(map[TaskID]int, len(p.draft.Tasks)),
 		paramByName:          paramIdx,
 	}
 
-	paramSet := paramSetFromIndex(paramIdx)
-	if err := validateRoutingField("", "runtime", raw.Runtime, paramSet); err != nil {
-		return nil, nil, nil, err
+	p.paramIdx = paramIdx
+	p.paramSet = paramSetFromIndex(paramIdx)
+	if err := validateRoutingField("", "runtime", p.draft.Runtime, p.paramSet); err != nil {
+		return err
 	}
-	if err := validateRoutingField("", "model", raw.Model, paramSet); err != nil {
-		return nil, nil, nil, err
+	if err := validateRoutingField("", "model", p.draft.Model, p.paramSet); err != nil {
+		return err
 	}
-	if err := validateRoutingField("", "effort", raw.Effort, paramSet); err != nil {
-		return nil, nil, nil, err
+	if err := validateRoutingField("", "effort", p.draft.Effort, p.paramSet); err != nil {
+		return err
 	}
 
-	return wf, paramSet, paramIdx, nil
+	return nil
 }
 
 func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
@@ -220,21 +177,22 @@ func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
 	return paramSet
 }
 
-func prepareLoopedTasks(topTasks []rawTask, rawLoops []rawLoop, wf *Workflow, paramSet map[ParamName]struct{}, paramIdx map[ParamName]int) ([]loopTask, *parseState, map[LoopID]map[TaskID]bool, error) {
+func (p *parser) prepareLoopedTasks(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]loopTask, *parseState, error) {
 	allTasks, ids, err := flattenLoopTasks(topTasks, rawLoops)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	if err := validateLoopNamespace(rawLoops, ids, paramIdx); err != nil {
-		return nil, nil, nil, err
+	if err := validateLoopNamespace(rawLoops, ids, p.paramIdx); err != nil {
+		return nil, nil, err
 	}
 
-	loops, memberByLoop, err := buildLoopGroups(rawLoops, ids, paramSet)
+	loops, memberByLoop, err := buildLoopGroups(rawLoops, ids, p.paramSet)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	wf.Loops = loops
+	p.wf.Loops = loops
+	p.memberByLoop = memberByLoop
 
 	// asByLoop maps each loop id to its for_each loop variable ("" for a while
 	// loop), so the per-task build below can exempt a member's {{as}}
@@ -246,14 +204,14 @@ func prepareLoopedTasks(topTasks []rawTask, rawLoops []rawLoop, wf *Workflow, pa
 	}
 
 	st := &parseState{
-		wf:           wf,
+		wf:           p.wf,
 		ids:          ids,
-		paramSet:     paramSet,
+		paramSet:     p.paramSet,
 		asByLoop:     asByLoop,
 		memberByLoop: memberByLoop,
 	}
 
-	return allTasks, st, memberByLoop, nil
+	return allTasks, st, nil
 }
 
 func buildAllTasks(st *parseState, allTasks []loopTask) error {
@@ -265,55 +223,55 @@ func buildAllTasks(st *parseState, allTasks []loopTask) error {
 	return nil
 }
 
-func finalizeWorkflow(raw rawWorkflow, wf *Workflow, paramSet map[ParamName]struct{}, memberByLoop map[LoopID]map[TaskID]bool) (*Workflow, error) {
-	if raw.Output != "" {
-		outputTask := TaskID(raw.Output)
-		if _, ok := wf.byID[outputTask]; !ok {
+func (p *parser) finalize() (*Workflow, error) {
+	if p.draft.Output != "" {
+		outputTask := TaskID(p.draft.Output)
+		if _, ok := p.wf.byID[outputTask]; !ok {
 			return nil, &UnknownOutputTaskError{Task: outputTask}
 		}
-		wf.Output = outputTask
+		p.wf.Output = outputTask
 	}
 
-	if err := checkPrevPlaceholders(wf, memberByLoop); err != nil {
+	if err := checkPrevPlaceholders(p.wf, p.memberByLoop); err != nil {
 		return nil, err
 	}
 
-	if err := validateSystemPrompt(wf.SystemPrompt, paramSet); err != nil {
+	if err := validateSystemPrompt(p.wf.SystemPrompt, p.paramSet); err != nil {
 		return nil, err
 	}
 
-	if cycle, ok := findCycle(wf); ok {
+	if cycle, ok := findCycle(p.wf); ok {
 		return nil, &CycleError{Cycle: cycle}
 	}
 
-	if err := checkUnusedParams(wf); err != nil {
+	if err := checkUnusedParams(p.wf); err != nil {
 		return nil, err
 	}
 
-	budget, err := parseBudget(raw.Budget)
+	budget, err := parseBudget(p.draft.Budget)
 	if err != nil {
 		return nil, err
 	}
-	wf.Budget = budget
+	p.wf.Budget = budget
 
-	if raw.Schedule != nil {
-		if raw.Schedule.Cron == "" {
+	if p.draft.Schedule != nil {
+		if p.draft.Schedule.Cron == "" {
 			return nil, fmt.Errorf("schedule: cron is required")
 		}
-		wf.Schedule = &Schedule{Cron: raw.Schedule.Cron, TZ: raw.Schedule.TZ}
+		p.wf.Schedule = &Schedule{Cron: p.draft.Schedule.Cron, TZ: p.draft.Schedule.TZ}
 	}
 
-	return wf, nil
+	return p.wf, nil
 }
 
-func splitLoopWrappers(rawTasks []rawTask) ([]rawTask, []rawLoop, error) {
+func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {
 	// Loops are declared as tasks carrying a loop: (while) or for_each: block:
 	// the wrapper is not an executable task; its id becomes the loop id and its
 	// nested tasks: the members. Split wrappers out of the top-level task set
 	// and collect them as rawLoops for the shared loop-group machinery.
 	var rawLoops []rawLoop
-	topTasks := make([]rawTask, 0, len(rawTasks))
-	for _, rt := range rawTasks {
+	topTasks := make([]syntax.DraftTask, 0, len(draftTasks))
+	for _, rt := range draftTasks {
 		isLoop := rt.Loop.Kind != 0
 		isForEach := rt.ForEach.Kind != 0
 		isForEachParallel := rt.ForEachParallel.Kind != 0
@@ -367,7 +325,7 @@ func splitLoopWrappers(rawTasks []rawTask) ([]rawTask, []rawLoop, error) {
 	return topTasks, rawLoops, nil
 }
 
-func flattenLoopTasks(topTasks []rawTask, rawLoops []rawLoop) ([]loopTask, map[TaskID]struct{}, error) {
+func flattenLoopTasks(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]loopTask, map[TaskID]struct{}, error) {
 	// allTasks is the flat union of top-level and every loop's nested tasks, in
 	// declaration order, each tagged with its owning loop ("" for top-level). The
 	// whole parser runs over this list so wf.Tasks ends up flat and ordered, and
@@ -417,78 +375,4 @@ func validateLoopNamespace(rawLoops []rawLoop, ids map[TaskID]struct{}, paramIdx
 		seenLoops[rl.id] = struct{}{}
 	}
 	return nil
-}
-
-// ValidateRouting checks every LLM task's effective runtime/model/effort against
-// the runtime registry, recursing into linked sub-workflows. It is the
-// registry-dependent companion to [Parse]: keeping it separate makes Parse a
-// pure function of its input bytes (identical bytes always parse identically,
-// independent of which runtime init() functions have run), and lets callers run
-// the routing check explicitly once the registry is populated and any
-// sub-workflow children are linked into w.Subs.
-//
-// Shell, script, and sub-workflow tasks bypass the registry entirely
-// (runtime/model/effort have no meaning for them; a sub-workflow's child brings
-// its own), so they are skipped here and reached only through the w.Subs
-// recursion.
-func (w *Workflow) ValidateRouting() error {
-	params, err := ResolveParams(w, nil, nil)
-	if err != nil {
-		params = nil
-	}
-	return w.ValidateRoutingWithParams(params, true)
-}
-
-// ValidateRoutingWithParams checks routing after substituting whole-field
-// `{{params.name}}` values in runtime/model/effort. When allowUnresolved is
-// true, any task whose routing still depends on a missing param is skipped so
-// advisory checks can still render a plan for workflows with required params.
-func (w *Workflow) ValidateRoutingWithParams(params ParamValues, allowUnresolved bool) error {
-	for i := range w.Tasks {
-		t := &w.Tasks[i]
-		if t.IsShell() || t.IsSubWorkflow() || t.IsScript() {
-			continue
-		}
-		if allowUnresolved && w.routingNeedsMissingParam(t, params) {
-			continue
-		}
-		rt, m, e := w.EffectiveWithParams(t, params)
-		req := runtime.Request{
-			TaskID:       string(t.ID),
-			Prompt:       t.Prompt,
-			Model:        m,
-			Effort:       e,
-			SystemPrompt: w.EffectiveSystemPrompt(t),
-		}
-		if err := runtime.Validate(rt, req); err != nil {
-			return fmt.Errorf("task %q: %w", t.ID, err)
-		}
-	}
-	for _, child := range w.Subs {
-		childParams, err := ResolveParams(child, nil, nil)
-		if err != nil {
-			childParams = nil
-		}
-		if err := child.ValidateRoutingWithParams(childParams, true); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (w *Workflow) routingNeedsMissingParam(t *Task, params ParamValues) bool {
-	for _, value := range []string{
-		string(t.Runtime), string(w.Runtime),
-		string(t.Model), string(w.Model),
-		string(t.Effort), string(w.Effort),
-	} {
-		name, ok := wholeParamPlaceholder(value)
-		if !ok {
-			continue
-		}
-		if _, found := params[name]; !found {
-			return true
-		}
-	}
-	return false
 }

@@ -1,5 +1,7 @@
 package workflow
 
+import "github.com/mcuste/loom/pkg/syntax"
+
 // bodyForm describes one of the mutually exclusive task body forms.
 // The conflict rules are encoded in the table once; parser and inliner both
 // consult it instead of open-coding their own lists.
@@ -21,7 +23,7 @@ var bodyForms = []bodyForm{
 // detectBodyForms returns the names of the body-form fields that are set on rt,
 // in declaration order. The caller signals a conflict when len > 1 and missing
 // when len == 0.
-func detectBodyForms(rt rawTask) []string {
+func detectBodyForms(rt syntax.DraftTask) []string {
 	var present []string
 	if rt.Prompt != "" {
 		present = append(present, "prompt")

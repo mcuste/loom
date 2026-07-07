@@ -14,8 +14,11 @@ type Source struct {
 	Path string
 }
 
-// Draft is the raw decoded workflow shape.
-type Draft = DraftWorkflow
+// Document is the raw decoded workflow shape.
+type Document = DraftWorkflow
+
+// Draft is a backwards-compatible alias for Document.
+type Draft = Document
 
 // DraftWorkflow mirrors the workflow YAML schema.
 type DraftWorkflow struct {

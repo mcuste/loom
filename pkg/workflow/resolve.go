@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/syntax"
 	"gopkg.in/yaml.v3"
 )
 
@@ -204,20 +205,6 @@ func ResolveParams(wf *Workflow, cli, file map[string]string) (ParamValues, erro
 	return out, nil
 }
 
-// ResolveAndValidateParams applies the non-advisory scheduling/execution path:
-// resolve params from defaults, file, and CLI tiers, then validate routing
-// against the fully resolved bag.
-func ResolveAndValidateParams(wf *Workflow, cli, file map[string]string) (ParamValues, error) {
-	out, err := ResolveParams(wf, cli, file)
-	if err != nil {
-		return nil, err
-	}
-	if err := wf.ValidateRoutingWithParams(out, false); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // ParseParamArgs decodes a slice of `key=val` strings (as collected from
 // repeated `-p` flags) into a map. The first `=` is the separator; subsequent
 // `=` characters are kept in the value verbatim. Empty values (`key=`) are
@@ -321,7 +308,7 @@ func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
 	params := make([]Param, 0, len(node.Content))
 	idx := make(map[ParamName]int, len(node.Content))
 	for _, entry := range node.Content {
-		rp, defNode, err := decodeRawParam(entry)
+		rp, defNode, err := decodeDraftParam(entry)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -359,9 +346,9 @@ func parseParams(node yaml.Node) ([]Param, map[ParamName]int, error) {
 	return params, idx, nil
 }
 
-// decodeRawParam destructures a single params: mapping entry.
-func decodeRawParam(entry *yaml.Node) (rawParam, *yaml.Node, error) {
-	var rp rawParam
+// decodeDraftParam destructures a single params: mapping entry.
+func decodeDraftParam(entry *yaml.Node) (syntax.DraftParam, *yaml.Node, error) {
+	var rp syntax.DraftParam
 	if entry.Kind != yaml.MappingNode {
 		return rp, nil, fmt.Errorf("params: entry must be a mapping")
 	}
