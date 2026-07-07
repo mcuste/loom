@@ -189,7 +189,7 @@ func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
 	return paramSet
 }
 
-func (p *parser) resolveLoopScopes(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]loopTask, *parseState, error) {
+func (p *parser) resolveLoopScopes(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]taskDecl, *parseState, error) {
 	allTasks, ids, err := flattenLoopTasks(topTasks, rawLoops)
 	if err != nil {
 		return nil, nil, err
@@ -226,7 +226,7 @@ func (p *parser) resolveLoopScopes(topTasks []syntax.DraftTask, rawLoops []rawLo
 	return allTasks, st, nil
 }
 
-func lowerAllTasks(st *parseState, allTasks []loopTask) error {
+func lowerAllTasks(st *parseState, allTasks []taskDecl) error {
 	for _, lt := range allTasks {
 		if err := buildTask(st, lt); err != nil {
 			return err
@@ -337,34 +337,38 @@ func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []raw
 	return topTasks, rawLoops, nil
 }
 
-func flattenLoopTasks(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]loopTask, map[TaskID]struct{}, error) {
+func flattenLoopTasks(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]taskDecl, map[TaskID]struct{}, error) {
 	// allTasks is the flat union of top-level and every loop's nested tasks, in
 	// declaration order, each tagged with its owning loop ("" for top-level). The
 	// whole parser runs over this list so wf.Tasks ends up flat and ordered, and
 	// existing code over wf.Tasks (Plan, ByID, Effective, the scheduler) is
 	// unchanged by the addition of scoped loops.
-	allTasks := make([]loopTask, 0, len(topTasks)+len(rawLoops))
+	allTasks := make([]taskDecl, 0, len(topTasks)+len(rawLoops))
 	for _, rt := range topTasks {
-		allTasks = append(allTasks, loopTask{rt: rt, loop: ""})
+		decl, err := newTaskDecl(rt, "")
+		if err != nil {
+			return nil, nil, err
+		}
+		allTasks = append(allTasks, decl)
 	}
 	for _, rl := range rawLoops {
 		for _, rt := range rl.tasks {
-			allTasks = append(allTasks, loopTask{rt: rt, loop: rl.id})
+			decl, err := newTaskDecl(rt, rl.id)
+			if err != nil {
+				return nil, nil, err
+			}
+			allTasks = append(allTasks, decl)
 		}
 	}
 
 	// Global task-id uniqueness across top-level and every loop's nested tasks: a
 	// task lives in a single flat namespace regardless of which loop defines it.
 	ids := make(map[TaskID]struct{}, len(allTasks))
-	for _, lt := range allTasks {
-		tid, err := NewTaskID(lt.rt.ID)
-		if err != nil {
-			return nil, nil, err
+	for _, task := range allTasks {
+		if _, dup := ids[task.id]; dup {
+			return nil, nil, &DuplicateTaskIDError{ID: task.id}
 		}
-		if _, dup := ids[tid]; dup {
-			return nil, nil, &DuplicateTaskIDError{ID: tid}
-		}
-		ids[tid] = struct{}{}
+		ids[task.id] = struct{}{}
 	}
 
 	return allTasks, ids, nil

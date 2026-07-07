@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mcuste/loom/pkg/plan"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
 )
@@ -44,6 +45,10 @@ func compileOp(t *workflow.Task) op {
 func renderTemplate(tpl workflow.Template, st *frame, opts Options) string {
 	loopVars := map[string]string(nil)
 	if st.loopVar != "" {
+		// Hand-built workflows may not carry parse-scoped LoopVarRef parts in
+		// their compiled templates. Reparse in the active loop scope so they keep
+		// the same {{as}} binding behavior as parsed workflows.
+		tpl = workflow.ParseTemplateInScope(tpl.String(), st.loopVar)
 		loopVars = map[string]string{st.loopVar: st.loopVal}
 	}
 	return tpl.Render(workflow.RenderContext{
@@ -56,37 +61,6 @@ func renderTemplate(tpl workflow.Template, st *frame, opts Options) string {
 	})
 }
 
-func renderLegacyText(text string, st *frame, opts Options) string {
-	return workflow.Substitute(bindLoopVar(text, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
-}
-
-func renderPrompt(t *workflow.Task, st *frame, opts Options) string {
-	if action, ok := t.ParsedAction(); ok {
-		if prompt, ok := action.(workflow.PromptAction); ok {
-			return renderTemplate(prompt.Prompt, st, opts)
-		}
-	}
-	return renderLegacyText(t.Prompt, st, opts)
-}
-
-func renderCommand(t *workflow.Task, st *frame, opts Options) string {
-	if action, ok := t.ParsedAction(); ok {
-		if command, ok := action.(workflow.CommandAction); ok {
-			return renderTemplate(command.Command, st, opts)
-		}
-	}
-	return renderLegacyText(t.Command, st, opts)
-}
-
-func renderScript(t *workflow.Task, st *frame, opts Options) (string, []string) {
-	if action, ok := t.ParsedAction(); ok {
-		if script, ok := action.(workflow.ScriptAction); ok {
-			return renderTemplate(script.Path, st, opts), renderTemplates(script.Args, st, opts)
-		}
-	}
-	return renderLegacyText(t.Script, st, opts), renderLegacyTexts(t.Args, st, opts)
-}
-
 func renderTemplates(values []workflow.Template, st *frame, opts Options) []string {
 	out := make([]string, len(values))
 	for i, value := range values {
@@ -95,24 +69,42 @@ func renderTemplates(values []workflow.Template, st *frame, opts Options) []stri
 	return out
 }
 
-func renderLegacyTexts(values []string, st *frame, opts Options) []string {
-	out := make([]string, len(values))
-	for i, value := range values {
-		out[i] = renderLegacyText(value, st, opts)
+func resolveRoutingValue(value string, params workflow.ParamValues) string {
+	name, ok := workflow.PlaceholderParamName(value)
+	if !ok {
+		return value
 	}
-	return out
+	if resolved, found := params[workflow.ParamName(name)]; found {
+		return resolved
+	}
+	return value
+}
+
+func invalidActionError(n *node, want string) error {
+	return fmt.Errorf("task %q: compiled action %T is not %s", n.id, n.action, want)
+}
+
+func cacheEnabled(wf *workflow.Workflow, n *node) bool {
+	if n.policy.Cache != nil {
+		return *n.policy.Cache
+	}
+	return wf.Cache
 }
 
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := n.task
+	action, ok := n.action.(plan.RunCommand)
+	if !ok {
+		return TaskResult{}, nil, invalidActionError(n, "shell command")
+	}
 	if i.hooks.OnStart != nil {
 		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
 	st.mu.Lock()
-	body := renderCommand(t, st, i.opts)
+	body := renderTemplate(action.Command, st, i.opts)
 	env := taskEnv(st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
 	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+	res, runErr := runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
 		return runShell(ctx, t, body, env, st.workDir)
 	})
 	return res, runErr, nil
@@ -120,14 +112,18 @@ func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, bas
 
 func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := n.task
+	action, ok := n.action.(plan.RunScript)
+	if !ok {
+		return TaskResult{}, nil, invalidActionError(n, "script")
+	}
 	if i.hooks.OnStart != nil {
 		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
 	st.mu.Lock()
-	path, args := renderScript(t, st, i.opts)
+	path, args := renderTemplate(action.Path, st, i.opts), renderTemplates(action.Args, st, i.opts)
 	env := taskEnv(st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
 	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+	res, runErr := runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
 		return runScript(ctx, t, path, args, env, st.workDir)
 	})
 	return res, runErr, nil
@@ -136,12 +132,18 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := n.task
 	wf := i.program.wf
-	rt, model, effort := wf.EffectiveWithParams(t, i.opts.Params)
+	action, ok := n.action.(plan.AskModel)
+	if !ok {
+		return TaskResult{}, nil, invalidActionError(n, "model prompt")
+	}
+	rt := runtime.Name(resolveRoutingValue(string(action.Runtime), i.opts.Params))
+	model := runtime.Model(resolveRoutingValue(string(action.Model), i.opts.Params))
+	effort := runtime.Effort(resolveRoutingValue(string(action.Effort), i.opts.Params))
 	runner, ok := resolveRunner(i.opts, rt)
 	if !ok {
 		return TaskResult{}, nil, fmt.Errorf("task %q: runtime %q: %w", t.ID, rt, runtime.ErrUnknownRuntime)
 	}
-	sysPrompt := wf.EffectiveSystemPromptTemplate(t).Render(workflow.RenderContext{
+	sysPrompt := action.SystemPrompt.Render(workflow.RenderContext{
 		Params: i.opts.Params,
 		State:  i.opts.State,
 	})
@@ -149,22 +151,22 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 		i.hooks.OnStart(*t, st.iteration, rt, model, effort)
 	}
 	st.mu.Lock()
-	body := renderPrompt(t, st, i.opts)
+	body := renderTemplate(action.Prompt, st, i.opts)
 	st.mu.Unlock()
 	send := func() (TaskResult, error) {
-		return runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+		return runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
 			r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt, st.workDir)
 			if err != nil {
 				return r, err
 			}
-			return r, evaluateSchemaGate(ctx, t, r.Output, r.ExitCode)
+			return r, evaluateSchemaGate(ctx, t, action.Schema, r.Output, r.ExitCode)
 		})
 	}
 	var (
 		res    TaskResult
 		runErr error
 	)
-	if i.opts.Cache != nil && wf.CacheEnabled(t) {
+	if i.opts.Cache != nil && cacheEnabled(wf, n) {
 		res, runErr = runCached(i.opts.Cache, t, rt, model, effort, sysPrompt, body, send)
 	} else {
 		res, runErr = send()

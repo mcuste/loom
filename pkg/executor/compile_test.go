@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/plan"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -230,6 +231,29 @@ func TestCompileProgramBuildsIndependentNodeDeps(t *testing.T) {
 
 	if got := prog.nodes["b"].deps[0]; got != "a" {
 		t.Fatalf("nodes[b].deps[0] = %q, want %q", got, "a")
+	}
+}
+
+func TestCompileProgramBuildsIndependentNodeAction(t *testing.T) {
+	t.Parallel()
+
+	wf := &workflow.Workflow{
+		Runtime: "exec-echo",
+		Model:   "m1",
+		Tasks: []workflow.Task{
+			{ID: "a", Prompt: "original"},
+		},
+	}
+
+	prog := compileProgram(wf)
+	wf.Tasks[0].Prompt = "mutated"
+
+	action, ok := prog.nodes["a"].action.(plan.AskModel)
+	if !ok {
+		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action)
+	}
+	if got := action.Prompt.String(); got != "original" {
+		t.Fatalf("nodes[a].action.Prompt = %q, want original", got)
 	}
 }
 

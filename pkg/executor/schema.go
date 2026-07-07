@@ -25,19 +25,19 @@ func (e *SchemaError) Error() string {
 	return fmt.Sprintf("task %q: schema validation failed: %s", e.TaskID, e.Reason)
 }
 
-// validateSchema checks that output parses as JSON and conforms to t.Schema.
-// It is a no-op (nil) when the task declares no schema. A mismatch is returned
-// as a *SchemaError carrying t.ID so callers can branch on it via errors.As.
-func validateSchema(t *workflow.Task, output string) error {
-	if t.Schema == nil {
+// validateSchema checks that output parses as JSON and conforms to schema.
+// It is a no-op (nil) when schema is nil. A mismatch is returned as a
+// *SchemaError carrying taskID so callers can branch on it via errors.As.
+func validateSchema(taskID workflow.TaskID, schema *workflow.Schema, output string) error {
+	if schema == nil {
 		return nil
 	}
 	var v any
 	if err := json.Unmarshal([]byte(output), &v); err != nil {
-		return &SchemaError{TaskID: t.ID, Reason: "output is not valid JSON: " + err.Error()}
+		return &SchemaError{TaskID: taskID, Reason: "output is not valid JSON: " + err.Error()}
 	}
-	if reason := checkSchema(t.Schema, v); reason != "" {
-		return &SchemaError{TaskID: t.ID, Reason: reason}
+	if reason := checkSchema(schema, v); reason != "" {
+		return &SchemaError{TaskID: taskID, Reason: reason}
 	}
 	return nil
 }

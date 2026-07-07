@@ -52,10 +52,13 @@ func compileNodesFromPlan(wf *workflow.Workflow, pl *plan.Plan) map[workflow.Tas
 			continue
 		}
 		nodes[t.ID] = &node{
-			id:   t.ID,
-			task: t,
-			deps: workflowOrder(step.Deps),
-			op:   compileOpFromPlan(step.Action, t),
+			id:     t.ID,
+			task:   t,
+			deps:   workflowOrder(step.Deps),
+			when:   step.When,
+			action: step.Action,
+			policy: step.Policy,
+			op:     compileOpFromPlan(step.Action, t),
 		}
 	}
 	return nodes

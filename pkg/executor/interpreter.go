@@ -95,7 +95,7 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 		return err
 	}
 
-	release, skipped, err := i.evaluatePreStepGates(ctx, st, t)
+	release, skipped, err := i.evaluatePreStepGates(ctx, st, n)
 	if err != nil {
 		traceErr = err
 		return err

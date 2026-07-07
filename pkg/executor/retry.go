@@ -26,20 +26,20 @@ const maxBackoffShift = 30
 // resets/refusals/EOF/"temporarily unavailable". Matched case-insensitively.
 var transientRe = regexp.MustCompile(`(?i)(50[0234]\b|\b429\b|rate limit|too many requests|overloaded|timeout|timed out|connection reset|connection refused|\beof\b|temporarily unavailable)`)
 
-// runWithRetry invokes attempt, then retries it up to t.Retry.Max additional
-// times while the returned error is classified as a retryable class in
-// t.Retry.On. Between attempts it sleeps per the backoff schedule using base as
-// the base delay, honoring ctx cancellation during the wait. With retry
-// disabled (or a non-retryable error) it behaves exactly like a single attempt.
-// The returned TaskResult reflects the last attempt.
+// runWithRetry invokes attempt, then retries it up to retry.Max additional
+// times while the returned error is classified as a retryable class in retry.On.
+// Between attempts it sleeps per the backoff schedule using base as the base
+// delay, honoring ctx cancellation during the wait. With retry disabled (or a
+// non-retryable error) it behaves exactly like a single attempt. The returned
+// TaskResult reflects the last attempt.
 //
-// A per-task budget (t.Budget) caps the retries: the cost of each attempt is
-// accumulated, and once the spend strictly exceeds the limit no further retry
-// is attempted. The cap returns a typed *BudgetExceededError (carrying the
-// limit and the spend so far) so callers can distinguish a budget-capped task
-// from one that exhausted its retries via errors.As. Spend landing exactly on
-// the limit still permits the next retry, mirroring the workflow-level rule.
-func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, attempt func() (TaskResult, error)) (TaskResult, error) {
+// A per-task budget caps the retries: the cost of each attempt is accumulated,
+// and once the spend strictly exceeds the limit no further retry is attempted.
+// The cap returns a typed *BudgetExceededError (carrying the limit and the spend
+// so far) so callers can distinguish a budget-capped task from one that
+// exhausted its retries via errors.As. Spend landing exactly on the limit still
+// permits the next retry, mirroring the workflow-level rule.
+func runWithRetry(ctx context.Context, taskID workflow.TaskID, retry workflow.Retry, budget *workflow.Budget, base time.Duration, attempt func() (TaskResult, error)) (TaskResult, error) {
 	var (
 		res      TaskResult
 		err      error
@@ -58,19 +58,22 @@ func runWithRetry(ctx context.Context, t *workflow.Task, base time.Duration, att
 		// is never blocked, but the check lives at the top of the loop so the
 		// structure is symmetric with the workflow-level rule rather than special
 		// casing retries.
-		if t.Budget != nil && spent > t.Budget.MaxCostUSD {
-			return withAttempts(res), &BudgetExceededError{Limit: t.Budget.MaxCostUSD, Spent: spent}
+		if budget != nil && spent > budget.MaxCostUSD {
+			return withAttempts(res), &BudgetExceededError{Limit: budget.MaxCostUSD, Spent: spent}
 		}
 		res, err = attempt()
+		if res.TaskID == "" {
+			res.TaskID = taskID
+		}
 		attempts = append(attempts, attemptRecord(i+1, res, err))
 		spent += res.Usage.TotalCostUSD
-		if err == nil || !t.Retry.Enabled() {
+		if err == nil || !retry.Enabled() {
 			return withAttempts(res), err
 		}
-		if i >= t.Retry.Max || !retryable(t.Retry, err) {
+		if i >= retry.Max || !retryable(retry, err) {
 			return withAttempts(res), err
 		}
-		if waitErr := sleepBackoff(ctx, t.Retry.Backoff, base, i+1); waitErr != nil {
+		if waitErr := sleepBackoff(ctx, retry.Backoff, base, i+1); waitErr != nil {
 			return res, waitErr
 		}
 	}

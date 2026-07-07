@@ -55,6 +55,7 @@ type Policy struct {
 	Retry  workflow.Retry
 	Cache  *bool
 	Budget *workflow.Budget
+	Schema *workflow.Schema
 	OkExit []int
 }
 
@@ -126,27 +127,40 @@ func Compile(wf *workflow.Workflow, opts CompileOptions) (*Plan, error) {
 	if wf == nil {
 		return nil, fmt.Errorf("workflow is nil")
 	}
+	return CompileDefinition(wf.Definition(), opts)
+}
+
+// CompileDefinition builds a Plan from the parsed workflow definition. The
+// compiler consumes the node/action model rather than YAML-shaped task fields,
+// keeping execution planning separate from manifest decoding details.
+func CompileDefinition(def workflow.WorkflowDefinition, _ CompileOptions) (*Plan, error) {
+	tasks, loops, taskByID := definitionNodes(def)
 	root := BlockID("root")
 	pl := &Plan{
 		Root:   root,
 		Blocks: map[BlockID]Block{root: {ID: root}},
-		Steps:  make(map[StepID]Step, len(wf.Tasks)+len(wf.Loops)),
+		Steps:  make(map[StepID]Step, len(tasks)+len(loops)),
 	}
-	for _, id := range wf.Plan() {
+	for _, id := range def.Order {
 		pl.Order = append(pl.Order, StepID(id))
 	}
+	if len(pl.Order) == 0 {
+		for _, task := range tasks {
+			pl.Order = append(pl.Order, StepID(task.ID))
+		}
+	}
 
-	memberOf := loopMembers(wf.Loops)
-	for i := range wf.Tasks {
-		step, err := compileTask(wf, &wf.Tasks[i])
+	memberOf := loopMembers(loops)
+	for _, task := range tasks {
+		step, err := compileTask(def, task)
 		if err != nil {
 			return nil, err
 		}
 		pl.Steps[step.ID] = step
 	}
 	rootBlock := pl.Blocks[root]
-	for i := range wf.Loops {
-		lg := wf.Loops[i]
+	for _, loop := range loops {
+		lg := loop.Spec
 		bodyID := BlockID(lg.ID)
 		body := Block{ID: bodyID, Steps: stepIDs(lg.Members)}
 		pl.Blocks[bodyID] = body
@@ -154,7 +168,7 @@ func Compile(wf *workflow.Workflow, opts CompileOptions) (*Plan, error) {
 		step := Step{
 			ID:     StepID(lg.ID),
 			Name:   workflow.TaskID(lg.ID),
-			Deps:   loopEntryDeps(wf, lg),
+			Deps:   loopEntryDeps(taskByID, lg),
 			Action: loopAction(lg, bodyID),
 		}
 		pl.Steps[step.ID] = step
@@ -170,37 +184,61 @@ func Compile(wf *workflow.Workflow, opts CompileOptions) (*Plan, error) {
 	return pl, nil
 }
 
-func compileTask(wf *workflow.Workflow, t *workflow.Task) (Step, error) {
-	action, err := compileAction(wf, t)
+func definitionNodes(def workflow.WorkflowDefinition) ([]workflow.TaskNode, []workflow.LoopNode, map[workflow.TaskID]workflow.TaskNode) {
+	var tasks []workflow.TaskNode
+	var loops []workflow.LoopNode
+	taskByID := make(map[workflow.TaskID]workflow.TaskNode)
+	addTask := func(task workflow.TaskNode) {
+		tasks = append(tasks, task)
+		taskByID[task.ID] = task
+	}
+	for _, node := range def.Nodes {
+		switch n := node.(type) {
+		case workflow.TaskNode:
+			addTask(n)
+		case workflow.LoopNode:
+			loops = append(loops, n)
+			for _, task := range n.Body.Nodes {
+				addTask(task)
+			}
+		}
+	}
+	return tasks, loops, taskByID
+}
+
+func compileTask(def workflow.WorkflowDefinition, t workflow.TaskNode) (Step, error) {
+	action, err := compileAction(def, t)
 	if err != nil {
 		return Step{}, err
 	}
 	return Step{
 		ID:     StepID(t.ID),
 		Name:   t.ID,
-		Deps:   stepIDs(t.DependsOn),
-		When:   t.Cond,
+		Deps:   nodeStepIDs(t.DependsOn),
+		When:   t.Condition,
 		Action: action,
 		Policy: Policy{
-			Retry:  t.Retry,
-			Cache:  t.Cache,
-			Budget: t.Budget,
-			OkExit: append([]int(nil), t.OkExit...),
+			Retry:  t.Policies.Retry,
+			Cache:  t.Policies.Cache,
+			Budget: t.Policies.Budget,
+			Schema: t.Policies.Schema,
+			OkExit: append([]int(nil), t.Policies.OkExit...),
 		},
 	}, nil
 }
 
-func compileAction(wf *workflow.Workflow, t *workflow.Task) (Action, error) {
-	switch action := t.Action().(type) {
+func compileAction(def workflow.WorkflowDefinition, t workflow.TaskNode) (Action, error) {
+	switch action := t.Action.(type) {
 	case workflow.PromptAction:
-		rt, model, effort := wf.Effective(t)
+		rt, model, effort := effectiveRuntime(def.Defaults, t.Runtime)
+		systemPrompt := effectiveSystemPrompt(def.Defaults.SystemPrompt, t.SystemPrompt)
 		return AskModel{
 			Prompt:       action.Prompt,
-			SystemPrompt: wf.EffectiveSystemPromptTemplate(t),
+			SystemPrompt: systemPrompt,
 			Runtime:      rt,
 			Model:        model,
 			Effort:       effort,
-			Schema:       t.Schema,
+			Schema:       t.Policies.Schema,
 		}, nil
 	case workflow.CommandAction:
 		return RunCommand{Command: action.Command}, nil
@@ -215,6 +253,29 @@ func compileAction(wf *workflow.Workflow, t *workflow.Task) (Action, error) {
 	default:
 		return InvalidAction{}, nil
 	}
+}
+
+func effectiveRuntime(defaults workflow.WorkflowDefaults, rt workflow.RuntimeSelector) (runtime.Name, runtime.Model, runtime.Effort) {
+	r := rt.Runtime
+	if r == "" {
+		r = defaults.Runtime
+	}
+	m := rt.Model
+	if m == "" {
+		m = defaults.Model
+	}
+	e := rt.Effort
+	if e == "" {
+		e = defaults.Effort
+	}
+	return r, m, e
+}
+
+func effectiveSystemPrompt(defaultPrompt, taskPrompt workflow.Template) workflow.Template {
+	if taskPrompt.String() != "" {
+		return taskPrompt
+	}
+	return defaultPrompt
 }
 
 func loopAction(lg workflow.LoopGroup, body BlockID) Action {
@@ -236,17 +297,25 @@ func stepIDs(ids []workflow.TaskID) []StepID {
 	return out
 }
 
-func loopMembers(loops []workflow.LoopGroup) map[workflow.TaskID]struct{} {
+func nodeStepIDs(ids []workflow.NodeID) []StepID {
+	out := make([]StepID, len(ids))
+	for i, id := range ids {
+		out[i] = StepID(id)
+	}
+	return out
+}
+
+func loopMembers(loops []workflow.LoopNode) map[workflow.TaskID]struct{} {
 	out := make(map[workflow.TaskID]struct{})
 	for _, loop := range loops {
-		for _, member := range loop.Members {
+		for _, member := range loop.Spec.Members {
 			out[member] = struct{}{}
 		}
 	}
 	return out
 }
 
-func loopEntryDeps(wf *workflow.Workflow, lg workflow.LoopGroup) []StepID {
+func loopEntryDeps(tasks map[workflow.TaskID]workflow.TaskNode, lg workflow.LoopGroup) []StepID {
 	memberSet := make(map[workflow.TaskID]bool, len(lg.Members))
 	for _, member := range lg.Members {
 		memberSet[member] = true
@@ -261,9 +330,9 @@ func loopEntryDeps(wf *workflow.Workflow, lg workflow.LoopGroup) []StepID {
 		deps = append(deps, id)
 	}
 	for _, member := range lg.Members {
-		if task := wf.ByID(member); task != nil {
+		if task, ok := tasks[member]; ok {
 			for _, dep := range task.DependsOn {
-				add(dep)
+				add(workflow.TaskID(dep))
 			}
 		}
 	}

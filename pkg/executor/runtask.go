@@ -131,12 +131,12 @@ func (st *frame) waitDeps(ctx context.Context, deps []workflow.TaskID) error {
 	return nil
 }
 
-// evalWhen evaluates t's compiled `when:` guard against a snapshot of the
-// current outputs/succeeded/skipped state and reports whether the task should
-// run. The caller guarantees t.Cond != nil; Cond was compiled at load time.
-func (st *frame) evalWhen(t *workflow.Task) (bool, error) {
+// evalWhen evaluates a compiled `when:` guard against a snapshot of the current
+// outputs/succeeded/skipped state and reports whether the task should run. The
+// caller guarantees cond != nil; Cond was compiled at load time.
+func (st *frame) evalWhen(_ workflow.TaskID, cond *workflow.Condition) (bool, error) {
 	env := st.scope.envSnapshot(st.mu)
-	return t.Cond.Eval(env)
+	return cond.Eval(env)
 }
 
 // admitBudget delegates to the run's [budgetGate], passing a closure that

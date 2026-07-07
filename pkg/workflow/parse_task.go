@@ -8,11 +8,65 @@ import (
 	"github.com/mcuste/loom/pkg/syntax"
 )
 
-// loopTask pairs a syntax draft task with the id of its owning loop. The loop
-// field is "" for top-level (non-loop-member) tasks.
-type loopTask struct {
-	rt   syntax.DraftTask
-	loop LoopID
+// taskDecl is the semantic task declaration lowered from syntax.DraftTask. It
+// keeps YAML decoding details at the parser boundary while later task-building
+// code works with validated identifiers and workflow-owned field types.
+type taskDecl struct {
+	id               TaskID
+	loop             LoopID
+	description      string
+	runtime          runtime.Name
+	model            runtime.Model
+	effort           runtime.Effort
+	prompt           string
+	command          string
+	systemPrompt     string
+	systemPromptFile string
+	workflow         string
+	script           string
+	args             []string
+	okExit           []int
+	promptFile       string
+	dependsOn        []string
+	writesState      string
+	when             string
+	retry            syntax.Value
+	budget           syntax.Value
+	schema           syntax.Value
+	cache            *bool
+	with             syntax.Value
+}
+
+func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
+	id, err := NewTaskID(rt.ID)
+	if err != nil {
+		return taskDecl{}, err
+	}
+	return taskDecl{
+		id:               id,
+		loop:             loop,
+		description:      rt.Description,
+		runtime:          runtime.Name(rt.Runtime),
+		model:            runtime.Model(rt.Model),
+		effort:           runtime.Effort(rt.Effort),
+		prompt:           rt.Prompt,
+		command:          rt.Command,
+		systemPrompt:     rt.SystemPrompt,
+		systemPromptFile: rt.SystemPromptFile,
+		workflow:         rt.Workflow,
+		script:           rt.Script,
+		args:             append([]string(nil), rt.Args...),
+		okExit:           append([]int(nil), rt.OkExit...),
+		promptFile:       rt.PromptFile,
+		dependsOn:        append([]string(nil), rt.DependsOn...),
+		writesState:      rt.WritesState,
+		when:             rt.When,
+		retry:            rt.Retry,
+		budget:           rt.Budget,
+		schema:           rt.Schema,
+		cache:            rt.Cache,
+		with:             rt.With,
+	}, nil
 }
 
 // parseState bundles the mutable state threaded through the per-task build
@@ -35,13 +89,11 @@ type taskMeta struct {
 	budget *Budget
 }
 
-// buildTask constructs one Task from a syntax draft task (paired with its owning
-// loop id, "" for top-level tasks) and appends it to st.wf. It performs all
-// per-task validation: body-form checks, dependency graph edges, placeholder
-// validation, schema, when-expression, etc.
-func buildTask(st *parseState, lt loopTask) error {
-	rt := lt.rt
-	tid := TaskID(rt.ID)
+// buildTask constructs one Task from a lowered task declaration and appends it
+// to st.wf. It performs all per-task validation: body-form checks, dependency
+// graph edges, placeholder validation, schema, when-expression, etc.
+func buildTask(st *parseState, rt taskDecl) error {
+	tid := rt.id
 	wf := st.wf
 
 	// Exactly one body form. loop/for_each wrappers were split out above, so
@@ -55,11 +107,11 @@ func buildTask(st *parseState, lt loopTask) error {
 		return fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
 	}
 	// with: is only meaningful alongside workflow:.
-	if rt.With.Present() && rt.Workflow == "" {
+	if rt.with.Present() && rt.workflow == "" {
 		return fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
 	}
 	// args: is only meaningful alongside script:.
-	if len(rt.Args) > 0 && rt.Script == "" {
+	if len(rt.args) > 0 && rt.script == "" {
 		return fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
 	}
 	if err := validateOkExit(tid, rt); err != nil {
@@ -70,50 +122,50 @@ func buildTask(st *parseState, lt loopTask) error {
 	if err != nil {
 		return err
 	}
-	meta, err := buildTaskMeta(st, lt.loop, tid, rt, body, withArgs)
+	meta, err := buildTaskMeta(st, rt.loop, tid, rt, body, withArgs)
 	if err != nil {
 		return err
 	}
-	loopVar := st.asByLoop[lt.loop]
-	action := taskActionFromDraft(rt, withArgs, loopVar)
+	loopVar := st.asByLoop[rt.loop]
+	action := taskActionFromDecl(rt, withArgs, loopVar)
 	wf.byID[tid] = len(wf.Tasks)
 	wf.Tasks = append(wf.Tasks, Task{
 		ID:                   tid,
-		Prompt:               rt.Prompt,
-		Command:              rt.Command,
-		Description:          rt.Description,
-		Runtime:              runtime.Name(rt.Runtime),
-		Model:                runtime.Model(rt.Model),
-		Effort:               runtime.Effort(rt.Effort),
-		SystemPrompt:         rt.SystemPrompt,
-		systemPromptTemplate: ParseTemplate(rt.SystemPrompt),
+		Prompt:               rt.prompt,
+		Command:              rt.command,
+		Description:          rt.description,
+		Runtime:              rt.runtime,
+		Model:                rt.model,
+		Effort:               rt.effort,
+		SystemPrompt:         rt.systemPrompt,
+		systemPromptTemplate: ParseTemplate(rt.systemPrompt),
 		DependsOn:            meta.deps,
-		When:                 rt.When,
+		When:                 rt.when,
 		Cond:                 meta.cond,
 		Retry:                meta.retry,
-		WritesState:          rt.WritesState,
+		WritesState:          rt.writesState,
 		Budget:               meta.budget,
 		Schema:               meta.schema,
-		Cache:                rt.Cache,
-		Loop:                 lt.loop,
-		Workflow:             rt.Workflow,
+		Cache:                rt.cache,
+		Loop:                 rt.loop,
+		Workflow:             rt.workflow,
 		With:                 withArgs,
-		Script:               rt.Script,
-		Args:                 rt.Args,
-		OkExit:               rt.OkExit,
+		Script:               rt.script,
+		Args:                 rt.args,
+		OkExit:               rt.okExit,
 		action:               action,
 	})
 	return nil
 }
 
-func validateOkExit(tid TaskID, rt syntax.DraftTask) error {
-	if len(rt.OkExit) == 0 {
+func validateOkExit(tid TaskID, rt taskDecl) error {
+	if len(rt.okExit) == 0 {
 		return nil
 	}
-	if rt.Workflow != "" {
+	if rt.workflow != "" {
 		return fmt.Errorf("task %q: %w", tid, ErrOkExitOnSubWorkflow)
 	}
-	for _, code := range rt.OkExit {
+	for _, code := range rt.okExit {
 		if code < 0 || code > 255 {
 			return fmt.Errorf("task %q: %w: %d", tid, ErrOkExitOutOfRange, code)
 		}
@@ -123,32 +175,32 @@ func validateOkExit(tid TaskID, rt syntax.DraftTask) error {
 
 // normalizeTaskBody picks the single body text placeholder validation runs
 // against and decodes any sub-workflow with: arguments.
-func normalizeTaskBody(tid TaskID, rt syntax.DraftTask) (string, []WithArg, error) {
+func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 	// body is the text that placeholder validation runs against;
 	// substitution targets the same string at execution time. A sub-workflow
 	// task has no prompt body: its placeholder-derived deps come from scanning
 	// its with-values instead.
-	body := rt.Prompt
+	body := rt.prompt
 	var withArgs []WithArg
 	switch {
-	case rt.Command != "":
-		body = rt.Command
-		if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+	case rt.command != "":
+		body = rt.command
+		if rt.runtime != "" || rt.model != "" || rt.effort != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
 		}
-		if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+		if rt.systemPrompt != "" || rt.systemPromptFile != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSystemPrompt)
 		}
-	case rt.Workflow != "":
+	case rt.workflow != "":
 		// runtime/model/effort on a sub-workflow task are not rejected: they
 		// override the linked child's workflow-level defaults at link time (see
 		// linkSubWorkflows), so a parent can run a shared child cheaper without
 		// forking it. system_prompt stays rejected: the child's tasks carry their
 		// own, and there is no single task here for one to apply to.
-		if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+		if rt.systemPrompt != "" || rt.systemPromptFile != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithSystemPrompt)
 		}
-		wa, err := decodeWith(tid, rt.With)
+		wa, err := decodeWith(tid, rt.with)
 		if err != nil {
 			return "", nil, err
 		}
@@ -161,23 +213,23 @@ func normalizeTaskBody(tid TaskID, rt syntax.DraftTask) (string, []WithArg, erro
 			sb.WriteByte('\n')
 		}
 		body = sb.String()
-	case rt.Script != "":
-		if rt.Runtime != "" || rt.Model != "" || rt.Effort != "" {
+	case rt.script != "":
+		if rt.runtime != "" || rt.model != "" || rt.effort != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithRuntime)
 		}
-		if rt.SystemPrompt != "" || rt.SystemPromptFile != "" {
+		if rt.systemPrompt != "" || rt.systemPromptFile != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSystemPrompt)
 		}
 		// The script path and its argv carry placeholders, so scan all of them:
 		// each {{id}} / {{id.exit}} ref must resolve to a dependency.
 		var sb strings.Builder
-		sb.WriteString(rt.Script)
-		for _, a := range rt.Args {
+		sb.WriteString(rt.script)
+		for _, a := range rt.args {
 			sb.WriteByte('\n')
 			sb.WriteString(a)
 		}
 		body = sb.String()
-	case rt.PromptFile != "":
+	case rt.promptFile != "":
 		// A prompt_file must be inlined by InlinePromptFiles before Parse; one
 		// reaching here was not, so there is no body to build a task from.
 		return "", nil, fmt.Errorf("task %q: prompt_file must be inlined before parsing", tid)
@@ -185,32 +237,32 @@ func normalizeTaskBody(tid TaskID, rt syntax.DraftTask) (string, []WithArg, erro
 	return body, withArgs, nil
 }
 
-func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt syntax.DraftTask, body string, withArgs []WithArg) (taskMeta, error) {
-	schema, err := parseSchema(rt.Schema)
+func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body string, withArgs []WithArg) (taskMeta, error) {
+	schema, err := parseSchema(rt.schema)
 	if err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
-	if schema != nil && rt.Command != "" {
+	if schema != nil && rt.command != "" {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
 	}
-	if schema != nil && rt.Script != "" {
+	if schema != nil && rt.script != "" {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSchema)
 	}
-	if err := validateRoutingField(tid, "runtime", rt.Runtime, st.paramSet); err != nil {
+	if err := validateRoutingField(tid, "runtime", string(rt.runtime), st.paramSet); err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
-	if err := validateRoutingField(tid, "model", rt.Model, st.paramSet); err != nil {
+	if err := validateRoutingField(tid, "model", string(rt.model), st.paramSet); err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
-	if err := validateRoutingField(tid, "effort", rt.Effort, st.paramSet); err != nil {
+	if err := validateRoutingField(tid, "effort", string(rt.effort), st.paramSet); err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
 	dc := depsCtx{tid: tid, known: st.ids, params: st.paramSet, loopVar: st.asByLoop[loop]}
 	var deps []TaskID
-	if rt.Workflow != "" {
-		deps, err = buildSubWorkflowDeps(dc, rt.DependsOn, withArgs)
+	if rt.workflow != "" {
+		deps, err = buildSubWorkflowDeps(dc, rt.dependsOn, withArgs)
 	} else {
-		deps, err = buildDeps(dc, rt.DependsOn, body)
+		deps, err = buildDeps(dc, rt.dependsOn, body)
 	}
 	if err != nil {
 		return taskMeta{}, err
@@ -221,24 +273,24 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt syntax.DraftTask,
 	// A task-level system_prompt_file must be inlined by InlinePromptFiles
 	// before Parse, mirroring prompt_file; one reaching here was not, so reject
 	// it rather than silently dropping the file-backed override.
-	if rt.SystemPromptFile != "" {
+	if rt.systemPromptFile != "" {
 		return taskMeta{}, fmt.Errorf("task %q: system_prompt_file must be inlined before parsing", tid)
 	}
 	// A task-level system prompt is validated exactly like the workflow-level
 	// one: declared param placeholders only, no task-id placeholders. Shell and
 	// sub-workflow tasks were already rejected above, so rt.SystemPrompt here
 	// belongs to an LLM task.
-	if err := validateSystemPrompt(rt.SystemPrompt, st.paramSet); err != nil {
+	if err := validateSystemPrompt(rt.systemPrompt, st.paramSet); err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
-	retry, err := parseRetry(tid, rt.Retry)
+	retry, err := parseRetry(tid, rt.retry)
 	if err != nil {
 		return taskMeta{}, err
 	}
-	if rt.WritesState != "" && !identifierRe.MatchString(rt.WritesState) {
-		return taskMeta{}, &InvalidWritesStateError{Task: tid, Key: rt.WritesState}
+	if rt.writesState != "" && !identifierRe.MatchString(rt.writesState) {
+		return taskMeta{}, &InvalidWritesStateError{Task: tid, Key: rt.writesState}
 	}
-	taskBudget, err := parseBudget(rt.Budget)
+	taskBudget, err := parseBudget(rt.budget)
 	if err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
@@ -248,12 +300,12 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt syntax.DraftTask,
 	// not been written yet. Bounding ParseCondition by depSet rejects those
 	// at load time.
 	var cond *Condition
-	if rt.When != "" {
+	if rt.when != "" {
 		depSet := make(map[TaskID]bool, len(deps))
 		for _, d := range deps {
 			depSet[d] = true
 		}
-		cond, err = ParseCondition(rt.When, depSet)
+		cond, err = ParseCondition(rt.when, depSet)
 		if err != nil {
 			return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 		}

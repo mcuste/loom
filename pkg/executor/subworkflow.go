@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mcuste/loom/pkg/plan"
 	"github.com/mcuste/loom/pkg/runtime"
-	"github.com/mcuste/loom/pkg/workflow"
 	"github.com/mcuste/loom/pkg/workflowcheck"
 )
 
@@ -14,17 +14,21 @@ import (
 // executing that child via the public Run path.
 func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := n.task
+	action, ok := n.action.(plan.CallWorkflow)
+	if !ok {
+		return TaskResult{}, nil, invalidActionError(n, "sub-workflow call")
+	}
 	child := i.program.wf.Subs[t.ID]
 	if child == nil {
-		return TaskResult{}, nil, fmt.Errorf("task %q: sub-workflow %q not linked", t.ID, t.Workflow)
+		return TaskResult{}, nil, fmt.Errorf("task %q: sub-workflow %q not linked", t.ID, action.Ref)
 	}
 	if i.hooks.OnStart != nil {
 		i.hooks.OnStart(*t, st.iteration, "", "", "")
 	}
 	st.mu.Lock()
-	vals := renderWorkflowArgs(t, st, i.opts)
+	vals := renderWorkflowArgs(action, st, i.opts)
 	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t, baseDelay, func() (TaskResult, error) {
+	res, runErr := runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
 		start := time.Now()
 		cp, err := workflowcheck.ResolveAndValidateParams(child, vals, nil, catalogValidator(i.opts))
 		if err != nil {
@@ -50,27 +54,15 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 		// One parent row, child result + SUMMED child usage; schema (if any)
 		// validates the child result uniformly with the LLM branch.
 		r := TaskResult{TaskID: t.ID, Output: out, Usage: childRep.Usage, Elapsed: time.Since(start)}
-		return r, evaluateSchemaGate(ctx, t, out, r.ExitCode)
+		return r, evaluateSchemaGate(ctx, t, n.policy.Schema, out, r.ExitCode)
 	})
 	return res, runErr, nil
 }
 
-func renderWorkflowArgs(t *workflow.Task, st *frame, opts Options) map[string]string {
-	if action, ok := t.ParsedAction(); ok {
-		wfAction, ok := action.(workflow.SubWorkflowAction)
-		if !ok {
-			return nil
-		}
-		vals := make(map[string]string, len(wfAction.WithTemplates))
-		for _, arg := range wfAction.WithTemplates {
-			vals[string(arg.Name)] = renderTemplate(arg.Value, st, opts)
-		}
-		return vals
-	}
-
-	vals := make(map[string]string, len(t.With))
-	for _, arg := range t.With {
-		vals[string(arg.Name)] = workflow.Substitute(bindLoopVar(arg.Value, st), st.scope.outputs, opts.Params, opts.State, st.prev, st.scope.exitCodes)
+func renderWorkflowArgs(action plan.CallWorkflow, st *frame, opts Options) map[string]string {
+	vals := make(map[string]string, len(action.WithTemplates))
+	for _, arg := range action.WithTemplates {
+		vals[string(arg.Name)] = renderTemplate(arg.Value, st, opts)
 	}
 	return vals
 }

@@ -21,9 +21,11 @@ type Gate interface {
 type GateContext struct {
 	Workflow  *workflow.Workflow
 	Task      *workflow.Task
+	Condition *workflow.Condition
 	Iteration int
 	Output    string
 	ExitCode  int
+	Schema    *workflow.Schema
 
 	state *frame
 }
@@ -44,7 +46,7 @@ type budgetPolicyGate struct{}
 type schemaGate struct{}
 
 func (whenConditionGate) Evaluate(_ context.Context, gc GateContext) GateDecision {
-	run, err := gc.state.evalWhen(gc.Task)
+	run, err := gc.state.evalWhen(gc.Task.ID, gc.Condition)
 	if err != nil {
 		return GateDecision{Err: fmt.Errorf("task %q: when: %w", gc.Task.ID, err)}
 	}
@@ -63,18 +65,18 @@ func (budgetPolicyGate) Evaluate(ctx context.Context, gc GateContext) GateDecisi
 }
 
 func (schemaGate) Evaluate(_ context.Context, gc GateContext) GateDecision {
-	if gc.Task.Schema == nil || gc.ExitCode != 0 {
+	if gc.Schema == nil || gc.ExitCode != 0 {
 		return GateDecision{Allowed: true}
 	}
-	if err := validateSchema(gc.Task, gc.Output); err != nil {
+	if err := validateSchema(gc.Task.ID, gc.Schema, gc.Output); err != nil {
 		return GateDecision{Err: err}
 	}
 	return GateDecision{Allowed: true}
 }
 
-func (i *interpreter) preStepGates(t *workflow.Task) []Gate {
+func (i *interpreter) preStepGates(n *node) []Gate {
 	gates := make([]Gate, 0, 2)
-	if t.Cond != nil {
+	if n.when != nil {
 		gates = append(gates, whenConditionGate{})
 	}
 	if i.program.wf.Budget != nil {
@@ -83,22 +85,23 @@ func (i *interpreter) preStepGates(t *workflow.Task) []Gate {
 	return gates
 }
 
-func evaluateSchemaGate(ctx context.Context, t *workflow.Task, output string, exitCode int) error {
-	decision := schemaGate{}.Evaluate(ctx, GateContext{Task: t, Output: output, ExitCode: exitCode})
+func evaluateSchemaGate(ctx context.Context, t *workflow.Task, schema *workflow.Schema, output string, exitCode int) error {
+	decision := schemaGate{}.Evaluate(ctx, GateContext{Task: t, Schema: schema, Output: output, ExitCode: exitCode})
 	return decision.Err
 }
 
-func (i *interpreter) evaluatePreStepGates(ctx context.Context, st *frame, t *workflow.Task) (release func(), skipped bool, err error) {
+func (i *interpreter) evaluatePreStepGates(ctx context.Context, st *frame, n *node) (release func(), skipped bool, err error) {
 	var releases []func()
 	cleanup := func() {
 		for j := len(releases) - 1; j >= 0; j-- {
 			releases[j]()
 		}
 	}
-	for _, gate := range i.preStepGates(t) {
+	for _, gate := range i.preStepGates(n) {
 		decision := gate.Evaluate(ctx, GateContext{
 			Workflow:  i.program.wf,
-			Task:      t,
+			Task:      n.task,
+			Condition: n.when,
 			Iteration: st.iteration,
 			state:     st,
 		})

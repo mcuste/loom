@@ -85,6 +85,7 @@ type WorkflowDefinition struct {
 	Defaults    WorkflowDefaults
 	Params      []Param
 	Nodes       []WorkflowNode
+	Order       []TaskID
 	Output      OutputSelector
 	Policies    WorkflowPolicies
 }
@@ -102,6 +103,10 @@ func (w *Workflow) Definition() WorkflowDefinition {
 	if w == nil {
 		return WorkflowDefinition{}
 	}
+	defaultSystemPrompt := w.systemPromptTemplate
+	if !defaultSystemPrompt.parsed {
+		defaultSystemPrompt = ParseTemplate(w.SystemPrompt)
+	}
 	def := WorkflowDefinition{
 		ID:          w.ID,
 		Description: w.Description,
@@ -109,11 +114,12 @@ func (w *Workflow) Definition() WorkflowDefinition {
 			Runtime:      w.Runtime,
 			Model:        w.Model,
 			Effort:       w.Effort,
-			SystemPrompt: w.systemPromptTemplate,
+			SystemPrompt: defaultSystemPrompt,
 			WorkingDir:   w.WorkingDir,
 			Cache:        w.Cache,
 		},
 		Params: append([]Param(nil), w.Params...),
+		Order:  append([]TaskID(nil), w.Plan()...),
 		Output: OutputSelector{Task: w.Output},
 		Policies: WorkflowPolicies{
 			Budget: w.Budget,
@@ -129,7 +135,7 @@ func (w *Workflow) Definition() WorkflowDefinition {
 	}
 	for i := range w.Tasks {
 		t := &w.Tasks[i]
-		if t.Loop != "" {
+		if _, loopMember := memberLoop[t.ID]; loopMember {
 			continue
 		}
 		def.Nodes = append(def.Nodes, nodeFromTask(t))
@@ -148,6 +154,10 @@ func (w *Workflow) Definition() WorkflowDefinition {
 }
 
 func nodeFromTask(t *Task) TaskNode {
+	systemPrompt := t.systemPromptTemplate
+	if !systemPrompt.parsed {
+		systemPrompt = ParseTemplate(t.SystemPrompt)
+	}
 	return TaskNode{
 		ID:          t.ID,
 		Description: t.Description,
@@ -168,7 +178,7 @@ func nodeFromTask(t *Task) TaskNode {
 		},
 		WritesState:  t.WritesState,
 		Loop:         t.Loop,
-		SystemPrompt: t.systemPromptTemplate,
+		SystemPrompt: systemPrompt,
 	}
 }
 

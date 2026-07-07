@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 
+	"github.com/mcuste/loom/pkg/plan"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
@@ -17,13 +18,18 @@ type program struct {
 	memberOf map[workflow.TaskID]int
 }
 
-// node is one compiled task plus the metadata the interpreter will eventually
-// own directly, rather than re-reading from workflow.Workflow on every eval.
+// node is one compiled task plus its interpreter-ready action and policy.
+// The task pointer remains for stable hook/report payloads, but executable
+// behavior is read from action instead of re-derived from YAML-shaped task
+// fields at evaluation time.
 type node struct {
-	id   workflow.TaskID
-	task *workflow.Task
-	deps []workflow.TaskID
-	op   op
+	id     workflow.TaskID
+	task   *workflow.Task
+	deps   []workflow.TaskID
+	when   *workflow.Condition
+	action plan.Action
+	policy plan.Policy
+	op     op
 }
 
 // unit is one schedulable top-level item in a compiled program. Loop members
