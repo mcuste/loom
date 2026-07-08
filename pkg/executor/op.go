@@ -27,21 +27,6 @@ type subWorkflowOp struct{}
 
 type invalidOp struct{}
 
-func compileOp(t *workflow.Task) op {
-	switch t.BodyKind() {
-	case workflow.BodyPrompt:
-		return promptOp{}
-	case workflow.BodyShell:
-		return shellOp{}
-	case workflow.BodyScript:
-		return scriptOp{}
-	case workflow.BodySubWorkflow:
-		return subWorkflowOp{}
-	default:
-		return invalidOp{}
-	}
-}
-
 func renderTemplate(tpl workflow.Template, st *frame, opts Options) string {
 	loopVars := map[string]string(nil)
 	if st.loopVar != "" {
@@ -92,7 +77,7 @@ func cacheEnabled(wf *workflow.Workflow, n *node) bool {
 }
 
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := n.task
+	t := &n.task
 	action, ok := n.action.(plan.RunCommand)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "shell command")
@@ -111,7 +96,7 @@ func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, bas
 }
 
 func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := n.task
+	t := &n.task
 	action, ok := n.action.(plan.RunScript)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "script")
@@ -130,7 +115,7 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 }
 
 func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := n.task
+	t := &n.task
 	wf := i.program.wf
 	action, ok := n.action.(plan.AskModel)
 	if !ok {
@@ -175,5 +160,5 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 }
 
 func (invalidOp) eval(_ context.Context, _ *interpreter, _ *frame, n *node, _ time.Duration) (TaskResult, error, error) {
-	return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", n.task.ID)
+	return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", n.id)
 }

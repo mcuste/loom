@@ -59,12 +59,11 @@ func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
 	}, nil
 }
 
-// parseState bundles the mutable state threaded through the per-task build
-// loop: the workflow being assembled, the global task-id set used for
-// dependency and placeholder validation, the param name set, and the per-loop
-// metadata derived from the decoded loop declarations.
+// parseState bundles the immutable scope threaded through per-task lowering:
+// the global task-id set used for dependency and placeholder validation, the
+// param name set, and the per-loop metadata derived from the decoded loop
+// declarations.
 type parseState struct {
-	wf       *Workflow
 	ids      map[TaskID]struct{}
 	paramSet map[ParamName]struct{}
 	asByLoop map[LoopID]string
@@ -78,12 +77,13 @@ type taskMeta struct {
 	budget *Budget
 }
 
-// buildTask constructs one Task from a lowered task declaration and appends it
-// to st.wf. It performs all per-task validation: body-form checks, dependency
-// graph edges, placeholder validation, schema, when-expression, etc.
-func buildTask(st *parseState, rt taskDecl) error {
+// buildTaskNode lowers one task declaration into the semantic node model. It
+// performs all per-task validation: body-form checks, dependency graph edges,
+// placeholder validation, schema, when-expression, and executable action
+// construction. Legacy Task values are materialized later from the completed
+// WorkflowDefinition.
+func buildTaskNode(st *parseState, rt taskDecl) (TaskNode, error) {
 	tid := rt.id
-	wf := st.wf
 
 	// Exactly one body form. loop/for_each wrappers were split out above, so
 	// the only forms that can appear here are prompt, prompt_file, command,
@@ -91,60 +91,54 @@ func buildTask(st *parseState, rt taskDecl) error {
 	presentForms := detectBodyForms(rt)
 	switch {
 	case len(presentForms) > 1:
-		return &TaskBodyConflictError{Task: tid, Fields: presentForms}
+		return TaskNode{}, &TaskBodyConflictError{Task: tid, Fields: presentForms}
 	case len(presentForms) == 0:
-		return fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
+		return TaskNode{}, fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
 	}
 	// with: is only meaningful alongside workflow:.
 	if rt.body.hasWith() && !rt.body.isSubWorkflow() {
-		return fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
+		return TaskNode{}, fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
 	}
 	// args: is only meaningful alongside script:.
 	if rt.body.hasArgs() && !rt.body.isScript() {
-		return fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
+		return TaskNode{}, fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
 	}
 	if err := validateOkExit(tid, rt); err != nil {
-		return err
+		return TaskNode{}, err
 	}
 
 	body, withArgs, err := normalizeTaskBody(tid, rt)
 	if err != nil {
-		return err
+		return TaskNode{}, err
 	}
 	meta, err := buildTaskMeta(st, rt.loop, tid, rt, body, withArgs)
 	if err != nil {
-		return err
+		return TaskNode{}, err
 	}
 	loopVar := st.asByLoop[rt.loop]
-	action := taskActionFromDecl(rt, withArgs, loopVar)
-	wf.byID[tid] = len(wf.Tasks)
-	wf.Tasks = append(wf.Tasks, Task{
-		ID:                   tid,
-		Prompt:               rt.body.prompt,
-		Command:              rt.body.command,
-		Description:          rt.description,
-		Runtime:              rt.runtime,
-		Model:                rt.model,
-		Effort:               rt.effort,
-		SystemPrompt:         rt.systemPrompt,
-		systemPromptTemplate: ParseTemplate(rt.systemPrompt),
-		DependsOn:            meta.deps,
-		When:                 rt.when,
-		Cond:                 meta.cond,
-		Retry:                meta.retry,
-		WritesState:          rt.writesState,
-		Budget:               meta.budget,
-		Schema:               meta.schema,
-		Cache:                rt.cache,
-		Loop:                 rt.loop,
-		Workflow:             rt.body.workflow,
-		With:                 withArgs,
-		Script:               rt.body.script,
-		Args:                 rt.body.args,
-		OkExit:               rt.okExit,
-		action:               action,
-	})
-	return nil
+	return TaskNode{
+		ID:          tid,
+		Description: rt.description,
+		DependsOn:   nodeIDs(meta.deps),
+		Action:      taskActionFromDecl(rt, withArgs, loopVar),
+		Condition:   meta.cond,
+		When:        rt.when,
+		Runtime: RuntimeSelector{
+			Runtime: rt.runtime,
+			Model:   rt.model,
+			Effort:  rt.effort,
+		},
+		Policies: TaskPolicies{
+			Retry:  meta.retry,
+			Budget: meta.budget,
+			Cache:  rt.cache,
+			Schema: meta.schema,
+			OkExit: append([]int(nil), rt.okExit...),
+		},
+		WritesState:  rt.writesState,
+		Loop:         rt.loop,
+		SystemPrompt: ParseTemplate(rt.systemPrompt),
+	}, nil
 }
 
 func validateOkExit(tid TaskID, rt taskDecl) error {

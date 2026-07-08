@@ -16,11 +16,12 @@ func compileProgram(wf *workflow.Workflow) *program {
 }
 
 func compileProgramFromPlan(wf *workflow.Workflow, pl *plan.Plan) *program {
-	loops := compileLoops(wf)
+	def := wf.Definition()
+	loops := compileLoopsFromPlan(pl)
 	p := &program{
 		wf:       wf,
 		order:    workflowOrder(pl.Order),
-		nodes:    compileNodesFromPlan(wf, pl),
+		nodes:    compileNodesFromDefinition(def, pl),
 		loops:    loops,
 		memberOf: buildMemberOf(loops),
 	}
@@ -36,19 +37,12 @@ func workflowOrder(order []plan.StepID) []workflow.TaskID {
 	return out
 }
 
-func compileNodes(wf *workflow.Workflow) map[workflow.TaskID]*node {
-	pl, err := plan.Compile(wf, plan.CompileOptions{})
-	if err != nil {
-		panic(fmt.Sprintf("executor compile nodes: %v", err))
-	}
-	return compileNodesFromPlan(wf, pl)
-}
-
-func compileNodesFromPlan(wf *workflow.Workflow, pl *plan.Plan) map[workflow.TaskID]*node {
-	nodes := make(map[workflow.TaskID]*node, len(wf.Tasks))
+func compileNodesFromDefinition(def workflow.WorkflowDefinition, pl *plan.Plan) map[workflow.TaskID]*node {
+	tasks := taskPayloadsFromDefinition(def)
+	nodes := make(map[workflow.TaskID]*node, len(tasks))
 	for _, step := range pl.Steps {
-		t := wf.ByID(step.Name)
-		if t == nil {
+		t, ok := tasks[step.Name]
+		if !ok {
 			continue
 		}
 		nodes[t.ID] = &node{
@@ -58,13 +52,31 @@ func compileNodesFromPlan(wf *workflow.Workflow, pl *plan.Plan) map[workflow.Tas
 			when:   step.When,
 			action: step.Action,
 			policy: step.Policy,
-			op:     compileOpFromPlan(step.Action, t),
+			op:     compileOpFromPlan(step.Action),
 		}
 	}
 	return nodes
 }
 
-func compileOpFromPlan(action plan.Action, t *workflow.Task) op {
+func taskPayloadsFromDefinition(def workflow.WorkflowDefinition) map[workflow.TaskID]workflow.Task {
+	tasks := make(map[workflow.TaskID]workflow.Task)
+	add := func(task workflow.TaskNode) {
+		tasks[task.ID] = task.Task()
+	}
+	for _, node := range def.Nodes {
+		switch n := node.(type) {
+		case workflow.TaskNode:
+			add(n)
+		case workflow.LoopNode:
+			for _, task := range n.Body.Nodes {
+				add(task)
+			}
+		}
+	}
+	return tasks
+}
+
+func compileOpFromPlan(action plan.Action) op {
 	switch action.(type) {
 	case plan.AskModel:
 		return promptOp{}
@@ -74,17 +86,28 @@ func compileOpFromPlan(action plan.Action, t *workflow.Task) op {
 		return scriptOp{}
 	case plan.CallWorkflow:
 		return subWorkflowOp{}
-	case plan.InvalidAction:
-		return invalidOp{}
 	default:
-		return compileOp(t)
+		return invalidOp{}
 	}
 }
 
-func compileLoops(wf *workflow.Workflow) []*loopProgram {
-	loops := make([]*loopProgram, 0, len(wf.Loops))
-	for i := range wf.Loops {
-		loops = append(loops, compileLoop(wf, &wf.Loops[i]))
+func compileLoopsFromPlan(pl *plan.Plan) []*loopProgram {
+	root, ok := pl.Blocks[pl.Root]
+	if !ok {
+		return nil
+	}
+	loops := make([]*loopProgram, 0)
+	for _, stepID := range root.Steps {
+		step, ok := pl.Steps[stepID]
+		if !ok {
+			continue
+		}
+		switch action := step.Action.(type) {
+		case plan.ForEach:
+			loops = append(loops, compileLoopFromStep(action.Loop, step.Deps))
+		case plan.Repeat:
+			loops = append(loops, compileLoopFromStep(action.Loop, step.Deps))
+		}
 	}
 	return loops
 }

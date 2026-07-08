@@ -18,9 +18,10 @@
 //     retry:, budget:, schema:, loop:, and with:.
 //  3. validateDeclarations validates cross-declaration invariants such as task
 //     uniqueness, loop namespaces, loop membership, and loop convergence.
-//  4. lowerWorkflow builds the validated Workflow/Definition model, parsing
+//  4. lowerDefinition builds the validated semantic WorkflowDefinition, parsing
 //     templates, conditions, retry, budget, schema, and dependency references.
-//  5. Invocation-time checks that need resolved params, linked sub-workflows, or
+//  5. lowerWorkflow materializes the legacy Workflow view from that definition.
+//  6. Invocation-time checks that need resolved params, linked sub-workflows, or
 //     a runtime catalog stay outside Parse in pkg/workflowcheck/pkg/workflowload.
 //
 // Validation performed by Parse includes:
@@ -258,95 +259,129 @@ func validateDeclarations(decl workflowDecl) (checkedWorkflowDecl, error) {
 }
 
 func lowerWorkflow(checked checkedWorkflowDecl) (*Workflow, error) {
-	wf := checked.decl.newWorkflow(len(checked.tasks))
-	wf.Loops = checked.loops
+	def, err := lowerDefinition(checked)
+	if err != nil {
+		return nil, err
+	}
+	return workflowFromDefinition(def), nil
+}
 
+func lowerDefinition(checked checkedWorkflowDecl) (WorkflowDefinition, error) {
+	def := checked.decl.newDefinition()
 	st := &parseState{
-		wf:       wf,
 		ids:      checked.ids,
 		paramSet: checked.decl.paramSet,
 		asByLoop: checked.asByLoop,
 	}
-	if err := lowerAllTasks(st, checked.tasks); err != nil {
-		return nil, err
+	tasks, err := lowerTaskNodes(st, checked.tasks)
+	if err != nil {
+		return WorkflowDefinition{}, err
 	}
-
-	return finalizeWorkflow(wf, checked)
+	def.Nodes = workflowNodesFromTasks(tasks, checked.loops)
+	return finalizeDefinition(def, checked)
 }
 
-func (d workflowDecl) newWorkflow(taskCap int) *Workflow {
-	paramIdx := make(map[ParamName]int, len(d.paramIdx))
-	for name, idx := range d.paramIdx {
-		paramIdx[name] = idx
-	}
-	return &Workflow{
-		ID:                   d.id,
-		Description:          d.description,
-		Runtime:              d.runtime,
-		Model:                d.model,
-		Effort:               d.effort,
-		SystemPrompt:         d.systemPrompt,
-		systemPromptTemplate: ParseTemplate(d.systemPrompt),
-		Cache:                d.cache,
-		WorkingDir:           d.workingDir,
-		Params:               append([]Param(nil), d.params...),
-		Tasks:                make([]Task, 0, taskCap),
-		byID:                 make(map[TaskID]int, taskCap),
-		paramByName:          paramIdx,
+func (d workflowDecl) newDefinition() WorkflowDefinition {
+	return WorkflowDefinition{
+		ID:          d.id,
+		Description: d.description,
+		Defaults: WorkflowDefaults{
+			Runtime:      d.runtime,
+			Model:        d.model,
+			Effort:       d.effort,
+			SystemPrompt: ParseTemplate(d.systemPrompt),
+			WorkingDir:   d.workingDir,
+			Cache:        d.cache,
+		},
+		Params: append([]Param(nil), d.params...),
+		Policies: WorkflowPolicies{
+			Cache: d.cache,
+		},
 	}
 }
 
-func lowerAllTasks(st *parseState, allTasks []taskDecl) error {
+func lowerTaskNodes(st *parseState, allTasks []taskDecl) ([]TaskNode, error) {
+	tasks := make([]TaskNode, 0, len(allTasks))
 	for _, lt := range allTasks {
-		if err := buildTask(st, lt); err != nil {
-			return err
+		task, err := buildTaskNode(st, lt)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
+}
+
+func workflowNodesFromTasks(tasks []TaskNode, loops []LoopGroup) []WorkflowNode {
+	taskByID := make(map[TaskID]TaskNode, len(tasks))
+	loopMember := make(map[TaskID]bool)
+	for _, task := range tasks {
+		taskByID[task.ID] = task
+		if task.Loop != "" {
+			loopMember[task.ID] = true
 		}
 	}
-	return nil
+
+	nodes := make([]WorkflowNode, 0, len(tasks)+len(loops))
+	for _, task := range tasks {
+		if loopMember[task.ID] {
+			continue
+		}
+		nodes = append(nodes, task)
+	}
+	for _, loop := range loops {
+		body := WorkflowFragment{Nodes: make([]TaskNode, 0, len(loop.Members))}
+		for _, member := range loop.Members {
+			body.Nodes = append(body.Nodes, taskByID[member])
+		}
+		nodes = append(nodes, LoopNode{ID: loop.ID, Description: loop.Description, Spec: cloneLoopGroup(loop), Body: body})
+	}
+	return nodes
 }
 
-func finalizeWorkflow(wf *Workflow, checked checkedWorkflowDecl) (*Workflow, error) {
+func finalizeDefinition(def WorkflowDefinition, checked checkedWorkflowDecl) (WorkflowDefinition, error) {
 	decl := checked.decl
+	wf := workflowFromDefinition(def)
 	if decl.output != "" {
 		outputTask := TaskID(decl.output)
-		if _, ok := wf.byID[outputTask]; !ok {
-			return nil, &UnknownOutputTaskError{Task: outputTask}
+		if wf.ByID(outputTask) == nil {
+			return WorkflowDefinition{}, &UnknownOutputTaskError{Task: outputTask}
 		}
+		def.Output = OutputSelector{Task: outputTask}
 		wf.Output = outputTask
 	}
 
 	if err := checkPrevPlaceholders(wf, checked.memberByLoop); err != nil {
-		return nil, err
+		return WorkflowDefinition{}, err
 	}
 
-	if err := validateSystemPrompt(wf.SystemPrompt, decl.paramSet); err != nil {
-		return nil, err
+	if err := validateSystemPrompt(def.Defaults.SystemPrompt.String(), decl.paramSet); err != nil {
+		return WorkflowDefinition{}, err
 	}
 
 	if cycle, ok := findCycle(wf); ok {
-		return nil, &CycleError{Cycle: cycle}
+		return WorkflowDefinition{}, &CycleError{Cycle: cycle}
 	}
 
 	if err := checkUnusedParams(wf); err != nil {
-		return nil, err
+		return WorkflowDefinition{}, err
 	}
 
 	budget, err := parseBudget(decl.budget)
 	if err != nil {
-		return nil, err
+		return WorkflowDefinition{}, err
 	}
-	wf.Budget = budget
+	def.Policies.Budget = budget
 
 	if decl.schedule != nil {
 		if decl.schedule.Cron == "" {
-			return nil, fmt.Errorf("schedule: cron is required")
+			return WorkflowDefinition{}, fmt.Errorf("schedule: cron is required")
 		}
-		wf.Schedule = &Schedule{Cron: decl.schedule.Cron, TZ: decl.schedule.TZ}
+		def.Schedule = &Schedule{Cron: decl.schedule.Cron, TZ: decl.schedule.TZ}
 	}
 
-	// Freeze the semantic node model after the legacy view is fully materialized.
-	wf.storeDefinition()
-	return wf, nil
+	def.Order = wf.Plan()
+	return def, nil
 }
 
 func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {

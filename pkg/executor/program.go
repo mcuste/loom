@@ -19,12 +19,12 @@ type program struct {
 }
 
 // node is one compiled task plus its interpreter-ready action and policy.
-// The task pointer remains for stable hook/report payloads, but executable
-// behavior is read from action instead of re-derived from YAML-shaped task
-// fields at evaluation time.
+// The task value is a hook/report compatibility payload materialized from the
+// semantic definition; executable behavior is read from the compiled plan
+// action instead of re-derived from YAML-shaped Workflow.Tasks fields.
 type node struct {
 	id     workflow.TaskID
-	task   *workflow.Task
+	task   workflow.Task
 	deps   []workflow.TaskID
 	when   *workflow.Condition
 	action plan.Action

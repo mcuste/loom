@@ -100,7 +100,7 @@ func (i *interpreter) evaluatePreStepGates(ctx context.Context, st *frame, n *no
 	for _, gate := range i.preStepGates(n) {
 		decision := gate.Evaluate(ctx, GateContext{
 			Workflow:  i.program.wf,
-			Task:      n.task,
+			Task:      &n.task,
 			Condition: n.when,
 			Iteration: st.iteration,
 			state:     st,

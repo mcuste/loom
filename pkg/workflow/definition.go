@@ -55,6 +55,7 @@ type TaskNode struct {
 	DependsOn    []NodeID
 	Action       Action
 	Condition    *Condition
+	When         string
 	Runtime      RuntimeSelector
 	Policies     TaskPolicies
 	WritesState  string
@@ -88,6 +89,7 @@ type WorkflowDefinition struct {
 	Order       []TaskID
 	Output      OutputSelector
 	Policies    WorkflowPolicies
+	Schedule    *Schedule
 }
 
 func (TaskNode) workflowNode() {}
@@ -95,6 +97,9 @@ func (LoopNode) workflowNode() {}
 
 func (n TaskNode) NodeID() NodeID { return NodeID(n.ID) }
 func (n LoopNode) NodeID() NodeID { return NodeID(n.ID) }
+
+// Task returns the legacy materialized Task view for this semantic task node.
+func (n TaskNode) Task() Task { return taskFromNode(n) }
 
 // Definition returns a copy of w in the explicit node model used by the
 // compiler. Parsed workflows return the semantic definition produced at parse
@@ -110,9 +115,121 @@ func (w *Workflow) Definition() WorkflowDefinition {
 	return buildDefinitionFromWorkflow(w)
 }
 
-func (w *Workflow) storeDefinition() {
-	w.definition = buildDefinitionFromWorkflow(w)
+func (w *Workflow) storeDefinition(def WorkflowDefinition) {
+	w.definition = cloneWorkflowDefinition(def)
 	w.hasDefinition = true
+}
+
+func workflowFromDefinition(def WorkflowDefinition) *Workflow {
+	def = cloneWorkflowDefinition(def)
+	wf := &Workflow{
+		ID:                   def.ID,
+		Description:          def.Description,
+		Runtime:              def.Defaults.Runtime,
+		Model:                def.Defaults.Model,
+		Effort:               def.Defaults.Effort,
+		SystemPrompt:         def.Defaults.SystemPrompt.String(),
+		systemPromptTemplate: def.Defaults.SystemPrompt,
+		Cache:                def.Defaults.Cache,
+		WorkingDir:           def.Defaults.WorkingDir,
+		Params:               append([]Param(nil), def.Params...),
+		Budget:               def.Policies.Budget,
+		Output:               def.Output.Task,
+		Schedule:             cloneSchedule(def.Schedule),
+		byID:                 make(map[TaskID]int),
+		paramByName:          make(map[ParamName]int, len(def.Params)),
+	}
+	if !wf.systemPromptTemplate.parsed {
+		wf.systemPromptTemplate = ParseTemplate(wf.SystemPrompt)
+	}
+	for i := range wf.Params {
+		wf.paramByName[wf.Params[i].Name] = i
+	}
+	for _, node := range def.Nodes {
+		switch n := node.(type) {
+		case TaskNode:
+			wf.appendTask(taskFromNode(n))
+		case LoopNode:
+			wf.Loops = append(wf.Loops, cloneLoopGroup(n.Spec))
+			for _, task := range n.Body.Nodes {
+				wf.appendTask(taskFromNode(task))
+			}
+		}
+	}
+	wf.storeDefinition(def)
+	return wf
+}
+
+func (w *Workflow) appendTask(t Task) {
+	w.byID[t.ID] = len(w.Tasks)
+	w.Tasks = append(w.Tasks, t)
+}
+
+func taskFromNode(n TaskNode) Task {
+	action := cloneAction(n.Action)
+	t := Task{
+		ID:                   n.ID,
+		Description:          n.Description,
+		DependsOn:            taskIDs(n.DependsOn),
+		When:                 n.When,
+		Cond:                 n.Condition,
+		Runtime:              n.Runtime.Runtime,
+		Model:                n.Runtime.Model,
+		Effort:               n.Runtime.Effort,
+		Retry:                n.Policies.Retry,
+		WritesState:          n.WritesState,
+		Budget:               n.Policies.Budget,
+		Schema:               n.Policies.Schema,
+		Cache:                n.Policies.Cache,
+		Loop:                 n.Loop,
+		OkExit:               append([]int(nil), n.Policies.OkExit...),
+		SystemPrompt:         n.SystemPrompt.String(),
+		systemPromptTemplate: n.SystemPrompt,
+		action:               action,
+	}
+	if !t.systemPromptTemplate.parsed {
+		t.systemPromptTemplate = ParseTemplate(t.SystemPrompt)
+	}
+	switch a := action.(type) {
+	case PromptAction:
+		t.Prompt = a.Prompt.String()
+	case CommandAction:
+		t.Command = a.Command.String()
+	case ScriptAction:
+		t.Script = a.Path.String()
+		t.Args = templateStrings(a.Args)
+	case SubWorkflowAction:
+		t.Workflow = string(a.Ref)
+		t.With = append([]WithArg(nil), a.With...)
+	}
+	return t
+}
+
+func templateStrings(values []Template) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = value.String()
+	}
+	return out
+}
+
+func taskIDs(ids []NodeID) []TaskID {
+	out := make([]TaskID, len(ids))
+	for i, id := range ids {
+		out[i] = TaskID(id)
+	}
+	return out
+}
+
+func cloneSchedule(s *Schedule) *Schedule {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	return &out
 }
 
 func buildDefinitionFromWorkflow(w *Workflow) WorkflowDefinition {
@@ -138,6 +255,7 @@ func buildDefinitionFromWorkflow(w *Workflow) WorkflowDefinition {
 			Budget: w.Budget,
 			Cache:  w.Cache,
 		},
+		Schedule: cloneSchedule(w.Schedule),
 	}
 	memberLoop := make(map[TaskID]LoopID)
 	for i := range w.Loops {
@@ -170,6 +288,7 @@ func cloneWorkflowDefinition(def WorkflowDefinition) WorkflowDefinition {
 	out := def
 	out.Params = append([]Param(nil), def.Params...)
 	out.Order = append([]TaskID(nil), def.Order...)
+	out.Schedule = cloneSchedule(def.Schedule)
 	out.Nodes = make([]WorkflowNode, 0, len(def.Nodes))
 	for _, node := range def.Nodes {
 		out.Nodes = append(out.Nodes, cloneWorkflowNode(node))
@@ -236,6 +355,7 @@ func nodeFromTask(t *Task) TaskNode {
 		DependsOn:   nodeIDs(t.DependsOn),
 		Action:      t.Action(),
 		Condition:   t.Cond,
+		When:        t.When,
 		Runtime: RuntimeSelector{
 			Runtime: t.Runtime,
 			Model:   t.Model,

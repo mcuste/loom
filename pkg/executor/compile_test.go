@@ -119,8 +119,8 @@ func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
 		if n.id != task.ID {
 			t.Fatalf("nodes[%q].id = %q, want %q", task.ID, n.id, task.ID)
 		}
-		if n.task != task {
-			t.Fatalf("nodes[%q].task = %p, want %p", task.ID, n.task, task)
+		if n.task.ID != task.ID {
+			t.Fatalf("nodes[%q].task.ID = %q, want %q", task.ID, n.task.ID, task.ID)
 		}
 		if len(n.deps) != len(task.DependsOn) {
 			t.Fatalf("nodes[%q].deps len = %d, want %d", task.ID, len(n.deps), len(task.DependsOn))
@@ -161,8 +161,8 @@ func TestCompileProgramBuildsLoopMetadata(t *testing.T) {
 	if lp == nil {
 		t.Fatal("loops[0] = nil")
 	}
-	if lp.group != &wf.Loops[0] {
-		t.Fatalf("loops[0].group = %p, want %p", lp.group, &wf.Loops[0])
+	if lp.group.ID != wf.Loops[0].ID {
+		t.Fatalf("loops[0].group.ID = %q, want %q", lp.group.ID, wf.Loops[0].ID)
 	}
 	assertTaskIDs(t, lp.members, []workflow.TaskID{"member_a", "member_b", "member_c"})
 	assertTaskIDSet(t, lp.memberSet, []workflow.TaskID{"member_a", "member_b", "member_c"})
@@ -254,6 +254,35 @@ func TestCompileProgramBuildsIndependentNodeAction(t *testing.T) {
 	}
 	if got := action.Prompt.String(); got != "original" {
 		t.Fatalf("nodes[a].action.Prompt = %q, want original", got)
+	}
+}
+
+func TestCompileProgramUsesParsedDefinitionForTaskPayload(t *testing.T) {
+	t.Parallel()
+
+	wf, err := workflow.Parse([]byte(`
+name: wf
+runtime: exec-echo
+model: m1
+tasks:
+  - id: a
+    prompt: original
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	wf.ByID("a").Prompt = "mutated"
+
+	prog := compileProgram(wf)
+	action, ok := prog.nodes["a"].action.(plan.AskModel)
+	if !ok {
+		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action)
+	}
+	if got := action.Prompt.String(); got != "original" {
+		t.Fatalf("nodes[a].action.Prompt = %q, want original", got)
+	}
+	if got := prog.nodes["a"].task.Prompt; got != "original" {
+		t.Fatalf("nodes[a].task.Prompt = %q, want original", got)
 	}
 }
 

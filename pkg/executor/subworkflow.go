@@ -13,7 +13,7 @@ import (
 // eval runs a compiled sub-workflow task by resolving its linked child, then
 // executing that child via the public Run path.
 func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := n.task
+	t := &n.task
 	action, ok := n.action.(plan.CallWorkflow)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "sub-workflow call")

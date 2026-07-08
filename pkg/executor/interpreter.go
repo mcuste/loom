@@ -50,7 +50,7 @@ func (u taskUnit) run(ctx context.Context, i *interpreter, st *frame) error {
 		return nil
 	}
 	n := i.program.nodes[u.id]
-	if n == nil || n.task == nil {
+	if n == nil || n.task.ID == "" {
 		return fmt.Errorf("task %q: compiled node missing", u.id)
 	}
 	return i.evalNode(ctx, st, n)
@@ -72,10 +72,10 @@ func (i *interpreter) retryBaseDelay() time.Duration {
 }
 
 func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
-	if n == nil || n.task == nil {
+	if n == nil || n.task.ID == "" {
 		return fmt.Errorf("compiled node missing")
 	}
-	t := n.task
+	t := &n.task
 	if i.trace != nil {
 		i.trace.NodeStart(n)
 	}
@@ -130,7 +130,7 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 }
 
 func (i *interpreter) evalLoop(ctx context.Context, st *frame, lp *loopProgram) error {
-	if lp == nil || lp.group == nil {
+	if lp == nil || lp.group.ID == "" {
 		return fmt.Errorf("compiled loop missing")
 	}
 	return i.runLoop(ctx, st, lp)
