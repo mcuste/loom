@@ -75,19 +75,23 @@ func (t Task) ParsedAction() (Action, bool) {
 }
 
 func taskActionFromDecl(rt taskDecl, withArgs []WithArg, loopVar string) Action {
+	return rt.body.action(withArgs, loopVar)
+}
+
+func (b taskBodyDecl) action(withArgs []WithArg, loopVar string) Action {
 	switch {
-	case rt.prompt != "":
-		return PromptAction{Prompt: ParseTemplateInScope(rt.prompt, loopVar)}
-	case rt.command != "":
-		return CommandAction{Command: ParseTemplateInScope(rt.command, loopVar)}
-	case rt.script != "":
+	case b.prompt != "":
+		return PromptAction{Prompt: ParseTemplateInScope(b.prompt, loopVar)}
+	case b.command != "":
+		return CommandAction{Command: ParseTemplateInScope(b.command, loopVar)}
+	case b.script != "":
 		return ScriptAction{
-			Path: ParseTemplateInScope(rt.script, loopVar),
-			Args: parseTemplates(rt.args, loopVar),
+			Path: ParseTemplateInScope(b.script, loopVar),
+			Args: parseTemplates(b.args, loopVar),
 		}
-	case rt.workflow != "":
+	case b.workflow != "":
 		return SubWorkflowAction{
-			Ref:           WorkflowRef(rt.workflow),
+			Ref:           WorkflowRef(b.workflow),
 			With:          append([]WithArg(nil), withArgs...),
 			WithTemplates: parseWithTemplates(withArgs, loopVar),
 		}

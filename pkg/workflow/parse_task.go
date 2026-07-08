@@ -18,15 +18,10 @@ type taskDecl struct {
 	runtime          runtime.Name
 	model            runtime.Model
 	effort           runtime.Effort
-	prompt           string
-	command          string
+	body             taskBodyDecl
 	systemPrompt     string
 	systemPromptFile string
-	workflow         string
-	script           string
-	args             []string
 	okExit           []int
-	promptFile       string
 	dependsOn        []string
 	writesState      string
 	when             string
@@ -49,15 +44,10 @@ func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
 		runtime:          runtime.Name(rt.Runtime),
 		model:            runtime.Model(rt.Model),
 		effort:           runtime.Effort(rt.Effort),
-		prompt:           rt.Prompt,
-		command:          rt.Command,
+		body:             newTaskBodyDecl(rt),
 		systemPrompt:     rt.SystemPrompt,
 		systemPromptFile: rt.SystemPromptFile,
-		workflow:         rt.Workflow,
-		script:           rt.Script,
-		args:             append([]string(nil), rt.Args...),
 		okExit:           append([]int(nil), rt.OkExit...),
-		promptFile:       rt.PromptFile,
 		dependsOn:        append([]string(nil), rt.DependsOn...),
 		writesState:      rt.WritesState,
 		when:             rt.When,
@@ -106,11 +96,11 @@ func buildTask(st *parseState, rt taskDecl) error {
 		return fmt.Errorf("task %q: %w", tid, ErrMissingPromptOrCommand)
 	}
 	// with: is only meaningful alongside workflow:.
-	if rt.with.Present() && rt.workflow == "" {
+	if rt.body.hasWith() && !rt.body.isSubWorkflow() {
 		return fmt.Errorf("task %q: with: is only valid on a workflow task", tid)
 	}
 	// args: is only meaningful alongside script:.
-	if len(rt.args) > 0 && rt.script == "" {
+	if rt.body.hasArgs() && !rt.body.isScript() {
 		return fmt.Errorf("task %q: %w", tid, ErrArgsWithoutScript)
 	}
 	if err := validateOkExit(tid, rt); err != nil {
@@ -130,8 +120,8 @@ func buildTask(st *parseState, rt taskDecl) error {
 	wf.byID[tid] = len(wf.Tasks)
 	wf.Tasks = append(wf.Tasks, Task{
 		ID:                   tid,
-		Prompt:               rt.prompt,
-		Command:              rt.command,
+		Prompt:               rt.body.prompt,
+		Command:              rt.body.command,
 		Description:          rt.description,
 		Runtime:              rt.runtime,
 		Model:                rt.model,
@@ -147,10 +137,10 @@ func buildTask(st *parseState, rt taskDecl) error {
 		Schema:               meta.schema,
 		Cache:                rt.cache,
 		Loop:                 rt.loop,
-		Workflow:             rt.workflow,
+		Workflow:             rt.body.workflow,
 		With:                 withArgs,
-		Script:               rt.script,
-		Args:                 rt.args,
+		Script:               rt.body.script,
+		Args:                 rt.body.args,
 		OkExit:               rt.okExit,
 		action:               action,
 	})
@@ -161,7 +151,7 @@ func validateOkExit(tid TaskID, rt taskDecl) error {
 	if len(rt.okExit) == 0 {
 		return nil
 	}
-	if rt.workflow != "" {
+	if rt.body.isSubWorkflow() {
 		return fmt.Errorf("task %q: %w", tid, ErrOkExitOnSubWorkflow)
 	}
 	for _, code := range rt.okExit {
@@ -179,18 +169,18 @@ func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 	// substitution targets the same string at execution time. A sub-workflow
 	// task has no prompt body: its placeholder-derived deps come from scanning
 	// its with-values instead.
-	body := rt.prompt
+	body := rt.body.prompt
 	var withArgs []WithArg
 	switch {
-	case rt.command != "":
-		body = rt.command
+	case rt.body.isCommand():
+		body = rt.body.command
 		if rt.runtime != "" || rt.model != "" || rt.effort != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithRuntime)
 		}
 		if rt.systemPrompt != "" || rt.systemPromptFile != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSystemPrompt)
 		}
-	case rt.workflow != "":
+	case rt.body.isSubWorkflow():
 		// runtime/model/effort on a sub-workflow task are not rejected: they
 		// override the linked child's workflow-level defaults at link time (see
 		// linkSubWorkflows), so a parent can run a shared child cheaper without
@@ -199,7 +189,7 @@ func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 		if rt.systemPrompt != "" || rt.systemPromptFile != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithSystemPrompt)
 		}
-		wa, err := decodeWith(tid, rt.with)
+		wa, err := decodeWith(tid, rt.body.with)
 		if err != nil {
 			return "", nil, err
 		}
@@ -212,7 +202,7 @@ func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 			sb.WriteByte('\n')
 		}
 		body = sb.String()
-	case rt.script != "":
+	case rt.body.isScript():
 		if rt.runtime != "" || rt.model != "" || rt.effort != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithRuntime)
 		}
@@ -222,13 +212,13 @@ func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 		// The script path and its argv carry placeholders, so scan all of them:
 		// each {{id}} / {{id.exit}} ref must resolve to a dependency.
 		var sb strings.Builder
-		sb.WriteString(rt.script)
-		for _, a := range rt.args {
+		sb.WriteString(rt.body.script)
+		for _, a := range rt.body.args {
 			sb.WriteByte('\n')
 			sb.WriteString(a)
 		}
 		body = sb.String()
-	case rt.promptFile != "":
+	case rt.body.promptFile != "":
 		// A prompt_file must be inlined by InlinePromptFiles before Parse; one
 		// reaching here was not, so there is no body to build a task from.
 		return "", nil, fmt.Errorf("task %q: prompt_file must be inlined before parsing", tid)
@@ -241,10 +231,10 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body st
 	if err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
-	if schema != nil && rt.command != "" {
+	if schema != nil && rt.body.isCommand() {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
 	}
-	if schema != nil && rt.script != "" {
+	if schema != nil && rt.body.isScript() {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSchema)
 	}
 	if err := validateRoutingField(tid, "runtime", string(rt.runtime), st.paramSet); err != nil {
@@ -258,7 +248,7 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body st
 	}
 	dc := depsCtx{tid: tid, known: st.ids, params: st.paramSet, loopVar: st.asByLoop[loop]}
 	var deps []TaskID
-	if rt.workflow != "" {
+	if rt.body.isSubWorkflow() {
 		deps, err = buildSubWorkflowDeps(dc, rt.dependsOn, withArgs)
 	} else {
 		deps, err = buildDeps(dc, rt.dependsOn, body)
