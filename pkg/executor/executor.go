@@ -1,6 +1,6 @@
 // Package executor orchestrates a parsed [workflow.Workflow] against the
-// runtimes registered in the [runtime] package. It computes the deterministic
-// execution order via [workflow.Workflow.Plan], substitutes each task's
+// runtimes registered in the [runtime] package. It interprets the compiled
+// execution plan, substitutes each task's
 // `{{id}}` and `{{params.name}}` placeholders with upstream task outputs and
 // resolved parameter values respectively, and dispatches independent tasks
 // concurrently against their registered runtimes. Hooks let callers observe
@@ -223,8 +223,9 @@ type Options struct {
 // of the caller's ctx propagates the same way.
 func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
 	prog := compileProgram(wf)
-	rep := newReport(prog.order, opts)
-	st := newRootFrame(wf, rep, prog.order, opts)
+	order := prog.order()
+	rep := newReport(order, opts)
+	st := newRootFrame(wf, rep, order, opts)
 	interp := newInterpreter(prog, hooks, opts)
 	return rep, interp.run(ctx, st)
 }

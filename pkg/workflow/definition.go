@@ -120,6 +120,28 @@ func (w *Workflow) storeDefinition(def WorkflowDefinition) {
 	w.hasDefinition = true
 }
 
+func definitionHasTask(def WorkflowDefinition, id TaskID) bool {
+	for _, task := range definitionTaskNodes(def) {
+		if task.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func definitionTaskNodes(def WorkflowDefinition) []TaskNode {
+	var tasks []TaskNode
+	for _, node := range def.Nodes {
+		switch n := node.(type) {
+		case TaskNode:
+			tasks = append(tasks, n)
+		case LoopNode:
+			tasks = append(tasks, n.Body.Nodes...)
+		}
+	}
+	return tasks
+}
+
 func workflowFromDefinition(def WorkflowDefinition) *Workflow {
 	def = cloneWorkflowDefinition(def)
 	wf := &Workflow{

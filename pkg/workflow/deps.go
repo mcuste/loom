@@ -53,19 +53,30 @@ func buildDeps(dc depsCtx, declared []string, prompt string) ([]TaskID, error) {
 	return deps, nil
 }
 
-// findCycle runs a DFS over the dependency graph and returns the first cycle
-// it discovers.
-func findCycle(wf *Workflow) ([]TaskID, bool) {
+// findCycleDefinition runs a DFS over the semantic dependency graph and
+// returns the first cycle it discovers.
+func findCycleDefinition(def WorkflowDefinition) ([]TaskID, bool) {
+	tasks := definitionTaskNodes(def)
+	adj := make(map[TaskID][]TaskID, len(tasks))
+	order := make([]TaskID, 0, len(tasks))
+	for _, task := range tasks {
+		deps := make([]TaskID, len(task.DependsOn))
+		for i, dep := range task.DependsOn {
+			deps[i] = TaskID(dep)
+		}
+		adj[task.ID] = deps
+		order = append(order, task.ID)
+	}
+	return findCycleInGraph(order, adj)
+}
+
+func findCycleInGraph(order []TaskID, adj map[TaskID][]TaskID) ([]TaskID, bool) {
 	const (
 		white = 0
 		gray  = 1
 		black = 2
 	)
-	color := make(map[TaskID]int, len(wf.Tasks))
-	adj := make(map[TaskID][]TaskID, len(wf.Tasks))
-	for _, t := range wf.Tasks {
-		adj[t.ID] = t.DependsOn
-	}
+	color := make(map[TaskID]int, len(order))
 
 	var stack []TaskID
 	var cycle []TaskID
@@ -95,8 +106,8 @@ func findCycle(wf *Workflow) ([]TaskID, bool) {
 		return false
 	}
 
-	for _, t := range wf.Tasks {
-		if color[t.ID] == white && dfs(t.ID) {
+	for _, id := range order {
+		if color[id] == white && dfs(id) {
 			return cycle, true
 		}
 	}

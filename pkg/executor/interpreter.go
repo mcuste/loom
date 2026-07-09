@@ -90,7 +90,7 @@ func (i *interpreter) evalNode(ctx context.Context, st *frame, n *node) error {
 	}()
 	baseDelay := i.retryBaseDelay()
 
-	if err := st.waitDeps(ctx, n.deps); err != nil {
+	if err := st.waitDeps(ctx, n.deps()); err != nil {
 		traceErr = err
 		return err
 	}

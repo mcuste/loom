@@ -78,33 +78,35 @@ func validateRoutingField(tid TaskID, field, value string, params map[ParamName]
 	return nil
 }
 
-// checkUnusedParams enforces that every declared param is referenced by at
-// least one prompt, routing field, or system_prompt.
-func checkUnusedParams(wf *Workflow) error {
-	if len(wf.Params) == 0 {
+// checkUnusedParamsDefinition enforces that every declared param is referenced
+// by at least one prompt, routing field, or system_prompt.
+func checkUnusedParamsDefinition(def WorkflowDefinition) error {
+	if len(def.Params) == 0 {
 		return nil
 	}
-	used := make(map[ParamName]struct{}, len(wf.Params))
+	used := make(map[ParamName]struct{}, len(def.Params))
 	scan := func(s string) {
-		_, paramRefs, _ := scanPlaceholders(s)
-		for _, name := range paramRefs {
-			used[ParamName(name)] = struct{}{}
+		for _, ref := range ParseTemplate(s).Refs() {
+			param, ok := ref.(ParamRef)
+			if ok {
+				used[param.Name] = struct{}{}
+			}
 		}
 	}
-	scan(wf.SystemPrompt)
-	scan(string(wf.Runtime))
-	scan(string(wf.Model))
-	scan(string(wf.Effort))
-	for i := range wf.Tasks {
-		for _, body := range wf.Tasks[i].TextBodies() {
+	scan(def.Defaults.SystemPrompt.String())
+	scan(string(def.Defaults.Runtime))
+	scan(string(def.Defaults.Model))
+	scan(string(def.Defaults.Effort))
+	for _, task := range definitionTaskNodes(def) {
+		for _, body := range taskNodeTextBodies(task) {
 			scan(body)
 		}
-		scan(wf.Tasks[i].SystemPrompt)
-		scan(string(wf.Tasks[i].Runtime))
-		scan(string(wf.Tasks[i].Model))
-		scan(string(wf.Tasks[i].Effort))
+		scan(task.SystemPrompt.String())
+		scan(string(task.Runtime.Runtime))
+		scan(string(task.Runtime.Model))
+		scan(string(task.Runtime.Effort))
 	}
-	for _, p := range wf.Params {
+	for _, p := range def.Params {
 		if _, ok := used[p.Name]; !ok {
 			return &UnusedParamError{Name: p.Name}
 		}
@@ -112,36 +114,61 @@ func checkUnusedParams(wf *Workflow) error {
 	return nil
 }
 
-// checkPrevPlaceholders enforces that every `{{prev.id}}` placeholder appears
-// only inside a loop body task and references a member of that same loop. A
-// prev reference names the prior iteration's output of a sibling member, so it
-// is meaningless outside a loop and may never cross a loop boundary. It is also
-// rejected inside a parallel for_each body: its passes run concurrently with no
-// ordering, so there is no prior iteration to read.
-func checkPrevPlaceholders(wf *Workflow, memberByLoop map[LoopID]map[TaskID]bool) error {
-	parallelLoop := make(map[LoopID]bool, len(wf.Loops))
-	for i := range wf.Loops {
-		if wf.Loops[i].Parallel {
-			parallelLoop[wf.Loops[i].ID] = true
+func taskNodeTextBodies(task TaskNode) []string {
+	bodies := make([]string, 0)
+	add := func(text string) {
+		if text != "" {
+			bodies = append(bodies, text)
 		}
 	}
-	for i := range wf.Tasks {
-		t := &wf.Tasks[i]
-		for _, text := range t.TextBodies() {
+	switch action := task.Action.(type) {
+	case PromptAction:
+		add(action.Prompt.String())
+	case CommandAction:
+		add(action.Command.String())
+	case ScriptAction:
+		add(action.Path.String())
+		for _, arg := range action.Args {
+			add(arg.String())
+		}
+	case SubWorkflowAction:
+		for _, arg := range action.WithTemplates {
+			add(arg.Value.String())
+		}
+	}
+	return bodies
+}
+
+// checkPrevPlaceholdersDefinition enforces that every `{{prev.id}}`
+// placeholder appears only inside a loop body task and references a member of
+// that same loop. A prev reference names the prior iteration's output of a
+// sibling member, so it is meaningless outside a loop and may never cross a loop
+// boundary. It is also rejected inside a parallel for_each body: its passes run
+// concurrently with no ordering, so there is no prior iteration to read.
+func checkPrevPlaceholdersDefinition(def WorkflowDefinition, memberByLoop map[LoopID]map[TaskID]bool) error {
+	parallelLoop := make(map[LoopID]bool)
+	for _, node := range def.Nodes {
+		loop, ok := node.(LoopNode)
+		if ok && loop.Spec.Parallel {
+			parallelLoop[loop.ID] = true
+		}
+	}
+	for _, task := range definitionTaskNodes(def) {
+		for _, text := range taskNodeTextBodies(task) {
 			for _, ref := range ParseTemplate(text).Refs() {
 				prev, ok := ref.(PrevRef)
 				if !ok {
 					continue
 				}
 				name := string(prev.ID)
-				if t.Loop == "" {
-					return &PrevOutsideLoopError{Task: t.ID, Name: name}
+				if task.Loop == "" {
+					return &PrevOutsideLoopError{Task: task.ID, Name: name}
 				}
-				if parallelLoop[t.Loop] {
-					return &PrevInParallelLoopError{Task: t.ID, Loop: t.Loop, Name: name}
+				if parallelLoop[task.Loop] {
+					return &PrevInParallelLoopError{Task: task.ID, Loop: task.Loop, Name: name}
 				}
-				if !memberByLoop[t.Loop][TaskID(name)] {
-					return &PrevNotMemberError{Task: t.ID, Loop: t.Loop, Name: name}
+				if !memberByLoop[task.Loop][prev.ID] {
+					return &PrevNotMemberError{Task: task.ID, Loop: task.Loop, Name: name}
 				}
 			}
 		}

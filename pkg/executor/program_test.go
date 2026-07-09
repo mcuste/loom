@@ -2,21 +2,26 @@ package executor
 
 import (
 	"context"
+	"slices"
 	"testing"
 
+	"github.com/mcuste/loom/pkg/plan"
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
 func TestProgramPhaseOneSkeleton(t *testing.T) {
 	wf := &workflow.Workflow{}
-	order := []workflow.TaskID{"build", "test"}
+	pl := &plan.Plan{Order: []plan.StepID{"build", "test"}}
 	memberOf := map[workflow.TaskID]int{"loop-body": 0}
 
-	_ = program{
+	prog := program{
 		wf:       wf,
-		order:    order,
+		plan:     pl,
 		units:    []unit{skeletonUnit{}},
 		memberOf: memberOf,
+	}
+	if !slices.Equal(prog.order(), []workflow.TaskID{"build", "test"}) {
+		t.Fatalf("program order = %v, want [build test]", prog.order())
 	}
 
 	gotTask := taskUnit{id: "build"}

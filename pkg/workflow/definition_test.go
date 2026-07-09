@@ -1,10 +1,50 @@
 package workflow_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/mcuste/loom/pkg/workflow"
 )
+
+func TestParseDefinitionReturnsSemanticModel(t *testing.T) {
+	src := []byte(`
+name: wf
+runtime: test-rt
+model: m1
+output: finish
+tasks:
+  - id: first
+    prompt: first
+  - id: finish
+    depends_on: [first]
+    prompt: "finish {{first}}"
+`)
+	def, err := workflow.ParseDefinition(src)
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+
+	if def.ID != "wf" {
+		t.Fatalf("definition ID = %q, want wf", def.ID)
+	}
+	if def.Output.Task != "finish" {
+		t.Fatalf("definition output = %q, want finish", def.Output.Task)
+	}
+	if !slices.Equal(def.Order, []workflow.TaskID{"first", "finish"}) {
+		t.Fatalf("definition order = %v, want [first finish]", def.Order)
+	}
+	if len(def.Nodes) != 2 {
+		t.Fatalf("definition nodes = %d, want 2", len(def.Nodes))
+	}
+	finish, ok := def.Nodes[1].(workflow.TaskNode)
+	if !ok {
+		t.Fatalf("second node = %T, want workflow.TaskNode", def.Nodes[1])
+	}
+	if _, ok := finish.Action.(workflow.PromptAction); !ok {
+		t.Fatalf("finish action = %T, want workflow.PromptAction", finish.Action)
+	}
+}
 
 func TestParsedWorkflowDefinitionOwnsLoopBodyNodes(t *testing.T) {
 	src := []byte(`

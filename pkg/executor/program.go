@@ -11,25 +11,62 @@ import (
 // deterministic schedule metadata the executor needs before interpretation.
 type program struct {
 	wf       *workflow.Workflow
-	order    []workflow.TaskID
+	plan     *plan.Plan
 	nodes    map[workflow.TaskID]*node
 	loops    []*loopProgram
 	units    []unit
 	memberOf map[workflow.TaskID]int
 }
 
-// node is one compiled task plus its interpreter-ready action and policy.
-// The task value is a hook/report compatibility payload materialized from the
-// semantic definition; executable behavior is read from the compiled plan
-// action instead of re-derived from YAML-shaped Workflow.Tasks fields.
+func (p *program) order() []workflow.TaskID {
+	if p == nil || p.plan == nil {
+		return nil
+	}
+	return workflowOrder(p.plan.Order)
+}
+
+// node is one compiled task plus its interpreter-ready operation. The task
+// value is a hook/report compatibility payload materialized from the semantic
+// definition; executable behavior and policy stay in the compiled plan step.
 type node struct {
-	id     workflow.TaskID
-	task   workflow.Task
-	deps   []workflow.TaskID
-	when   *workflow.Condition
-	action plan.Action
-	policy plan.Policy
-	op     op
+	task workflow.Task
+	step plan.Step
+	op   op
+}
+
+func (n *node) id() workflow.TaskID {
+	if n == nil {
+		return ""
+	}
+	return n.task.ID
+}
+
+func (n *node) deps() []workflow.TaskID {
+	if n == nil {
+		return nil
+	}
+	return workflowOrder(n.step.Deps)
+}
+
+func (n *node) when() *workflow.Condition {
+	if n == nil {
+		return nil
+	}
+	return n.step.When
+}
+
+func (n *node) action() plan.Action {
+	if n == nil {
+		return plan.InvalidAction{}
+	}
+	return n.step.Action
+}
+
+func (n *node) policy() plan.Policy {
+	if n == nil {
+		return plan.Policy{}
+	}
+	return n.step.Policy
 }
 
 // unit is one schedulable top-level item in a compiled program. Loop members

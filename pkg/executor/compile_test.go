@@ -116,18 +116,19 @@ func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
 		if n == nil {
 			t.Fatalf("nodes[%q] = nil", task.ID)
 		}
-		if n.id != task.ID {
-			t.Fatalf("nodes[%q].id = %q, want %q", task.ID, n.id, task.ID)
+		if n.id() != task.ID {
+			t.Fatalf("nodes[%q].id = %q, want %q", task.ID, n.id(), task.ID)
 		}
 		if n.task.ID != task.ID {
 			t.Fatalf("nodes[%q].task.ID = %q, want %q", task.ID, n.task.ID, task.ID)
 		}
-		if len(n.deps) != len(task.DependsOn) {
-			t.Fatalf("nodes[%q].deps len = %d, want %d", task.ID, len(n.deps), len(task.DependsOn))
+		deps := n.deps()
+		if len(deps) != len(task.DependsOn) {
+			t.Fatalf("nodes[%q].deps len = %d, want %d", task.ID, len(deps), len(task.DependsOn))
 		}
 		for j := range task.DependsOn {
-			if n.deps[j] != task.DependsOn[j] {
-				t.Fatalf("nodes[%q].deps[%d] = %q, want %q", task.ID, j, n.deps[j], task.DependsOn[j])
+			if deps[j] != task.DependsOn[j] {
+				t.Fatalf("nodes[%q].deps[%d] = %q, want %q", task.ID, j, deps[j], task.DependsOn[j])
 			}
 		}
 		if _, ok := n.op.(invalidOp); ok {
@@ -229,7 +230,7 @@ func TestCompileProgramBuildsIndependentNodeDeps(t *testing.T) {
 	prog := compileProgram(wf)
 	wf.Tasks[1].DependsOn[0] = "mutated"
 
-	if got := prog.nodes["b"].deps[0]; got != "a" {
+	if got := prog.nodes["b"].deps()[0]; got != "a" {
 		t.Fatalf("nodes[b].deps[0] = %q, want %q", got, "a")
 	}
 }
@@ -248,9 +249,9 @@ func TestCompileProgramBuildsIndependentNodeAction(t *testing.T) {
 	prog := compileProgram(wf)
 	wf.Tasks[0].Prompt = "mutated"
 
-	action, ok := prog.nodes["a"].action.(plan.AskModel)
+	action, ok := prog.nodes["a"].action().(plan.AskModel)
 	if !ok {
-		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action)
+		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action())
 	}
 	if got := action.Prompt.String(); got != "original" {
 		t.Fatalf("nodes[a].action.Prompt = %q, want original", got)
@@ -274,9 +275,9 @@ tasks:
 	wf.ByID("a").Prompt = "mutated"
 
 	prog := compileProgram(wf)
-	action, ok := prog.nodes["a"].action.(plan.AskModel)
+	action, ok := prog.nodes["a"].action().(plan.AskModel)
 	if !ok {
-		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action)
+		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action())
 	}
 	if got := action.Prompt.String(); got != "original" {
 		t.Fatalf("nodes[a].action.Prompt = %q, want original", got)

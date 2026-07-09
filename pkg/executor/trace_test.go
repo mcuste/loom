@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"sync"
@@ -41,13 +40,13 @@ func (r *recordingTraceSink) UnitStart(u unit) {
 
 func (r *recordingTraceSink) NodeStart(n *node) {
 	r.mu.Lock()
-	r.nodeStarts = append(r.nodeStarts, n.id)
+	r.nodeStarts = append(r.nodeStarts, n.id())
 	r.mu.Unlock()
 }
 
 func (r *recordingTraceSink) NodeFinish(n *node, res TaskResult, err error) {
 	finish := traceNodeFinish{
-		id:        n.id,
+		id:        n.id(),
 		iteration: res.Iteration,
 		status:    string(res.Status),
 	}
@@ -96,8 +95,9 @@ func TestInterpreterTraceNodeLifecycle(t *testing.T) {
 	}
 
 	prog := compileProgram(wf)
-	rep := newReport(prog.order, Options{})
-	st := newRootFrame(wf, rep, prog.order, Options{})
+	order := prog.order()
+	rep := newReport(order, Options{})
+	st := newRootFrame(wf, rep, order, Options{})
 	trace := &recordingTraceSink{}
 	var (
 		started  []workflow.TaskID
@@ -113,7 +113,7 @@ func TestInterpreterTraceNodeLifecycle(t *testing.T) {
 	}
 
 	interp := newInterpreterWithTrace(prog, hooks, Options{}, trace)
-	if err := interp.run(context.Background(), st); err != nil {
+	if err := interp.run(t.Context(), st); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -169,12 +169,13 @@ func TestInterpreterTraceLoopPassLifecycle(t *testing.T) {
 	}
 
 	prog := compileProgram(wf)
-	rep := newReport(prog.order, Options{})
-	st := newRootFrame(wf, rep, prog.order, Options{})
+	order := prog.order()
+	rep := newReport(order, Options{})
+	st := newRootFrame(wf, rep, order, Options{})
 	trace := &recordingTraceSink{}
 
 	interp := newInterpreterWithTrace(prog, Hooks{}, Options{}, trace)
-	if err := interp.run(context.Background(), st); err != nil {
+	if err := interp.run(t.Context(), st); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 

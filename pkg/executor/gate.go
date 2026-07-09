@@ -76,7 +76,7 @@ func (schemaGate) Evaluate(_ context.Context, gc GateContext) GateDecision {
 
 func (i *interpreter) preStepGates(n *node) []Gate {
 	gates := make([]Gate, 0, 2)
-	if n.when != nil {
+	if n.when() != nil {
 		gates = append(gates, whenConditionGate{})
 	}
 	if i.program.wf.Budget != nil {
@@ -101,7 +101,7 @@ func (i *interpreter) evaluatePreStepGates(ctx context.Context, st *frame, n *no
 		decision := gate.Evaluate(ctx, GateContext{
 			Workflow:  i.program.wf,
 			Task:      &n.task,
-			Condition: n.when,
+			Condition: n.when(),
 			Iteration: st.iteration,
 			state:     st,
 		})

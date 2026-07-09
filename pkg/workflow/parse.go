@@ -1,7 +1,8 @@
 // Package workflow defines the domain types for loom workflow definitions.
 // See workflow.go for the core types and workflow.go's package doc.
 //
-// Parse decodes a workflow YAML document and returns the validated Workflow.
+// Parse decodes a workflow YAML document and returns a legacy Workflow view of
+// the validated semantic WorkflowDefinition.
 //
 // The decoder runs in known-fields mode: any top-level or task-level key not
 // recognized by the current schema is rejected. The sub-workflow constructs
@@ -20,7 +21,8 @@
 //     uniqueness, loop namespaces, loop membership, and loop convergence.
 //  4. lowerDefinition builds the validated semantic WorkflowDefinition, parsing
 //     templates, conditions, retry, budget, schema, and dependency references.
-//  5. lowerWorkflow materializes the legacy Workflow view from that definition.
+//  5. Parse materializes the legacy Workflow view from that definition for
+//     existing callers; ParseDefinition exposes the semantic model directly.
 //  6. Invocation-time checks that need resolved params, linked sub-workflows, or
 //     a runtime catalog stay outside Parse in pkg/workflowcheck/pkg/workflowload.
 //
@@ -102,25 +104,55 @@ type checkedWorkflowDecl struct {
 
 // Parse decodes a workflow YAML document and returns the validated Workflow.
 func Parse(data []byte) (*Workflow, error) {
-	doc, err := syntax.Decode(data, syntax.Source{})
+	def, err := ParseDefinition(data)
 	if err != nil {
 		return nil, err
 	}
-	return FromDocument(doc, ParseOptions{})
+	return workflowFromDefinition(def), nil
+}
+
+// ParseDefinition decodes a workflow YAML document and returns the validated
+// semantic workflow definition.
+func ParseDefinition(data []byte) (WorkflowDefinition, error) {
+	doc, err := syntax.Decode(data, syntax.Source{})
+	if err != nil {
+		return WorkflowDefinition{}, err
+	}
+	return DefinitionFromDocument(doc, ParseOptions{})
 }
 
 // FromDraft constructs a validated Workflow from a decoded syntax draft.
 func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
-	return FromDocument((*syntax.Document)(draft), opts)
+	def, err := DefinitionFromDraft(draft, opts)
+	if err != nil {
+		return nil, err
+	}
+	return workflowFromDefinition(def), nil
+}
+
+// DefinitionFromDraft constructs a validated semantic workflow definition from
+// a decoded syntax draft.
+func DefinitionFromDraft(draft *syntax.Draft, opts ParseOptions) (WorkflowDefinition, error) {
+	return DefinitionFromDocument((*syntax.Document)(draft), opts)
 }
 
 // FromDocument constructs a validated Workflow from a decoded syntax document.
 func FromDocument(doc *syntax.Document, opts ParseOptions) (*Workflow, error) {
-	p, err := newParser(doc, opts)
+	def, err := DefinitionFromDocument(doc, opts)
 	if err != nil {
 		return nil, err
 	}
-	return p.parse()
+	return workflowFromDefinition(def), nil
+}
+
+// DefinitionFromDocument constructs a validated semantic workflow definition
+// from a decoded syntax document.
+func DefinitionFromDocument(doc *syntax.Document, opts ParseOptions) (WorkflowDefinition, error) {
+	p, err := newParser(doc, opts)
+	if err != nil {
+		return WorkflowDefinition{}, err
+	}
+	return p.parseDefinition()
 }
 
 func newParser(doc *syntax.Document, opts ParseOptions) (*parser, error) {
@@ -137,18 +169,18 @@ func newParser(doc *syntax.Document, opts ParseOptions) (*parser, error) {
 	return &parser{doc: doc, id: id}, nil
 }
 
-func (p *parser) parse() (*Workflow, error) {
+func (p *parser) parseDefinition() (WorkflowDefinition, error) {
 	decl, err := p.collectDeclarations()
 	if err != nil {
-		return nil, err
+		return WorkflowDefinition{}, err
 	}
 
 	checked, err := validateDeclarations(decl)
 	if err != nil {
-		return nil, err
+		return WorkflowDefinition{}, err
 	}
 
-	return lowerWorkflow(checked)
+	return lowerDefinition(checked)
 }
 
 func (p *parser) collectDeclarations() (workflowDecl, error) {
@@ -258,14 +290,6 @@ func validateDeclarations(decl workflowDecl) (checkedWorkflowDecl, error) {
 	}, nil
 }
 
-func lowerWorkflow(checked checkedWorkflowDecl) (*Workflow, error) {
-	def, err := lowerDefinition(checked)
-	if err != nil {
-		return nil, err
-	}
-	return workflowFromDefinition(def), nil
-}
-
 func lowerDefinition(checked checkedWorkflowDecl) (WorkflowDefinition, error) {
 	def := checked.decl.newDefinition()
 	st := &parseState{
@@ -341,17 +365,15 @@ func workflowNodesFromTasks(tasks []TaskNode, loops []LoopGroup) []WorkflowNode 
 
 func finalizeDefinition(def WorkflowDefinition, checked checkedWorkflowDecl) (WorkflowDefinition, error) {
 	decl := checked.decl
-	wf := workflowFromDefinition(def)
 	if decl.output != "" {
 		outputTask := TaskID(decl.output)
-		if wf.ByID(outputTask) == nil {
+		if !definitionHasTask(def, outputTask) {
 			return WorkflowDefinition{}, &UnknownOutputTaskError{Task: outputTask}
 		}
 		def.Output = OutputSelector{Task: outputTask}
-		wf.Output = outputTask
 	}
 
-	if err := checkPrevPlaceholders(wf, checked.memberByLoop); err != nil {
+	if err := checkPrevPlaceholdersDefinition(def, checked.memberByLoop); err != nil {
 		return WorkflowDefinition{}, err
 	}
 
@@ -359,11 +381,11 @@ func finalizeDefinition(def WorkflowDefinition, checked checkedWorkflowDecl) (Wo
 		return WorkflowDefinition{}, err
 	}
 
-	if cycle, ok := findCycle(wf); ok {
+	if cycle, ok := findCycleDefinition(def); ok {
 		return WorkflowDefinition{}, &CycleError{Cycle: cycle}
 	}
 
-	if err := checkUnusedParams(wf); err != nil {
+	if err := checkUnusedParamsDefinition(def); err != nil {
 		return WorkflowDefinition{}, err
 	}
 
@@ -380,7 +402,7 @@ func finalizeDefinition(def WorkflowDefinition, checked checkedWorkflowDecl) (Wo
 		def.Schedule = &Schedule{Cron: decl.schedule.Cron, TZ: decl.schedule.TZ}
 	}
 
-	def.Order = wf.Plan()
+	def.Order = planDefinition(def)
 	return def, nil
 }
 

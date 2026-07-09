@@ -66,19 +66,20 @@ func resolveRoutingValue(value string, params workflow.ParamValues) string {
 }
 
 func invalidActionError(n *node, want string) error {
-	return fmt.Errorf("task %q: compiled action %T is not %s", n.id, n.action, want)
+	return fmt.Errorf("task %q: compiled action %T is not %s", n.id(), n.step.Action, want)
 }
 
 func cacheEnabled(wf *workflow.Workflow, n *node) bool {
-	if n.policy.Cache != nil {
-		return *n.policy.Cache
+	policy := n.policy()
+	if policy.Cache != nil {
+		return *policy.Cache
 	}
 	return wf.Cache
 }
 
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := &n.task
-	action, ok := n.action.(plan.RunCommand)
+	action, ok := n.action().(plan.RunCommand)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "shell command")
 	}
@@ -89,7 +90,8 @@ func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, bas
 	body := renderTemplate(action.Command, st, i.opts)
 	env := taskEnv(st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
 	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
+	policy := n.policy()
+	res, runErr := runWithRetry(ctx, t.ID, policy.Retry, policy.Budget, baseDelay, func() (TaskResult, error) {
 		return runShell(ctx, t, body, env, st.workDir)
 	})
 	return res, runErr, nil
@@ -97,7 +99,7 @@ func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, bas
 
 func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := &n.task
-	action, ok := n.action.(plan.RunScript)
+	action, ok := n.action().(plan.RunScript)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "script")
 	}
@@ -108,7 +110,8 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 	path, args := renderTemplate(action.Path, st, i.opts), renderTemplates(action.Args, st, i.opts)
 	env := taskEnv(st.scope.outputs, i.opts.Params, i.opts.State, st.prev, st.scope.exitCodes, st.loopVar, st.loopVal)
 	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
+	policy := n.policy()
+	res, runErr := runWithRetry(ctx, t.ID, policy.Retry, policy.Budget, baseDelay, func() (TaskResult, error) {
 		return runScript(ctx, t, path, args, env, st.workDir)
 	})
 	return res, runErr, nil
@@ -117,7 +120,7 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := &n.task
 	wf := i.program.wf
-	action, ok := n.action.(plan.AskModel)
+	action, ok := n.action().(plan.AskModel)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "model prompt")
 	}
@@ -138,8 +141,9 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 	st.mu.Lock()
 	body := renderTemplate(action.Prompt, st, i.opts)
 	st.mu.Unlock()
+	policy := n.policy()
 	send := func() (TaskResult, error) {
-		return runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
+		return runWithRetry(ctx, t.ID, policy.Retry, policy.Budget, baseDelay, func() (TaskResult, error) {
 			r, err := runLLM(ctx, t, body, runner, model, effort, sysPrompt, st.workDir)
 			if err != nil {
 				return r, err
@@ -160,5 +164,5 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 }
 
 func (invalidOp) eval(_ context.Context, _ *interpreter, _ *frame, n *node, _ time.Duration) (TaskResult, error, error) {
-	return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", n.id)
+	return TaskResult{}, nil, fmt.Errorf("task %q: invalid body: exactly one of prompt, command, workflow, or script must be set", n.id())
 }

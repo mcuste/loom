@@ -20,12 +20,12 @@ func compileProgramFromPlan(wf *workflow.Workflow, pl *plan.Plan) *program {
 	loops := compileLoopsFromPlan(pl)
 	p := &program{
 		wf:       wf,
-		order:    workflowOrder(pl.Order),
+		plan:     pl,
 		nodes:    compileNodesFromDefinition(def, pl),
 		loops:    loops,
 		memberOf: buildMemberOf(loops),
 	}
-	p.units = compileUnits(p.order, p.memberOf, p.loops)
+	p.units = compileUnits(p.order(), p.memberOf, p.loops)
 	return p
 }
 
@@ -46,13 +46,9 @@ func compileNodesFromDefinition(def workflow.WorkflowDefinition, pl *plan.Plan) 
 			continue
 		}
 		nodes[t.ID] = &node{
-			id:     t.ID,
-			task:   t,
-			deps:   workflowOrder(step.Deps),
-			when:   step.When,
-			action: step.Action,
-			policy: step.Policy,
-			op:     compileOpFromPlan(step.Action),
+			task: t,
+			step: step,
+			op:   compileOpFromPlan(step.Action),
 		}
 	}
 	return nodes

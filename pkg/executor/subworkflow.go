@@ -14,7 +14,7 @@ import (
 // executing that child via the public Run path.
 func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := &n.task
-	action, ok := n.action.(plan.CallWorkflow)
+	action, ok := n.action().(plan.CallWorkflow)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "sub-workflow call")
 	}
@@ -28,7 +28,8 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 	st.mu.Lock()
 	vals := renderWorkflowArgs(action, st, i.opts)
 	st.mu.Unlock()
-	res, runErr := runWithRetry(ctx, t.ID, n.policy.Retry, n.policy.Budget, baseDelay, func() (TaskResult, error) {
+	policy := n.policy()
+	res, runErr := runWithRetry(ctx, t.ID, policy.Retry, policy.Budget, baseDelay, func() (TaskResult, error) {
 		start := time.Now()
 		cp, err := workflowcheck.ResolveAndValidateParams(child, vals, nil, catalogValidator(i.opts))
 		if err != nil {
@@ -54,7 +55,7 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 		// One parent row, child result + SUMMED child usage; schema (if any)
 		// validates the child result uniformly with the LLM branch.
 		r := TaskResult{TaskID: t.ID, Output: out, Usage: childRep.Usage, Elapsed: time.Since(start)}
-		return r, evaluateSchemaGate(ctx, t, n.policy.Schema, out, r.ExitCode)
+		return r, evaluateSchemaGate(ctx, t, policy.Schema, out, r.ExitCode)
 	})
 	return res, runErr, nil
 }
