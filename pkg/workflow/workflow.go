@@ -384,6 +384,9 @@ func bodyKindFromFields(t Task) BodyKind {
 // that no other task depends on). Zero or multiple sinks with no explicit
 // Output is an error.
 func (w *Workflow) OutputTask() (TaskID, error) {
+	if w.hasDefinition {
+		return w.definition.OutputTask()
+	}
 	if w.Output != "" {
 		if w.ByID(w.Output) == nil {
 			return "", &UnknownOutputTaskError{Task: w.Output}

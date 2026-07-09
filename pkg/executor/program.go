@@ -11,6 +11,7 @@ import (
 // deterministic schedule metadata the executor needs before interpretation.
 type program struct {
 	wf       *workflow.Workflow
+	def      workflow.Definition
 	plan     *plan.Plan
 	nodes    map[workflow.TaskID]*node
 	loops    []*loopProgram

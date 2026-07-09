@@ -46,6 +46,50 @@ tasks:
 	}
 }
 
+func TestDefinitionHelpersExposeClonedTaskView(t *testing.T) {
+	def, err := workflow.ParseDefinition([]byte(`
+name: wf
+runtime: test-rt
+model: m1
+tasks:
+  - id: first
+    prompt: first
+  - id: finish
+    depends_on: [first]
+    prompt: "finish {{first}}"
+`))
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+
+	output, err := def.OutputTask()
+	if err != nil {
+		t.Fatalf("OutputTask: %v", err)
+	}
+	if output != "finish" {
+		t.Fatalf("OutputTask = %q, want finish", output)
+	}
+	if !def.HasTask("first") || def.HasTask("missing") {
+		t.Fatalf("HasTask returned unexpected result")
+	}
+	first, ok := def.TaskNode("first")
+	if !ok {
+		t.Fatal("TaskNode(first) not found")
+	}
+	first.ID = "mutated"
+	again, ok := def.TaskNode("first")
+	if !ok {
+		t.Fatal("TaskNode(first) missing after mutation")
+	}
+	if again.ID != "first" {
+		t.Fatalf("TaskNode returned mutable state, got %q", again.ID)
+	}
+	flat := def.TaskNodes()
+	if got := []workflow.TaskID{flat[0].ID, flat[1].ID}; !slices.Equal(got, []workflow.TaskID{"first", "finish"}) {
+		t.Fatalf("TaskNodes IDs = %v, want [first finish]", got)
+	}
+}
+
 func TestParsedWorkflowDefinitionOwnsLoopBodyNodes(t *testing.T) {
 	src := []byte(`
 name: wf

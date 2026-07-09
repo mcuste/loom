@@ -7,19 +7,23 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-func compileProgram(wf *workflow.Workflow) *program {
-	pl, err := plan.Compile(wf, plan.CompileOptions{})
-	if err != nil {
-		panic(fmt.Sprintf("executor compile: %v", err))
+func compileProgram(wf *workflow.Workflow) (*program, error) {
+	if wf == nil {
+		return nil, fmt.Errorf("workflow is nil")
 	}
-	return compileProgramFromPlan(wf, pl)
+	def := wf.Definition()
+	pl, err := plan.CompileDefinition(def, plan.CompileOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("compile plan: %w", err)
+	}
+	return compileProgramFromDefinition(wf, def, pl), nil
 }
 
-func compileProgramFromPlan(wf *workflow.Workflow, pl *plan.Plan) *program {
-	def := wf.Definition()
+func compileProgramFromDefinition(wf *workflow.Workflow, def workflow.Definition, pl *plan.Plan) *program {
 	loops := compileLoopsFromPlan(pl)
 	p := &program{
 		wf:       wf,
+		def:      def,
 		plan:     pl,
 		nodes:    compileNodesFromDefinition(def, pl),
 		loops:    loops,
@@ -37,7 +41,7 @@ func workflowOrder(order []plan.StepID) []workflow.TaskID {
 	return out
 }
 
-func compileNodesFromDefinition(def workflow.WorkflowDefinition, pl *plan.Plan) map[workflow.TaskID]*node {
+func compileNodesFromDefinition(def workflow.Definition, pl *plan.Plan) map[workflow.TaskID]*node {
 	tasks := taskPayloadsFromDefinition(def)
 	nodes := make(map[workflow.TaskID]*node, len(tasks))
 	for _, step := range pl.Steps {
@@ -54,7 +58,7 @@ func compileNodesFromDefinition(def workflow.WorkflowDefinition, pl *plan.Plan) 
 	return nodes
 }
 
-func taskPayloadsFromDefinition(def workflow.WorkflowDefinition) map[workflow.TaskID]workflow.Task {
+func taskPayloadsFromDefinition(def workflow.Definition) map[workflow.TaskID]workflow.Task {
 	tasks := make(map[workflow.TaskID]workflow.Task)
 	add := func(task workflow.TaskNode) {
 		tasks[task.ID] = task.Task()

@@ -113,7 +113,7 @@ func Parse(data []byte) (*Workflow, error) {
 
 // ParseDefinition decodes a workflow YAML document and returns the validated
 // semantic workflow definition.
-func ParseDefinition(data []byte) (WorkflowDefinition, error) {
+func ParseDefinition(data []byte) (Definition, error) {
 	doc, err := syntax.Decode(data, syntax.Source{})
 	if err != nil {
 		return WorkflowDefinition{}, err
@@ -132,7 +132,7 @@ func FromDraft(draft *syntax.Draft, opts ParseOptions) (*Workflow, error) {
 
 // DefinitionFromDraft constructs a validated semantic workflow definition from
 // a decoded syntax draft.
-func DefinitionFromDraft(draft *syntax.Draft, opts ParseOptions) (WorkflowDefinition, error) {
+func DefinitionFromDraft(draft *syntax.Draft, opts ParseOptions) (Definition, error) {
 	return DefinitionFromDocument((*syntax.Document)(draft), opts)
 }
 
@@ -147,7 +147,7 @@ func FromDocument(doc *syntax.Document, opts ParseOptions) (*Workflow, error) {
 
 // DefinitionFromDocument constructs a validated semantic workflow definition
 // from a decoded syntax document.
-func DefinitionFromDocument(doc *syntax.Document, opts ParseOptions) (WorkflowDefinition, error) {
+func DefinitionFromDocument(doc *syntax.Document, opts ParseOptions) (Definition, error) {
 	p, err := newParser(doc, opts)
 	if err != nil {
 		return WorkflowDefinition{}, err
@@ -169,7 +169,7 @@ func newParser(doc *syntax.Document, opts ParseOptions) (*parser, error) {
 	return &parser{doc: doc, id: id}, nil
 }
 
-func (p *parser) parseDefinition() (WorkflowDefinition, error) {
+func (p *parser) parseDefinition() (Definition, error) {
 	decl, err := p.collectDeclarations()
 	if err != nil {
 		return WorkflowDefinition{}, err
@@ -290,7 +290,7 @@ func validateDeclarations(decl workflowDecl) (checkedWorkflowDecl, error) {
 	}, nil
 }
 
-func lowerDefinition(checked checkedWorkflowDecl) (WorkflowDefinition, error) {
+func lowerDefinition(checked checkedWorkflowDecl) (Definition, error) {
 	def := checked.decl.newDefinition()
 	st := &parseState{
 		ids:      checked.ids,
@@ -305,7 +305,7 @@ func lowerDefinition(checked checkedWorkflowDecl) (WorkflowDefinition, error) {
 	return finalizeDefinition(def, checked)
 }
 
-func (d workflowDecl) newDefinition() WorkflowDefinition {
+func (d workflowDecl) newDefinition() Definition {
 	return WorkflowDefinition{
 		ID:          d.id,
 		Description: d.description,
@@ -363,7 +363,7 @@ func workflowNodesFromTasks(tasks []TaskNode, loops []LoopGroup) []WorkflowNode 
 	return nodes
 }
 
-func finalizeDefinition(def WorkflowDefinition, checked checkedWorkflowDecl) (WorkflowDefinition, error) {
+func finalizeDefinition(def Definition, checked checkedWorkflowDecl) (Definition, error) {
 	decl := checked.decl
 	if decl.output != "" {
 		outputTask := TaskID(decl.output)

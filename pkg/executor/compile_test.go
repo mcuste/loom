@@ -20,7 +20,7 @@ func TestCompileProgramWithoutLoopsBuildsTaskUnitsFromPlan(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	if len(prog.memberOf) != 0 {
 		t.Fatalf("memberOf size = %d, want 0", len(prog.memberOf))
@@ -43,7 +43,7 @@ func TestCompileProgramWithLoopExcludesMembersFromTopLevelTasks(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	if got := prog.memberOf["member_a"]; got != 0 {
 		t.Fatalf("memberOf[member_a] = %d, want 0", got)
@@ -69,7 +69,7 @@ func TestCompileProgramPreservesLoopDeclarationOrder(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	assertUnitKinds(t, prog.units, []string{"loop:0", "loop:1", "task:outer"})
 }
@@ -89,7 +89,7 @@ func TestCompileProgramPreservesTopLevelPlanOrder(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	assertUnitKinds(t, prog.units, []string{"loop:0", "task:a", "task:b", "task:c"})
 }
@@ -105,7 +105,7 @@ func TestCompileProgramBuildsNodeForEveryTask(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	if len(prog.nodes) != len(wf.Tasks) {
 		t.Fatalf("node count = %d, want %d", len(prog.nodes), len(wf.Tasks))
@@ -153,7 +153,7 @@ func TestCompileProgramBuildsLoopMetadata(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	if len(prog.loops) != 1 {
 		t.Fatalf("loop count = %d, want 1", len(prog.loops))
@@ -190,7 +190,7 @@ func TestCompileProgramBuildsForEachListSourceEntryDep(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	if len(prog.loops) != 1 {
 		t.Fatalf("loop count = %d, want 1", len(prog.loops))
@@ -211,7 +211,7 @@ func TestCompileProgramClonesLoopMembers(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 	wf.Loops[0].Members[0] = "mutated"
 
 	assertTaskIDs(t, prog.loops[0].members, []workflow.TaskID{"member_a", "member_b"})
@@ -227,7 +227,7 @@ func TestCompileProgramBuildsIndependentNodeDeps(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 	wf.Tasks[1].DependsOn[0] = "mutated"
 
 	if got := prog.nodes["b"].deps()[0]; got != "a" {
@@ -246,7 +246,7 @@ func TestCompileProgramBuildsIndependentNodeAction(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 	wf.Tasks[0].Prompt = "mutated"
 
 	action, ok := prog.nodes["a"].action().(plan.AskModel)
@@ -274,7 +274,7 @@ tasks:
 	}
 	wf.ByID("a").Prompt = "mutated"
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 	action, ok := prog.nodes["a"].action().(plan.AskModel)
 	if !ok {
 		t.Fatalf("nodes[a].action = %T, want plan.AskModel", prog.nodes["a"].action())
@@ -300,7 +300,7 @@ func TestCompileProgramCompilesBodyOpByKind(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 
 	tests := []struct {
 		id   workflow.TaskID
@@ -341,6 +341,15 @@ func TestCompileProgramCompilesBodyOpByKind(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustCompileProgram(t *testing.T, wf *workflow.Workflow) *program {
+	t.Helper()
+	prog, err := compileProgram(wf)
+	if err != nil {
+		t.Fatalf("compileProgram: %v", err)
+	}
+	return prog
 }
 
 func assertUnitKinds(t *testing.T, units []unit, want []string) {

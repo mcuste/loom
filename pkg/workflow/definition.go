@@ -1,6 +1,10 @@
 package workflow
 
-import "github.com/mcuste/loom/pkg/runtime"
+import (
+	"fmt"
+
+	"github.com/mcuste/loom/pkg/runtime"
+)
 
 // NodeID identifies any workflow graph node (task or structural loop).
 type NodeID string
@@ -79,6 +83,11 @@ type LoopNode struct {
 	Body        WorkflowFragment
 }
 
+// Definition is the parsed, validated semantic workflow model consumed by
+// planners and executors. It is intentionally independent of the YAML syntax
+// structs and of the legacy materialized Workflow view.
+type Definition = WorkflowDefinition
+
 // WorkflowDefinition is an immutable view of a parsed workflow in node form.
 type WorkflowDefinition struct {
 	ID          WorkflowID
@@ -120,13 +129,70 @@ func (w *Workflow) storeDefinition(def WorkflowDefinition) {
 	w.hasDefinition = true
 }
 
-func definitionHasTask(def WorkflowDefinition, id TaskID) bool {
+// TaskNodes returns the executable task nodes in declaration order. Loop body
+// tasks are flattened into the same global task namespace as top-level tasks.
+func (def WorkflowDefinition) TaskNodes() []TaskNode {
+	tasks := definitionTaskNodes(def)
+	out := make([]TaskNode, len(tasks))
+	for i, task := range tasks {
+		out[i] = cloneTaskNode(task)
+	}
+	return out
+}
+
+// TaskNode returns the executable task node named id.
+func (def WorkflowDefinition) TaskNode(id TaskID) (TaskNode, bool) {
+	for _, task := range definitionTaskNodes(def) {
+		if task.ID == id {
+			return cloneTaskNode(task), true
+		}
+	}
+	return TaskNode{}, false
+}
+
+// HasTask reports whether id names an executable task in the definition.
+func (def WorkflowDefinition) HasTask(id TaskID) bool {
 	for _, task := range definitionTaskNodes(def) {
 		if task.ID == id {
 			return true
 		}
 	}
 	return false
+}
+
+// OutputTask returns the task selected as this definition's result.
+func (def WorkflowDefinition) OutputTask() (TaskID, error) {
+	if def.Output.Task != "" {
+		if !def.HasTask(def.Output.Task) {
+			return "", &UnknownOutputTaskError{Task: def.Output.Task}
+		}
+		return def.Output.Task, nil
+	}
+	tasks := definitionTaskNodes(def)
+	hasDependent := make(map[TaskID]bool, len(tasks))
+	for _, task := range tasks {
+		for _, dep := range task.DependsOn {
+			hasDependent[TaskID(dep)] = true
+		}
+	}
+	var sinks []TaskID
+	for _, task := range tasks {
+		if !hasDependent[task.ID] {
+			sinks = append(sinks, task.ID)
+		}
+	}
+	switch len(sinks) {
+	case 1:
+		return sinks[0], nil
+	case 0:
+		return "", fmt.Errorf("workflow %q: no terminal task to use as output, set output to pick one", def.ID)
+	default:
+		return "", fmt.Errorf("workflow %q: %d terminal tasks; set output: to pick one", def.ID, len(sinks))
+	}
+}
+
+func definitionHasTask(def WorkflowDefinition, id TaskID) bool {
+	return def.HasTask(id)
 }
 
 func definitionTaskNodes(def WorkflowDefinition) []TaskNode {

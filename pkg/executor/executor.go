@@ -222,7 +222,10 @@ type Options struct {
 // Run returns the partial Report along with the wrapped error. Cancellation
 // of the caller's ctx propagates the same way.
 func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) (*Report, error) {
-	prog := compileProgram(wf)
+	prog, err := compileProgram(wf)
+	if err != nil {
+		return nil, fmt.Errorf("compile workflow: %w", err)
+	}
 	order := prog.order()
 	rep := newReport(order, opts)
 	st := newRootFrame(wf, rep, order, opts)
@@ -254,7 +257,9 @@ func runCached(cache Cache, t *workflow.Task, rt runtime.Name, model runtime.Mod
 		// Cache persistence is best-effort: a successful LLM call must not be turned
 		// into a task failure by a transient write error (disk full, permissions).
 		// The next run simply re-computes on the resulting miss.
-		_ = cache.Save(rt, model, effort, sysPrompt, prompt, res.Output)
+		if saveErr := cache.Save(rt, model, effort, sysPrompt, prompt, res.Output); saveErr != nil {
+			// Intentionally ignored.
+		}
 	}
 	return res, nil
 }

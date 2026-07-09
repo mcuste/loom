@@ -133,7 +133,7 @@ func Compile(wf *workflow.Workflow, opts CompileOptions) (*Plan, error) {
 // CompileDefinition builds a Plan from the parsed workflow definition. The
 // compiler consumes the node/action model rather than YAML-shaped task fields,
 // keeping execution planning separate from manifest decoding details.
-func CompileDefinition(def workflow.WorkflowDefinition, _ CompileOptions) (*Plan, error) {
+func CompileDefinition(def workflow.Definition, _ CompileOptions) (*Plan, error) {
 	tasks, loops, taskByID := definitionNodes(def)
 	root := BlockID("root")
 	pl := &Plan{
@@ -184,7 +184,7 @@ func CompileDefinition(def workflow.WorkflowDefinition, _ CompileOptions) (*Plan
 	return pl, nil
 }
 
-func definitionNodes(def workflow.WorkflowDefinition) ([]workflow.TaskNode, []workflow.LoopNode, map[workflow.TaskID]workflow.TaskNode) {
+func definitionNodes(def workflow.Definition) ([]workflow.TaskNode, []workflow.LoopNode, map[workflow.TaskID]workflow.TaskNode) {
 	var tasks []workflow.TaskNode
 	var loops []workflow.LoopNode
 	taskByID := make(map[workflow.TaskID]workflow.TaskNode)
@@ -206,7 +206,7 @@ func definitionNodes(def workflow.WorkflowDefinition) ([]workflow.TaskNode, []wo
 	return tasks, loops, taskByID
 }
 
-func compileTask(def workflow.WorkflowDefinition, t workflow.TaskNode) (Step, error) {
+func compileTask(def workflow.Definition, t workflow.TaskNode) (Step, error) {
 	action, err := compileAction(def, t)
 	if err != nil {
 		return Step{}, err
@@ -227,7 +227,7 @@ func compileTask(def workflow.WorkflowDefinition, t workflow.TaskNode) (Step, er
 	}, nil
 }
 
-func compileAction(def workflow.WorkflowDefinition, t workflow.TaskNode) (Action, error) {
+func compileAction(def workflow.Definition, t workflow.TaskNode) (Action, error) {
 	switch action := t.Action.(type) {
 	case workflow.PromptAction:
 		rt, model, effort := effectiveRuntime(def.Defaults, t.Runtime)

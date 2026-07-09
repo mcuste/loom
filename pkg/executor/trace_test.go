@@ -94,7 +94,7 @@ func TestInterpreterTraceNodeLifecycle(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 	order := prog.order()
 	rep := newReport(order, Options{})
 	st := newRootFrame(wf, rep, order, Options{})
@@ -168,7 +168,7 @@ func TestInterpreterTraceLoopPassLifecycle(t *testing.T) {
 		},
 	}
 
-	prog := compileProgram(wf)
+	prog := mustCompileProgram(t, wf)
 	order := prog.order()
 	rep := newReport(order, Options{})
 	st := newRootFrame(wf, rep, order, Options{})
