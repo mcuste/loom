@@ -195,6 +195,13 @@ tasks:
 	if effort != "high" {
 		t.Errorf("child body effort = %q, want the child's own %q (no override given)", effort, "high")
 	}
+	def := child.Definition()
+	if def.Defaults.Model != "m2" {
+		t.Errorf("child definition model = %q, want the overridden %q", def.Defaults.Model, "m2")
+	}
+	if def.Defaults.Effort != "high" {
+		t.Errorf("child definition effort = %q, want the child's own %q", def.Defaults.Effort, "high")
+	}
 }
 
 // TestLinkSubWorkflows_Cycle pins that a link cycle (A links B, B links A) is

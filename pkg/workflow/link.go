@@ -82,12 +82,21 @@ func linkSubWorkflows(wf *Workflow, selfPath string, chain []string, resolve Sub
 func applyChildOverrides(child *Workflow, t *Task) {
 	if t.Runtime != "" {
 		child.Runtime = t.Runtime
+		if child.hasDefinition {
+			child.definition.Defaults.Runtime = t.Runtime
+		}
 	}
 	if t.Model != "" {
 		child.Model = t.Model
+		if child.hasDefinition {
+			child.definition.Defaults.Model = t.Model
+		}
 	}
 	if t.Effort != "" {
 		child.Effort = t.Effort
+		if child.hasDefinition {
+			child.definition.Defaults.Effort = t.Effort
+		}
 	}
 }
 

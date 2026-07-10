@@ -16,7 +16,7 @@
 //     meaning.
 //  2. collectDeclarations validates identifiers and lowers raw syntax into
 //     parser declarations, preserving raw values for semantic fields such as
-//     retry:, budget:, schema:, loop:, and with:.
+//     retry:, budget:, schema:, and with:.
 //  3. validateDeclarations validates cross-declaration invariants such as task
 //     uniqueness, loop namespaces, loop membership, and loop convergence.
 //  4. lowerDefinition builds the validated semantic WorkflowDefinition, parsing
@@ -81,7 +81,7 @@ type workflowDecl struct {
 	params       []Param
 	paramIdx     map[ParamName]int
 	paramSet     map[ParamName]struct{}
-	topTasks     []syntax.DraftTask
+	topTasks     []taskDecl
 	rawLoops     []rawLoop
 	budget       syntax.Value
 	cache        bool
@@ -230,7 +230,7 @@ func (p *parser) collectDeclarations() (workflowDecl, error) {
 	return decl, nil
 }
 
-func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {
+func prepareDraftLoops(id WorkflowID, draftTasks []syntax.DraftTask) ([]taskDecl, []rawLoop, error) {
 	topTasks, rawLoops, err := splitLoopWrappers(draftTasks)
 	if err != nil {
 		return nil, nil, err
@@ -406,19 +406,23 @@ func finalizeDefinition(def Definition, checked checkedWorkflowDecl) (Definition
 	return def, nil
 }
 
-func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []rawLoop, error) {
+func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]taskDecl, []rawLoop, error) {
 	// Loops are declared as tasks carrying a loop: (while) or for_each: block:
 	// the wrapper is not an executable task; its id becomes the loop id and its
 	// nested tasks: the members. Split wrappers out of the top-level task set
 	// and collect them as rawLoops for the shared loop-group machinery.
 	var rawLoops []rawLoop
-	topTasks := make([]syntax.DraftTask, 0, len(draftTasks))
+	topTasks := make([]taskDecl, 0, len(draftTasks))
 	for _, rt := range draftTasks {
 		isLoop := rt.Loop.Present()
 		isForEach := rt.ForEach.Present()
 		isForEachParallel := rt.ForEachParallel.Present()
 		if !isLoop && !isForEach && !isForEachParallel {
-			topTasks = append(topTasks, rt)
+			decl, err := newTaskDecl(rt, "")
+			if err != nil {
+				return nil, nil, err
+			}
+			topTasks = append(topTasks, decl)
 			continue
 		}
 		tid, err := NewTaskID(rt.ID)
@@ -467,28 +471,16 @@ func splitLoopWrappers(draftTasks []syntax.DraftTask) ([]syntax.DraftTask, []raw
 	return topTasks, rawLoops, nil
 }
 
-func flattenLoopTasks(topTasks []syntax.DraftTask, rawLoops []rawLoop) ([]taskDecl, map[TaskID]struct{}, error) {
+func flattenLoopTasks(topTasks []taskDecl, rawLoops []rawLoop) ([]taskDecl, map[TaskID]struct{}, error) {
 	// allTasks is the flat union of top-level and every loop's nested tasks, in
 	// declaration order, each tagged with its owning loop ("" for top-level). The
 	// whole parser runs over this list so wf.Tasks ends up flat and ordered, and
 	// existing code over wf.Tasks (Plan, ByID, Effective, the scheduler) is
 	// unchanged by the addition of scoped loops.
 	allTasks := make([]taskDecl, 0, len(topTasks)+len(rawLoops))
-	for _, rt := range topTasks {
-		decl, err := newTaskDecl(rt, "")
-		if err != nil {
-			return nil, nil, err
-		}
-		allTasks = append(allTasks, decl)
-	}
+	allTasks = append(allTasks, topTasks...)
 	for _, rl := range rawLoops {
-		for _, rt := range rl.tasks {
-			decl, err := newTaskDecl(rt, rl.id)
-			if err != nil {
-				return nil, nil, err
-			}
-			allTasks = append(allTasks, decl)
-		}
+		allTasks = append(allTasks, rl.tasks...)
 	}
 
 	// Global task-id uniqueness across top-level and every loop's nested tasks: a

@@ -86,11 +86,13 @@ type LoopGroup struct {
 	Members []TaskID
 }
 
-// rawLoop is the decoded-but-unvalidated form of a single loop block (`loop:`
-// or `for_each:`). The has* flags record key presence so the parser can enforce
-// that exactly one of until_empty / until is set (a present-but-empty value
-// still counts as set), and whether `in` was a static list versus a dynamic
-// source.
+// rawLoop is the decoded declaration form of a single loop block (`loop:` or
+// `for_each:`). Its member tasks have already crossed the syntax boundary into
+// taskDecl values, while loop-scoped references and convergence rules are still
+// checked later against the full workflow declaration graph. The has* flags
+// record key presence so the parser can enforce that exactly one of until_empty
+// / until is set (a present-but-empty value still counts as set), and whether
+// `in` was a static list versus a dynamic source.
 type rawLoop struct {
 	id            LoopID
 	description   string
@@ -105,7 +107,7 @@ type rawLoop struct {
 	hasList       bool
 	listSource    string
 	as            string
-	tasks         []syntax.DraftTask
+	tasks         []taskDecl
 }
 
 var (
@@ -141,9 +143,11 @@ func decodeLoopBody(entry syntax.Value, rl *rawLoop) error {
 				return fmt.Errorf("loop: max: %w", err)
 			}
 		case "tasks":
-			if err := v.Decode(&rl.tasks); err != nil {
+			tasks, err := decodeTaskDecls(v, rl.id)
+			if err != nil {
 				return fmt.Errorf("loop: tasks: %w", err)
 			}
+			rl.tasks = tasks
 		default:
 			return &UnknownLoopGroupFieldError{Field: key}
 		}
@@ -194,9 +198,11 @@ func decodeForEachBody(entry syntax.Value, rl *rawLoop) error {
 				return fmt.Errorf("for_each: as: %w", err)
 			}
 		case "tasks":
-			if err := v.Decode(&rl.tasks); err != nil {
+			tasks, err := decodeTaskDecls(v, rl.id)
+			if err != nil {
 				return fmt.Errorf("for_each: tasks: %w", err)
 			}
+			rl.tasks = tasks
 		default:
 			return &UnknownForEachFieldError{Field: key}
 		}
@@ -255,7 +261,7 @@ func buildLoopGroups(rawLoops []rawLoop, ids map[TaskID]struct{}, params map[Par
 		members := make([]TaskID, 0, len(rl.tasks))
 		memberSet := make(map[TaskID]bool, len(rl.tasks))
 		for _, rt := range rl.tasks {
-			tid := TaskID(rt.ID)
+			tid := rt.id
 			members = append(members, tid)
 			memberSet[tid] = true
 		}

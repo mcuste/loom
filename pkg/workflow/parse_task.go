@@ -32,6 +32,22 @@ type taskDecl struct {
 	with             syntax.Value
 }
 
+func decodeTaskDecls(node syntax.Value, loop LoopID) ([]taskDecl, error) {
+	var draftTasks []syntax.DraftTask
+	if err := node.Decode(&draftTasks); err != nil {
+		return nil, err
+	}
+	decls := make([]taskDecl, 0, len(draftTasks))
+	for _, rt := range draftTasks {
+		decl, err := newTaskDecl(rt, loop)
+		if err != nil {
+			return nil, err
+		}
+		decls = append(decls, decl)
+	}
+	return decls, nil
+}
+
 func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
 	id, err := NewTaskID(rt.ID)
 	if err != nil {
