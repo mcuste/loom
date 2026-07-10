@@ -14,13 +14,13 @@
 //
 //  1. pkg/syntax decodes YAML into syntax.Document without assigning domain
 //     meaning.
-//  2. collectDeclarations validates identifiers and lowers raw syntax into
-//     parser declarations, preserving raw values for semantic fields such as
-//     retry:, budget:, schema:, and with:.
+//  2. parseDeclarations validates identifiers and lowers raw syntax into
+//     parser declarations, parsing local semantic blocks such as retry:,
+//     budget:, schema:, schedule:, and with: into workflow-owned values.
 //  3. validateDeclarations validates cross-declaration invariants such as task
 //     uniqueness, loop namespaces, loop membership, and loop convergence.
 //  4. lowerDefinition builds the validated semantic WorkflowDefinition, parsing
-//     templates, conditions, retry, budget, schema, and dependency references.
+//     templates, conditions, and dependency references.
 //  5. Parse materializes the legacy Workflow view from that definition for
 //     existing callers; ParseDefinition exposes the semantic model directly.
 //  6. Invocation-time checks that need resolved params, linked sub-workflows, or
@@ -68,9 +68,10 @@ type parser struct {
 	id  WorkflowID
 }
 
-// workflowDecl is the parser's declaration model. It is no longer raw YAML, but
-// it is not executable yet: syntax.Value fields are retained until the semantic
-// lowering phase can validate them with the full task/param/loop scope.
+// workflowDecl is the parser's declaration model. It is no longer raw YAML and
+// carries only workflow-owned declaration values, but it is not executable yet:
+// cross-reference validation and lowering still need the full task/param/loop
+// scope.
 type workflowDecl struct {
 	id           WorkflowID
 	description  string
@@ -83,11 +84,11 @@ type workflowDecl struct {
 	paramSet     map[ParamName]struct{}
 	topTasks     []taskDecl
 	rawLoops     []rawLoop
-	budget       syntax.Value
+	budget       *Budget
 	cache        bool
 	workingDir   string
 	output       string
-	schedule     *syntax.DraftSchedule
+	schedule     *Schedule
 }
 
 // checkedWorkflowDecl is the validated declaration graph ready to lower into
@@ -170,26 +171,35 @@ func newParser(doc *syntax.Document, opts ParseOptions) (*parser, error) {
 }
 
 func (p *parser) parseDefinition() (Definition, error) {
-	decl, err := p.collectDeclarations()
+	decl, err := p.parseDeclarations()
 	if err != nil {
 		return WorkflowDefinition{}, err
 	}
 
-	checked, err := validateDeclarations(decl)
+	checked, err := validateDeclarationGraph(decl)
 	if err != nil {
 		return WorkflowDefinition{}, err
 	}
 
-	return lowerDefinition(checked)
+	return lowerCheckedDefinition(checked)
 }
 
-func (p *parser) collectDeclarations() (workflowDecl, error) {
+func (p *parser) parseDeclarations() (workflowDecl, error) {
 	topTasks, rawLoops, err := prepareDraftLoops(p.id, p.doc.Tasks)
 	if err != nil {
 		return workflowDecl{}, err
 	}
 
 	params, paramIdx, err := parseParams(p.doc.Params)
+	if err != nil {
+		return workflowDecl{}, err
+	}
+
+	budget, err := parseBudget(p.doc.Budget)
+	if err != nil {
+		return workflowDecl{}, err
+	}
+	schedule, err := parseSchedule(p.doc.Schedule)
 	if err != nil {
 		return workflowDecl{}, err
 	}
@@ -210,11 +220,11 @@ func (p *parser) collectDeclarations() (workflowDecl, error) {
 		paramSet:     paramSetFromIndex(paramIdx),
 		topTasks:     topTasks,
 		rawLoops:     rawLoops,
-		budget:       p.doc.Budget,
+		budget:       budget,
 		cache:        cache,
 		workingDir:   p.doc.WorkingDir,
 		output:       p.doc.Output,
-		schedule:     p.doc.Schedule,
+		schedule:     schedule,
 	}
 
 	if err := validateRoutingField("", "runtime", p.doc.Runtime, decl.paramSet); err != nil {
@@ -256,7 +266,17 @@ func paramSetFromIndex(paramIdx map[ParamName]int) map[ParamName]struct{} {
 	return paramSet
 }
 
-func validateDeclarations(decl workflowDecl) (checkedWorkflowDecl, error) {
+func parseSchedule(raw *syntax.DraftSchedule) (*Schedule, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if raw.Cron == "" {
+		return nil, fmt.Errorf("schedule: cron is required")
+	}
+	return &Schedule{Cron: raw.Cron, TZ: raw.TZ}, nil
+}
+
+func validateDeclarationGraph(decl workflowDecl) (checkedWorkflowDecl, error) {
 	allTasks, ids, err := flattenLoopTasks(decl.topTasks, decl.rawLoops)
 	if err != nil {
 		return checkedWorkflowDecl{}, err
@@ -290,7 +310,7 @@ func validateDeclarations(decl workflowDecl) (checkedWorkflowDecl, error) {
 	}, nil
 }
 
-func lowerDefinition(checked checkedWorkflowDecl) (Definition, error) {
+func lowerCheckedDefinition(checked checkedWorkflowDecl) (Definition, error) {
 	def := checked.decl.newDefinition()
 	st := &parseState{
 		ids:      checked.ids,
@@ -389,18 +409,8 @@ func finalizeDefinition(def Definition, checked checkedWorkflowDecl) (Definition
 		return WorkflowDefinition{}, err
 	}
 
-	budget, err := parseBudget(decl.budget)
-	if err != nil {
-		return WorkflowDefinition{}, err
-	}
-	def.Policies.Budget = budget
-
-	if decl.schedule != nil {
-		if decl.schedule.Cron == "" {
-			return WorkflowDefinition{}, fmt.Errorf("schedule: cron is required")
-		}
-		def.Schedule = &Schedule{Cron: decl.schedule.Cron, TZ: decl.schedule.TZ}
-	}
+	def.Policies.Budget = decl.budget
+	def.Schedule = cloneSchedule(decl.schedule)
 
 	def.Order = planDefinition(def)
 	return def, nil

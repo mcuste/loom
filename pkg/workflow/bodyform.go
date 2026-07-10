@@ -7,28 +7,37 @@ import "github.com/mcuste/loom/pkg/syntax"
 // declaration makes taskDecl about task metadata rather than a bag of optional
 // executable forms.
 type taskBodyDecl struct {
-	prompt     string
-	promptFile string
-	command    string
-	workflow   string
-	script     string
-	args       []string
-	with       syntax.Value
+	prompt      string
+	promptFile  string
+	command     string
+	workflow    string
+	script      string
+	args        []string
+	hasWithArgs bool
+	with        []WithArg
 }
 
-func newTaskBodyDecl(rt syntax.DraftTask) taskBodyDecl {
-	return taskBodyDecl{
-		prompt:     rt.Prompt,
-		promptFile: rt.PromptFile,
-		command:    rt.Command,
-		workflow:   rt.Workflow,
-		script:     rt.Script,
-		args:       append([]string(nil), rt.Args...),
-		with:       rt.With,
+func newTaskBodyDecl(tid TaskID, rt syntax.DraftTask) (taskBodyDecl, error) {
+	body := taskBodyDecl{
+		prompt:      rt.Prompt,
+		promptFile:  rt.PromptFile,
+		command:     rt.Command,
+		workflow:    rt.Workflow,
+		script:      rt.Script,
+		args:        append([]string(nil), rt.Args...),
+		hasWithArgs: rt.With.Present(),
 	}
+	if forms := body.presentForms(); len(forms) == 1 && body.isSubWorkflow() {
+		with, err := decodeWith(tid, rt.With)
+		if err != nil {
+			return taskBodyDecl{}, err
+		}
+		body.with = with
+	}
+	return body, nil
 }
 
-func (b taskBodyDecl) hasWith() bool { return b.with.Present() }
+func (b taskBodyDecl) hasWith() bool { return b.hasWithArgs }
 func (b taskBodyDecl) hasArgs() bool { return len(b.args) > 0 }
 
 func (b taskBodyDecl) isCommand() bool     { return b.command != "" }

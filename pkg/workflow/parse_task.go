@@ -25,11 +25,10 @@ type taskDecl struct {
 	dependsOn        []string
 	writesState      string
 	when             string
-	retry            syntax.Value
-	budget           syntax.Value
-	schema           syntax.Value
+	retry            Retry
+	budget           *Budget
+	schema           *Schema
 	cache            *bool
-	with             syntax.Value
 }
 
 func decodeTaskDecls(node syntax.Value, loop LoopID) ([]taskDecl, error) {
@@ -53,6 +52,22 @@ func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
 	if err != nil {
 		return taskDecl{}, err
 	}
+	body, err := newTaskBodyDecl(id, rt)
+	if err != nil {
+		return taskDecl{}, err
+	}
+	retry, err := parseRetry(id, rt.Retry)
+	if err != nil {
+		return taskDecl{}, err
+	}
+	budget, err := parseBudget(rt.Budget)
+	if err != nil {
+		return taskDecl{}, fmt.Errorf("task %q: %w", id, err)
+	}
+	schema, err := parseSchema(rt.Schema)
+	if err != nil {
+		return taskDecl{}, fmt.Errorf("task %q: %w", id, err)
+	}
 	return taskDecl{
 		id:               id,
 		loop:             loop,
@@ -60,18 +75,17 @@ func newTaskDecl(rt syntax.DraftTask, loop LoopID) (taskDecl, error) {
 		runtime:          runtime.Name(rt.Runtime),
 		model:            runtime.Model(rt.Model),
 		effort:           runtime.Effort(rt.Effort),
-		body:             newTaskBodyDecl(rt),
+		body:             body,
 		systemPrompt:     rt.SystemPrompt,
 		systemPromptFile: rt.SystemPromptFile,
 		okExit:           append([]int(nil), rt.OkExit...),
 		dependsOn:        append([]string(nil), rt.DependsOn...),
 		writesState:      rt.WritesState,
 		when:             rt.When,
-		retry:            rt.Retry,
-		budget:           rt.Budget,
-		schema:           rt.Schema,
+		retry:            retry,
+		budget:           budget,
+		schema:           schema,
 		cache:            rt.Cache,
-		with:             rt.With,
 	}, nil
 }
 
@@ -173,7 +187,7 @@ func validateOkExit(tid TaskID, rt taskDecl) error {
 }
 
 // normalizeTaskBody picks the single body text placeholder validation runs
-// against and decodes any sub-workflow with: arguments.
+// against and returns any parsed sub-workflow with: arguments.
 func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 	// body is the text that placeholder validation runs against;
 	// substitution targets the same string at execution time. A sub-workflow
@@ -199,11 +213,7 @@ func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 		if rt.systemPrompt != "" || rt.systemPromptFile != "" {
 			return "", nil, fmt.Errorf("task %q: %w", tid, ErrSubWorkflowWithSystemPrompt)
 		}
-		wa, err := decodeWith(tid, rt.body.with)
-		if err != nil {
-			return "", nil, err
-		}
-		withArgs = wa
+		withArgs = append([]WithArg(nil), rt.body.with...)
 		// Join the with-values so the malformed-placeholder check below scans
 		// every value the way it scans a prompt body.
 		var sb strings.Builder
@@ -237,14 +247,10 @@ func normalizeTaskBody(tid TaskID, rt taskDecl) (string, []WithArg, error) {
 }
 
 func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body string, withArgs []WithArg) (taskMeta, error) {
-	schema, err := parseSchema(rt.schema)
-	if err != nil {
-		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
-	}
-	if schema != nil && rt.body.isCommand() {
+	if rt.schema != nil && rt.body.isCommand() {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, ErrShellTaskWithSchema)
 	}
-	if schema != nil && rt.body.isScript() {
+	if rt.schema != nil && rt.body.isScript() {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, ErrScriptTaskWithSchema)
 	}
 	if err := validateRoutingField(tid, "runtime", string(rt.runtime), st.paramSet); err != nil {
@@ -258,6 +264,7 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body st
 	}
 	dc := depsCtx{tid: tid, known: st.ids, params: st.paramSet, loopVar: st.asByLoop[loop]}
 	var deps []TaskID
+	var err error
 	if rt.body.isSubWorkflow() {
 		deps, err = buildSubWorkflowDeps(dc, rt.dependsOn, withArgs)
 	} else {
@@ -282,16 +289,8 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body st
 	if err := validateSystemPrompt(rt.systemPrompt, st.paramSet); err != nil {
 		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
-	retry, err := parseRetry(tid, rt.retry)
-	if err != nil {
-		return taskMeta{}, err
-	}
 	if rt.writesState != "" && !identifierRe.MatchString(rt.writesState) {
 		return taskMeta{}, &InvalidWritesStateError{Task: tid, Key: rt.writesState}
-	}
-	taskBudget, err := parseBudget(rt.budget)
-	if err != nil {
-		return taskMeta{}, fmt.Errorf("task %q: %w", tid, err)
 	}
 	// A when: expression may only reference this task's dependencies: the
 	// executor evaluates it after the dependency gates close, so a reference
@@ -310,10 +309,10 @@ func buildTaskMeta(st *parseState, loop LoopID, tid TaskID, rt taskDecl, body st
 		}
 	}
 	return taskMeta{
-		schema: schema,
+		schema: rt.schema,
 		deps:   deps,
 		cond:   cond,
-		retry:  retry,
-		budget: taskBudget,
+		retry:  rt.retry,
+		budget: rt.budget,
 	}, nil
 }
