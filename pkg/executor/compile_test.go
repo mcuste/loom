@@ -282,8 +282,8 @@ tasks:
 	if got := action.Prompt.String(); got != "original" {
 		t.Fatalf("nodes[a].action.Prompt = %q, want original", got)
 	}
-	if got := prog.nodes["a"].task.Prompt; got != "original" {
-		t.Fatalf("nodes[a].task.Prompt = %q, want original", got)
+	if got := prog.nodes["a"].taskPayload().Prompt; got != "original" {
+		t.Fatalf("nodes[a].taskPayload().Prompt = %q, want original", got)
 	}
 }
 

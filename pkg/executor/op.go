@@ -78,7 +78,7 @@ func cacheEnabled(wf *workflow.Workflow, n *node) bool {
 }
 
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := &n.task
+	t := n.taskPayload()
 	action, ok := n.action().(plan.RunCommand)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "shell command")
@@ -98,7 +98,7 @@ func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, bas
 }
 
 func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := &n.task
+	t := n.taskPayload()
 	action, ok := n.action().(plan.RunScript)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "script")
@@ -118,7 +118,7 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 }
 
 func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
-	t := &n.task
+	t := n.taskPayload()
 	wf := i.program.wf
 	action, ok := n.action().(plan.AskModel)
 	if !ok {

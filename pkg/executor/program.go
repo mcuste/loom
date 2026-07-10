@@ -26,13 +26,23 @@ func (p *program) order() []workflow.TaskID {
 	return workflowOrder(p.plan.Order)
 }
 
-// node is one compiled task plus its interpreter-ready operation. The task
-// value is a hook/report compatibility payload materialized from the semantic
-// definition; executable behavior and policy stay in the compiled plan step.
+// node is one compiled task plus its interpreter-ready operation. The semantic
+// TaskNode remains authoritative; payload is only the legacy hook/report view
+// needed by older executor APIs and process helpers.
 type node struct {
-	task workflow.Task
-	step plan.Step
-	op   op
+	task    workflow.TaskNode
+	payload workflow.Task
+	step    plan.Step
+	op      op
+}
+
+func newNode(task workflow.TaskNode, step plan.Step) *node {
+	return &node{
+		task:    task,
+		payload: task.Task(),
+		step:    step,
+		op:      compileOpFromPlan(step.Action),
+	}
 }
 
 func (n *node) id() workflow.TaskID {
@@ -40,6 +50,13 @@ func (n *node) id() workflow.TaskID {
 		return ""
 	}
 	return n.task.ID
+}
+
+func (n *node) taskPayload() *workflow.Task {
+	if n == nil {
+		return nil
+	}
+	return &n.payload
 }
 
 func (n *node) deps() []workflow.TaskID {

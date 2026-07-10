@@ -42,38 +42,16 @@ func workflowOrder(order []plan.StepID) []workflow.TaskID {
 }
 
 func compileNodesFromDefinition(def workflow.Definition, pl *plan.Plan) map[workflow.TaskID]*node {
-	tasks := taskPayloadsFromDefinition(def)
+	tasks := def.TaskNodes()
 	nodes := make(map[workflow.TaskID]*node, len(tasks))
-	for _, step := range pl.Steps {
-		t, ok := tasks[step.Name]
+	for _, task := range tasks {
+		step, ok := pl.Steps[plan.StepID(task.ID)]
 		if !ok {
 			continue
 		}
-		nodes[t.ID] = &node{
-			task: t,
-			step: step,
-			op:   compileOpFromPlan(step.Action),
-		}
+		nodes[task.ID] = newNode(task, step)
 	}
 	return nodes
-}
-
-func taskPayloadsFromDefinition(def workflow.Definition) map[workflow.TaskID]workflow.Task {
-	tasks := make(map[workflow.TaskID]workflow.Task)
-	add := func(task workflow.TaskNode) {
-		tasks[task.ID] = task.Task()
-	}
-	for _, node := range def.Nodes {
-		switch n := node.(type) {
-		case workflow.TaskNode:
-			add(n)
-		case workflow.LoopNode:
-			for _, task := range n.Body.Nodes {
-				add(task)
-			}
-		}
-	}
-	return tasks
 }
 
 func compileOpFromPlan(action plan.Action) op {
