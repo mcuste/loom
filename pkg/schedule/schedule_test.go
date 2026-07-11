@@ -1,7 +1,6 @@
 package schedule_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -32,8 +31,8 @@ func counterRand(initial uint32) func() (string, error) {
 	}
 }
 
-func cronRecord() schedule.Record {
-	return schedule.Record{
+func cronSchedule() schedule.Schedule {
+	return schedule.Schedule{
 		WorkflowID: "deploy",
 		Ref:        "deploy",
 		Path:       "/abs/deploy.yaml",
@@ -46,7 +45,7 @@ func TestAddAssignsIDAndNextRunAt(t *testing.T) {
 	root := t.TempDir()
 	cfg := schedule.Config{Now: fixedClock("2026-06-28T10:00:00Z"), Rand: counterRand(0xa1b2c3)}
 
-	got, err := schedule.Add(root, cronRecord(), cfg)
+	got, err := schedule.Add(root, cronSchedule(), cfg)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -67,7 +66,7 @@ func TestAddListGetRemoveRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	cfg := schedule.Config{Now: fixedClock("2026-06-28T10:00:00Z"), Rand: counterRand(1)}
 
-	added, err := schedule.Add(root, cronRecord(), cfg)
+	added, err := schedule.Add(root, cronSchedule(), cfg)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -93,52 +92,13 @@ func TestAddListGetRemoveRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRecordAcceptsLegacyScheduledTimeKeys(t *testing.T) {
-	data := []byte(`{
-		"next_fire": "2026-06-28T15:00:00Z",
-		"last_fire": "2026-06-27T15:00:00Z"
-	}`)
-
-	var got schedule.Record
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("Unmarshal legacy record: %v", err)
-	}
-	if want := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC); !got.NextRunAt.Equal(want) {
-		t.Errorf("NextRunAt = %v, want %v", got.NextRunAt, want)
-	}
-	if want := time.Date(2026, 6, 27, 15, 0, 0, 0, time.UTC); !got.LastRunAt.Equal(want) {
-		t.Errorf("LastRunAt = %v, want %v", got.LastRunAt, want)
-	}
-
-	encoded, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("Marshal migrated record: %v", err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &fields); err != nil {
-		t.Fatalf("Unmarshal migrated fields: %v", err)
-	}
-	if _, ok := fields["next_run_at"]; !ok {
-		t.Errorf("migrated record = %s, want next_run_at", encoded)
-	}
-	if _, ok := fields["last_run_at"]; !ok {
-		t.Errorf("migrated record = %s, want last_run_at", encoded)
-	}
-	if _, ok := fields["next_fire"]; ok {
-		t.Errorf("migrated record = %s, legacy next_fire still present", encoded)
-	}
-	if _, ok := fields["last_fire"]; ok {
-		t.Errorf("migrated record = %s, legacy last_fire still present", encoded)
-	}
-}
-
 func TestListFiltersByWorkflow(t *testing.T) {
 	root := t.TempDir()
 	cfg := schedule.Config{Now: fixedClock("2026-06-28T10:00:00Z"), Rand: counterRand(1)}
-	if _, err := schedule.Add(root, cronRecord(), cfg); err != nil {
+	if _, err := schedule.Add(root, cronSchedule(), cfg); err != nil {
 		t.Fatalf("Add deploy: %v", err)
 	}
-	other := cronRecord()
+	other := cronSchedule()
 	other.WorkflowID = "report"
 	if _, err := schedule.Add(root, other, cfg); err != nil {
 		t.Fatalf("Add report: %v", err)
@@ -154,13 +114,13 @@ func TestListFiltersByWorkflow(t *testing.T) {
 
 func TestUpdateRequiresExisting(t *testing.T) {
 	root := t.TempDir()
-	rec := cronRecord()
+	rec := cronSchedule()
 	rec.ID = "deploy_cron_missing"
 	if err := schedule.Update(root, rec); err == nil {
 		t.Fatal("Update missing: want error, got nil")
 	}
 	cfg := schedule.Config{Now: fixedClock("2026-06-28T10:00:00Z"), Rand: counterRand(1)}
-	added, err := schedule.Add(root, cronRecord(), cfg)
+	added, err := schedule.Add(root, cronSchedule(), cfg)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -178,7 +138,7 @@ func TestUpdateRequiresExisting(t *testing.T) {
 }
 
 func TestValidateRejectsBadTriggers(t *testing.T) {
-	cases := map[string]schedule.Record{
+	cases := map[string]schedule.Schedule{
 		"both cron and at": {
 			Trigger: schedule.Trigger{Cron: "0 15 * * *", At: time.Now()},
 		},
@@ -203,7 +163,7 @@ func TestValidateRejectsBadTriggers(t *testing.T) {
 
 func TestNextRunAfterOneOff(t *testing.T) {
 	at := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)
-	rec := schedule.Record{Trigger: schedule.Trigger{At: at}}
+	rec := schedule.Schedule{Trigger: schedule.Trigger{At: at}}
 
 	next, err := rec.NextRunAfter(at.Add(-time.Hour))
 	if err != nil {
@@ -222,7 +182,7 @@ func TestNextRunAfterOneOff(t *testing.T) {
 }
 
 func TestEffectiveOverlapDefaultsToSkip(t *testing.T) {
-	if got := (schedule.Record{}).EffectiveOverlap(); got != schedule.OverlapSkip {
+	if got := (schedule.Schedule{}).EffectiveOverlap(); got != schedule.OverlapSkip {
 		t.Fatalf("EffectiveOverlap = %q, want %q", got, schedule.OverlapSkip)
 	}
 }
@@ -280,8 +240,8 @@ func TestParseAtTimeRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestNewRecordDefaults(t *testing.T) {
-	rec := schedule.NewRecord("mywf", "mywf", "/abs/mywf.yaml", map[string]string{"k": "v"})
+func TestNewScheduleDefaults(t *testing.T) {
+	rec := schedule.NewSchedule("mywf", "mywf", "/abs/mywf.yaml", map[string]string{"k": "v"})
 	if rec.WorkflowID != "mywf" {
 		t.Errorf("WorkflowID = %q, want %q", rec.WorkflowID, "mywf")
 	}
@@ -299,9 +259,9 @@ func TestNewRecordDefaults(t *testing.T) {
 	}
 }
 
-func TestNewCronRecordSetsTriggerAndOverlap(t *testing.T) {
+func TestNewCronScheduleSetsTriggerAndOverlap(t *testing.T) {
 	tr := schedule.Trigger{Cron: "0 9 * * 1", TZ: "UTC"}
-	rec := schedule.NewCronRecord("deploy", "deploy", "/abs/deploy.yaml", nil, tr, schedule.OverlapQueue)
+	rec := schedule.NewCronSchedule("deploy", "deploy", "/abs/deploy.yaml", nil, tr, schedule.OverlapQueue)
 	if rec.Trigger.Cron != "0 9 * * 1" {
 		t.Errorf("Trigger.Cron = %q, want %q", rec.Trigger.Cron, "0 9 * * 1")
 	}
@@ -316,10 +276,10 @@ func TestNewCronRecordSetsTriggerAndOverlap(t *testing.T) {
 	}
 }
 
-func TestNewAtRecordSetsTrigger(t *testing.T) {
+func TestNewAtScheduleSetsTrigger(t *testing.T) {
 	at := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
 	tr := schedule.Trigger{At: at, TZ: "UTC"}
-	rec := schedule.NewAtRecord("deploy", "deploy", "/abs/deploy.yaml", nil, tr)
+	rec := schedule.NewAtSchedule("deploy", "deploy", "/abs/deploy.yaml", nil, tr)
 	if !rec.Trigger.At.Equal(at) {
 		t.Errorf("Trigger.At = %v, want %v", rec.Trigger.At, at)
 	}
@@ -492,8 +452,8 @@ func TestTriggerSummary(t *testing.T) {
 	}
 }
 
-func cronRec(next time.Time) schedule.Record {
-	return schedule.Record{
+func cronRec(next time.Time) schedule.Schedule {
+	return schedule.Schedule{
 		ID:         "wf_cron_x",
 		WorkflowID: "wf",
 		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
@@ -555,7 +515,7 @@ func TestDueCronZeroNextRunAt(t *testing.T) {
 // error from Due (via NextRunAfter) rather than silently skipping.
 func TestDueCronBadExpr(t *testing.T) {
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
-	rec := schedule.Record{
+	rec := schedule.Schedule{
 		ID:      "wf_cron_bad",
 		Trigger: schedule.Trigger{Cron: "not a cron", TZ: "UTC"},
 		Enabled: true,
@@ -568,7 +528,7 @@ func TestDueCronBadExpr(t *testing.T) {
 
 func TestDueOneOff(t *testing.T) {
 	at := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)
-	rec := schedule.Record{
+	rec := schedule.Schedule{
 		ID:      "wf_at_x",
 		Trigger: schedule.Trigger{At: at},
 		Enabled: true,

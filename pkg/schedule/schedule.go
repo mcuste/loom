@@ -117,11 +117,8 @@ func (t Trigger) Summary() string {
 	return "at " + t.At.Format("2006-01-02 15:04 MST")
 }
 
-// Schedule is the scheduler-domain name for a single persisted schedule.
-type Schedule = Record
-
-// Record is a single persisted schedule.
-type Record struct {
+// Schedule is a single persisted workflow schedule.
+type Schedule struct {
 	// ID is the stable on-disk identity ("<workflow_id>_<kind>_<suffix>").
 	ID string `json:"id"`
 	// WorkflowID is the workflow's id, kept for display and the `ls` filter.
@@ -150,35 +147,10 @@ type Record struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// UnmarshalJSON accepts the current scheduled-time keys and the legacy keys
-// written by earlier Loom versions.
-func (r *Record) UnmarshalJSON(data []byte) error {
-	type recordJSON Record
-	var decoded recordJSON
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	var legacy struct {
-		NextRunAt time.Time `json:"next_fire"`
-		LastRunAt time.Time `json:"last_fire"`
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return err
-	}
-	if decoded.NextRunAt.IsZero() {
-		decoded.NextRunAt = legacy.NextRunAt
-	}
-	if decoded.LastRunAt.IsZero() {
-		decoded.LastRunAt = legacy.LastRunAt
-	}
-	*r = Record(decoded)
-	return nil
-}
-
 // RunRequest returns the opaque workflow request for this scheduled run. The
 // daemon passes this value to a launcher.RunLauncher without inspecting the
 // referenced workflow's tasks, graph, runtimes, or reports.
-func (r Record) RunRequest(defaultCwd string) launcher.RunRequest {
+func (r Schedule) RunRequest(defaultCwd string) launcher.RunRequest {
 	ref := r.Path
 	if ref == "" {
 		ref = r.Ref
@@ -196,7 +168,7 @@ func (r Record) RunRequest(defaultCwd string) launcher.RunRequest {
 
 // EffectiveOverlap returns the record's overlap policy, defaulting an empty
 // value to OverlapSkip.
-func (r Record) EffectiveOverlap() OverlapPolicy {
+func (r Schedule) EffectiveOverlap() OverlapPolicy {
 	if r.Overlap == "" {
 		return OverlapSkip
 	}
@@ -207,7 +179,7 @@ func (r Record) EffectiveOverlap() OverlapPolicy {
 // returned in UTC. For a one-off, it is the trigger instant when that is after
 // t, otherwise the zero time (already past). For a cron, the expression is
 // evaluated in the trigger's timezone (local when TZ is empty).
-func (r Record) NextRunAfter(t time.Time) (time.Time, error) {
+func (r Schedule) NextRunAfter(t time.Time) (time.Time, error) {
 	if !r.Trigger.IsCron() {
 		if r.Trigger.At.After(t) {
 			return r.Trigger.At.UTC(), nil
@@ -233,8 +205,8 @@ func (r Record) NextRunAfter(t time.Time) (time.Time, error) {
 // record afterward, the next scheduled time to persist, and any error.
 // On the first scan, it skips elapsed cron times and removes elapsed one-offs
 // so downtime never causes delayed runs. This keeps the timing decision next
-// to Record so the daemon owns only policy and side effects.
-func (r Record) Due(now time.Time, firstScan bool) (run, remove bool, next time.Time, err error) {
+// to Schedule so the daemon owns only policy and side effects.
+func (r Schedule) Due(now time.Time, firstScan bool) (run, remove bool, next time.Time, err error) {
 	if r.Trigger.IsCron() {
 		nf := r.NextRunAt
 		if nf.IsZero() {
@@ -343,7 +315,7 @@ func ParseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time, lab
 // or one-off must be set, a cron expression must parse, and a named timezone
 // must resolve. It does not check the workflow ref (the caller validates that
 // against the registry).
-func Validate(rec Record) error {
+func Validate(rec Schedule) error {
 	hasCron := rec.Trigger.Cron != ""
 	hasAt := !rec.Trigger.At.IsZero()
 	switch {
@@ -363,13 +335,13 @@ func Validate(rec Record) error {
 	return nil
 }
 
-// NewRecord builds a Record with the trigger-independent defaults shared by
+// NewSchedule builds a Schedule with the trigger-independent defaults shared by
 // every schedule creation path: WorkflowID, Ref, Path, Params, and Enabled=true.
 // The caller sets Trigger (and, for inline records, ID; for cron records,
 // Overlap) before persisting. path must already be absolute; the caller resolves
 // it via filepath.Abs.
-func NewRecord(workflowID, ref, path string, params map[string]string) Record {
-	return Record{
+func NewSchedule(workflowID, ref, path string, params map[string]string) Schedule {
+	return Schedule{
 		WorkflowID: workflowID,
 		Ref:        ref,
 		Path:       path,
@@ -378,31 +350,31 @@ func NewRecord(workflowID, ref, path string, params map[string]string) Record {
 	}
 }
 
-// NewCronRecord builds a fully-initialized Record for a recurring cron
-// schedule. It extends [NewRecord] by setting Trigger and Overlap so the
+// NewCronSchedule builds a fully-initialized Schedule for a recurring cron
+// schedule. It extends [NewSchedule] by setting Trigger and Overlap so the
 // caller does not mutate fields after construction. path must already be
 // absolute.
-func NewCronRecord(workflowID, ref, path string, params map[string]string, trigger Trigger, overlap OverlapPolicy) Record {
-	rec := NewRecord(workflowID, ref, path, params)
+func NewCronSchedule(workflowID, ref, path string, params map[string]string, trigger Trigger, overlap OverlapPolicy) Schedule {
+	rec := NewSchedule(workflowID, ref, path, params)
 	rec.Trigger = trigger
 	rec.Overlap = overlap
 	return rec
 }
 
-// NewAtRecord builds a fully-initialized Record for a one-off schedule. It
-// extends [NewRecord] by setting Trigger so the caller does not mutate fields
+// NewAtSchedule builds a fully-initialized Schedule for a one-off schedule. It
+// extends [NewSchedule] by setting Trigger so the caller does not mutate fields
 // after construction. path must already be absolute.
-func NewAtRecord(workflowID, ref, path string, params map[string]string, trigger Trigger) Record {
-	rec := NewRecord(workflowID, ref, path, params)
+func NewAtSchedule(workflowID, ref, path string, params map[string]string, trigger Trigger) Schedule {
+	rec := NewSchedule(workflowID, ref, path, params)
 	rec.Trigger = trigger
 	return rec
 }
 
 // Add validates rec, assigns its id (when empty), CreatedAt, and initial
 // NextRunAt, then writes it atomically under root. It returns the stored record.
-func Add(root string, rec Record, cfg Config) (Record, error) {
+func Add(root string, rec Schedule, cfg Config) (Schedule, error) {
 	if err := Validate(rec); err != nil {
-		return Record{}, err
+		return Schedule{}, err
 	}
 	now := time.Now
 	if cfg.Now != nil {
@@ -416,24 +388,24 @@ func Add(root string, rec Record, cfg Config) (Record, error) {
 	if rec.ID == "" {
 		suffix, err := randFn()
 		if err != nil {
-			return Record{}, fmt.Errorf("schedule: generate id: %w", err)
+			return Schedule{}, fmt.Errorf("schedule: generate id: %w", err)
 		}
 		rec.ID = rec.WorkflowID + "_" + triggerKind(rec.Trigger) + "_" + suffix
 	}
 	next, err := rec.NextRunAfter(rec.CreatedAt)
 	if err != nil {
-		return Record{}, err
+		return Schedule{}, err
 	}
 	rec.NextRunAt = next
 	if err := write(root, rec); err != nil {
-		return Record{}, err
+		return Schedule{}, err
 	}
 	return rec, nil
 }
 
 // Update rewrites an existing schedule by id. The record must already exist;
 // updating a missing id is an error so a typo does not silently create a record.
-func Update(root string, rec Record) error {
+func Update(root string, rec Schedule) error {
 	if rec.ID == "" {
 		return fmt.Errorf("schedule: update requires a record id")
 	}
@@ -447,17 +419,17 @@ func Update(root string, rec Record) error {
 }
 
 // Get reads a single schedule by id.
-func Get(root, id string) (Record, error) {
+func Get(root, id string) (Schedule, error) {
 	data, err := os.ReadFile(recordPath(root, id))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Record{}, fmt.Errorf("schedule: %q not found", id)
+			return Schedule{}, fmt.Errorf("schedule: %q not found", id)
 		}
-		return Record{}, fmt.Errorf("schedule: read %q: %w", id, err)
+		return Schedule{}, fmt.Errorf("schedule: read %q: %w", id, err)
 	}
-	var rec Record
+	var rec Schedule
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return Record{}, fmt.Errorf("schedule: parse %q: %w", id, err)
+		return Schedule{}, fmt.Errorf("schedule: parse %q: %w", id, err)
 	}
 	return rec, nil
 }
@@ -478,7 +450,7 @@ func Remove(root, id string) error {
 // workflowFilter is non-empty only schedules for that workflow id are returned.
 // A missing schedules directory is not an error: it returns an empty slice so a
 // fresh install lists cleanly.
-func List(root, workflowFilter string) ([]Record, error) {
+func List(root, workflowFilter string) ([]Schedule, error) {
 	dir := schedulesDir(root)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -487,7 +459,7 @@ func List(root, workflowFilter string) ([]Record, error) {
 		}
 		return nil, fmt.Errorf("schedule: read dir %s: %w", dir, err)
 	}
-	var recs []Record
+	var recs []Schedule
 	for _, e := range entries {
 		name := e.Name()
 		if filepath.Ext(name) != ".json" {
@@ -497,7 +469,7 @@ func List(root, workflowFilter string) ([]Record, error) {
 		if err != nil {
 			return nil, fmt.Errorf("schedule: read %s: %w", name, err)
 		}
-		var rec Record
+		var rec Schedule
 		if err := json.Unmarshal(data, &rec); err != nil {
 			return nil, fmt.Errorf("schedule: parse %s: %w", name, err)
 		}
@@ -543,7 +515,7 @@ func SyncInline(home string, wf *workflow.Workflow, path, ref string) (SyncResul
 		return SyncResult{Action: SyncNoOp}, nil
 	}
 
-	rec := NewRecord(string(wf.ID), ref, path, nil)
+	rec := NewSchedule(string(wf.ID), ref, path, nil)
 	rec.ID = id
 	rec.Trigger = Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ}
 	if err := Validate(rec); err != nil {
@@ -579,7 +551,7 @@ func SchedulesDir(root string) string {
 }
 
 // write atomically persists rec to <root>/schedules/<id>.json.
-func write(root string, rec Record) error {
+func write(root string, rec Schedule) error {
 	dir := schedulesDir(root)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("schedule: create dir: %w", err)

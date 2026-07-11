@@ -33,7 +33,7 @@ func pick(cond bool, yes, no string) string {
 // per record with its id, workflow, trigger summary, next scheduled time, enabled
 // state, and overlap policy. An empty slice prints a single "no schedules"
 // line so a fresh install reports cleanly.
-func SchedulesTable(w io.Writer, recs []schedule.Record) error {
+func SchedulesTable(w io.Writer, recs []schedule.Schedule) error {
 	if len(recs) == 0 {
 		_, err := fmt.Fprintln(w, "no schedules")
 		return err

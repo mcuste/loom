@@ -15,7 +15,7 @@ daemon.Daemon.Run
 Daemon.scan: enabled schedule records <---------------------+
     |                                                        |
     v                                                        |
-schedule.Record.Due(now, firstScan)                          |
+schedule.Schedule.Due(now, firstScan)                        |
     |                                                        |
     +-- not due --------------------> persist NextRunAt -------+
     |                                                        |
@@ -60,7 +60,7 @@ or cancellation                                              |
 
 ## Why this package exists
 
-`pkg/schedule` owns durable records and the pure `Record.Due` timing decision.
+`pkg/schedule` owns durable schedules and the pure `Schedule.Due` timing decision.
 The daemon owns the long-running coordination around that decision: scan
 cadence, missed-time handling, overlap policy, in-flight state, and completion
 updates.

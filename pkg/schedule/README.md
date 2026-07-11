@@ -27,10 +27,10 @@ $LOOM_HOME/schedules/<schedule-id>.json
       - persist LastRunAt and LastRunID
 ```
 
-## Record and trigger model
+## Schedule and trigger model
 
-`Record` is the persisted schedule. It identifies the workflow, carries the
-parameters for each run, and records its timing and run state. A `Trigger` has
+`Schedule` is the persisted domain entity. It identifies the workflow, carries
+the parameters for each run, and records its timing and run state. A `Trigger` has
 exactly one timing form:
 
 - `Cron` is a recurring gronx expression evaluated in `TZ`, or local time when
@@ -39,14 +39,12 @@ exactly one timing form:
 
 `NextRunAt` is the next scheduled time. `LastRunAt` is the scheduled time of
 the most recent run, and `LastRunID` links that occurrence to the run store.
-New records use the `next_run_at` and `last_run_at` JSON keys. Reading still
-accepts the legacy timestamp keys so existing schedule files migrate when they
-are next written.
+Scheduled timestamps use the `next_run_at` and `last_run_at` JSON keys.
 
 ## Timing and policies
 
-`Record.NextRunAfter` computes the next scheduled time without side effects.
-`Record.Due` decides whether a record should run at a given instant, whether a
+`Schedule.NextRunAfter` computes the next scheduled time without side effects.
+`Schedule.Due` decides whether a schedule should run at a given instant, whether a
 one-off record should be removed, and which next scheduled time to persist.
 The daemon owns all resulting I/O and launch coordination.
 

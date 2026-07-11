@@ -141,9 +141,9 @@ func newScheduleObserver(t *testing.T, home string) *scheduleObserver {
 	return &scheduleObserver{t: t, home: home, watcher: watcher}
 }
 
-func (o *scheduleObserver) awaitRecord(id string, matches func(schedule.Record) bool) schedule.Record {
+func (o *scheduleObserver) awaitSchedule(id string, matches func(schedule.Schedule) bool) schedule.Schedule {
 	o.t.Helper()
-	if rec, ok := o.matchingRecord(id, matches); ok {
+	if rec, ok := o.matchingSchedule(id, matches); ok {
 		return rec
 	}
 	timer := time.NewTimer(5 * time.Second)
@@ -154,7 +154,7 @@ func (o *scheduleObserver) awaitRecord(id string, matches func(schedule.Record) 
 			if !ok {
 				o.t.Fatal("schedule observer closed before record matched")
 			}
-			if rec, ok := o.matchingRecord(id, matches); ok {
+			if rec, ok := o.matchingSchedule(id, matches); ok {
 				return rec
 			}
 		case err, ok := <-o.watcher.Errors:
@@ -167,7 +167,7 @@ func (o *scheduleObserver) awaitRecord(id string, matches func(schedule.Record) 
 	}
 }
 
-func (o *scheduleObserver) matchingRecord(id string, matches func(schedule.Record) bool) (schedule.Record, bool) {
+func (o *scheduleObserver) matchingSchedule(id string, matches func(schedule.Schedule) bool) (schedule.Schedule, bool) {
 	rec, err := schedule.Get(o.home, id)
 	return rec, err == nil && matches(rec)
 }
@@ -225,7 +225,7 @@ func TestDueCronLaunchesWithScheduleProvenance(t *testing.T) {
 	}
 	call.respond("run-1", nil)
 
-	got := observer.awaitRecord(added.ID, func(rec schedule.Record) bool {
+	got := observer.awaitSchedule(added.ID, func(rec schedule.Schedule) bool {
 		return rec.LastRunID == "run-1"
 	})
 	if !got.LastRunAt.Equal(firstRun) {
@@ -262,7 +262,7 @@ func TestSkipOverlapConsumesDueOccurrence(t *testing.T) {
 	clock.Set(secondRun)
 	resetNextRunAt(t, home, sentinel.ID)
 
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
+	observer.awaitSchedule(sentinel.ID, func(rec schedule.Schedule) bool {
 		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	got := requireSchedule(t, home, main.ID)
@@ -284,7 +284,7 @@ func TestQueueOverlapWaitsForActiveLaunch(t *testing.T) {
 	clock.Set(secondRun)
 	resetNextRunAt(t, home, sentinel.ID)
 
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
+	observer.awaitSchedule(sentinel.ID, func(rec schedule.Schedule) bool {
 		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	got := requireSchedule(t, home, main.ID)
@@ -326,7 +326,7 @@ func TestDisabledScheduleDoesNotLaunch(t *testing.T) {
 	runner := newControlledLauncher()
 	startDaemon(t, home, clock, runner)
 
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
+	observer.awaitSchedule(sentinel.ID, func(rec schedule.Schedule) bool {
 		return rec.NextRunAt.Equal(mustTime("2026-06-28T10:02:00Z"))
 	})
 	assertNoLaunch(t, runner)
@@ -369,7 +369,7 @@ func TestLauncherFailureDoesNotBlockNextOccurrence(t *testing.T) {
 
 	second := awaitLaunch(t, runner)
 	second.respond("run-after-failure", nil)
-	got := observer.awaitRecord(added.ID, func(rec schedule.Record) bool {
+	got := observer.awaitSchedule(added.ID, func(rec schedule.Schedule) bool {
 		return rec.LastRunID == "run-after-failure"
 	})
 	if !got.LastRunAt.Equal(secondRun) {
@@ -377,20 +377,20 @@ func TestLauncherFailureDoesNotBlockNextOccurrence(t *testing.T) {
 	}
 }
 
-func startReadyDaemon(t *testing.T, home string, clock *testClock, runner *controlledLauncher, sentinelID string) (*runningDaemon, *scheduleObserver, schedule.Record) {
+func startReadyDaemon(t *testing.T, home string, clock *testClock, runner *controlledLauncher, sentinelID string) (*runningDaemon, *scheduleObserver, schedule.Schedule) {
 	t.Helper()
 	sentinel := addHourlySentinel(t, home, sentinelID)
 	observer := newScheduleObserver(t, home)
 	running := startDaemon(t, home, clock, runner)
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
+	observer.awaitSchedule(sentinel.ID, func(rec schedule.Schedule) bool {
 		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	return running, observer, sentinel
 }
 
-func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.OverlapPolicy, enabled bool) schedule.Record {
+func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.OverlapPolicy, enabled bool) schedule.Schedule {
 	t.Helper()
-	return addSchedule(t, home, schedule.Record{
+	return addSchedule(t, home, schedule.Schedule{
 		ID:         id,
 		WorkflowID: id,
 		Ref:        id + ".yaml",
@@ -401,9 +401,9 @@ func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.Over
 	}, now)
 }
 
-func addHourlySentinel(t *testing.T, home, id string) schedule.Record {
+func addHourlySentinel(t *testing.T, home, id string) schedule.Schedule {
 	t.Helper()
-	return addSchedule(t, home, schedule.Record{
+	return addSchedule(t, home, schedule.Schedule{
 		ID:         id,
 		WorkflowID: id,
 		Ref:        id + ".yaml",
@@ -414,9 +414,9 @@ func addHourlySentinel(t *testing.T, home, id string) schedule.Record {
 	}, createdAt.Add(-time.Minute))
 }
 
-func addOneOff(t *testing.T, home, id string, now, at time.Time, enabled bool) schedule.Record {
+func addOneOff(t *testing.T, home, id string, now, at time.Time, enabled bool) schedule.Schedule {
 	t.Helper()
-	return addSchedule(t, home, schedule.Record{
+	return addSchedule(t, home, schedule.Schedule{
 		ID:         id,
 		WorkflowID: id,
 		Ref:        id + ".yaml",
@@ -426,7 +426,7 @@ func addOneOff(t *testing.T, home, id string, now, at time.Time, enabled bool) s
 	}, now)
 }
 
-func addSchedule(t *testing.T, home string, rec schedule.Record, now time.Time) schedule.Record {
+func addSchedule(t *testing.T, home string, rec schedule.Schedule, now time.Time) schedule.Schedule {
 	t.Helper()
 	added, err := schedule.Add(home, rec, schedule.Config{Now: func() time.Time { return now }})
 	if err != nil {
@@ -444,7 +444,7 @@ func resetNextRunAt(t *testing.T, home, id string) {
 	}
 }
 
-func requireSchedule(t *testing.T, home, id string) schedule.Record {
+func requireSchedule(t *testing.T, home, id string) schedule.Schedule {
 	t.Helper()
 	rec, err := schedule.Get(home, id)
 	if err != nil {

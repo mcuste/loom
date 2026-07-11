@@ -56,7 +56,7 @@ func doScheduleCron(w io.Writer, home, cwd string, catalog runtime.Catalog, ref 
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewCronRecord(string(wf.ID), ref, path, params,
+	rec := schedule.NewCronSchedule(string(wf.ID), ref, path, params,
 		schedule.Trigger{Cron: o.expr, TZ: o.tz}, overlap)
 	return addAndReport(w, home, rec)
 }
@@ -80,7 +80,7 @@ func doScheduleAt(w io.Writer, home, cwd string, catalog runtime.Catalog, ref st
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewAtRecord(string(wf.ID), ref, path, params,
+	rec := schedule.NewAtSchedule(string(wf.ID), ref, path, params,
 		schedule.Trigger{At: at, TZ: o.tz})
 	return addAndReport(w, home, rec)
 }
@@ -107,7 +107,7 @@ func loadAndResolve(home, cwd string, catalog runtime.Catalog, ref string, param
 	return wf, path, cliParams, nil
 }
 
-func addAndReport(w io.Writer, home string, rec schedule.Record) error {
+func addAndReport(w io.Writer, home string, rec schedule.Schedule) error {
 	stored, err := schedule.Add(home, rec, schedule.Config{})
 	if err != nil {
 		return err

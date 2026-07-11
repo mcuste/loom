@@ -26,7 +26,7 @@ func TestSchedulesTableEmpty(t *testing.T) {
 // TestSchedulesTableColumns pins the header column names and per-row field
 // rendering for a populated schedule list.
 func TestSchedulesTableColumns(t *testing.T) {
-	recs := []schedule.Record{
+	recs := []schedule.Schedule{
 		{
 			ID:         "shellwf_cron_abc123",
 			WorkflowID: "shellwf",
@@ -59,7 +59,7 @@ func TestSchedulesTableColumns(t *testing.T) {
 
 // TestSchedulesTableDisabledRow pins that Enabled=false renders as "no".
 func TestSchedulesTableDisabledRow(t *testing.T) {
-	recs := []schedule.Record{
+	recs := []schedule.Schedule{
 		{ID: "x", WorkflowID: "w", Trigger: schedule.Trigger{Cron: "0 0 * * *"}, Enabled: false},
 	}
 	var buf bytes.Buffer

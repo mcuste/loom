@@ -188,7 +188,7 @@ func (d *Daemon) scan(ctx context.Context, firstScan bool, results chan<- launch
 		if !rec.Enabled {
 			continue
 		}
-		soonest = earliest(soonest, d.processRecord(ctx, rec, now, firstScan, results))
+		soonest = earliest(soonest, d.processSchedule(ctx, rec, now, firstScan, results))
 	}
 	return soonest
 }
@@ -208,11 +208,11 @@ func earliest(a, b time.Time) time.Time {
 	}
 }
 
-// processRecord evaluates one enabled schedule: it drops a missed one-off,
+// processSchedule evaluates one enabled schedule: it drops a missed one-off,
 // starts or holds a due run, or persists a freshly computed NextRunAt. It
-// returns this record's contribution to the next scan time, or zero after a
+// returns this schedule's contribution to the next scan time, or zero after a
 // decision error or dropped one-off.
-func (d *Daemon) processRecord(ctx context.Context, rec schedule.Record, now time.Time, firstScan bool, results chan<- launchResult) time.Time {
+func (d *Daemon) processSchedule(ctx context.Context, rec schedule.Schedule, now time.Time, firstScan bool, results chan<- launchResult) time.Time {
 	run, remove, next, err := rec.Due(now, firstScan)
 	if err != nil {
 		d.logf("schedule %s: %v", rec.ID, err)
@@ -222,7 +222,7 @@ func (d *Daemon) processRecord(ctx context.Context, rec schedule.Record, now tim
 		// A one-off whose instant was missed while the daemon was down is dropped
 		// without running.
 		d.logf("schedule %s: one-off time passed while daemon was down, dropping", rec.ID)
-		d.removeRecord(rec.ID)
+		d.removeSchedule(rec.ID)
 		return time.Time{}
 	}
 	if run {
@@ -237,7 +237,7 @@ func (d *Daemon) processRecord(ctx context.Context, rec schedule.Record, now tim
 	// table and the next scan agree.
 	if !next.Equal(rec.NextRunAt) {
 		rec.NextRunAt = next
-		d.updateRecord(rec)
+		d.updateSchedule(rec)
 	}
 	return next
 }
@@ -246,7 +246,7 @@ func (d *Daemon) processRecord(ctx context.Context, rec schedule.Record, now tim
 // schedule running, persists the post-trigger record state, and launches the
 // run. It returns false when the queue policy must hold the due occurrence for
 // a later scan.
-func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Record, now time.Time, remove bool, next time.Time, results chan<- launchResult) bool {
+func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Schedule, now time.Time, remove bool, next time.Time, results chan<- launchResult) bool {
 	switch rec.EffectiveOverlap() {
 	case schedule.OverlapSkip:
 		if d.running.contains(rec.ID) {
@@ -268,7 +268,7 @@ func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Record, now
 	// remove is only ever set for a one-off that just started.
 	d.advanceCron(rec, next)
 	if remove {
-		d.removeRecord(rec.ID)
+		d.removeSchedule(rec.ID)
 	}
 	go d.launchScheduledRun(ctx, rec, now, results)
 	d.logf("schedule %s: starting %s", rec.ID, rec.WorkflowID)
@@ -278,7 +278,7 @@ func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Record, now
 // launchScheduledRun sends the schedule's opaque workflow request through the
 // launcher port. The daemon does not load workflow YAML, validate params,
 // inspect tasks, or configure runtimes here; those are launcher concerns.
-func (d *Daemon) launchScheduledRun(ctx context.Context, rec schedule.Record, scheduledAt time.Time, results chan<- launchResult) {
+func (d *Daemon) launchScheduledRun(ctx context.Context, rec schedule.Schedule, scheduledAt time.Time, results chan<- launchResult) {
 	res := launchResult{scheduleID: rec.ID, oneOff: !rec.Trigger.IsCron(), scheduledAt: scheduledAt}
 	defer func() { results <- res }()
 
@@ -314,25 +314,25 @@ func (d *Daemon) complete(res launchResult) {
 	if res.runID != "" {
 		rec.LastRunID = res.runID
 	}
-	d.updateRecord(rec)
+	d.updateSchedule(rec)
 }
 
 // advanceCron consumes rec's current cron tick by persisting next as its
 // NextRunAt; it is a no-op for a one-off, whose launch is recorded by removal.
-func (d *Daemon) advanceCron(rec schedule.Record, next time.Time) {
+func (d *Daemon) advanceCron(rec schedule.Schedule, next time.Time) {
 	if rec.Trigger.IsCron() {
 		rec.NextRunAt = next
-		d.updateRecord(rec)
+		d.updateSchedule(rec)
 	}
 }
 
-func (d *Daemon) updateRecord(rec schedule.Record) {
+func (d *Daemon) updateSchedule(rec schedule.Schedule) {
 	if err := schedule.Update(d.home, rec); err != nil {
 		d.logf("schedule %s: update: %v", rec.ID, err)
 	}
 }
 
-func (d *Daemon) removeRecord(id string) {
+func (d *Daemon) removeSchedule(id string) {
 	if err := schedule.Remove(d.home, id); err != nil {
 		d.logf("schedule %s: remove: %v", id, err)
 	}
