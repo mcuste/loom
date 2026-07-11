@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/mcuste/loom/pkg/executor"
-	"github.com/mcuste/loom/pkg/run"
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/workflow"
@@ -25,12 +23,18 @@ type ObserverFactory func(io.Writer) runner.Observer
 // Schedulers call it only through Runner, while CLI wiring supplies the runtime
 // catalog and observer factory.
 type Launcher struct {
-	Home        string
-	Cwd         string
-	Catalog     runtime.Catalog
+	// Home is Loom's data directory.
+	Home string
+	// Cwd resolves refs and records the run; it is not the task cwd.
+	Cwd string
+	// Catalog selects and validates runtimes.
+	Catalog runtime.Catalog
+	// NewObserver builds required run output.
 	NewObserver ObserverFactory
-	LogRoot     string
-	Now         func() time.Time
+	// LogRoot holds scheduled-run logs.
+	LogRoot string
+	// Now timestamps scheduled-run logs.
+	Now func() time.Time
 }
 
 // Prepare loads and validates inv, returning a runner request. It does not
@@ -88,7 +92,7 @@ func (l Launcher) Launch(ctx context.Context, inv Invocation, prov Provenance) (
 func (l Launcher) observer(prov Provenance) (runner.Observer, func(), error) {
 	factory := l.NewObserver
 	if factory == nil {
-		return noopObserver{}, func() {}, nil
+		return nil, nil, errors.New("launcher observer factory is required")
 	}
 	if l.LogRoot == "" || prov.ScheduleID == "" {
 		return factory(io.Discard), func() {}, nil
@@ -140,12 +144,3 @@ func isParamResolutionError(err error) bool {
 	var unknownFile *workflow.UnknownFileParamError
 	return errors.As(err, &unknownFile)
 }
-
-type noopObserver struct{}
-
-func (noopObserver) Header(runner.RunMeta) error { return nil }
-func (noopObserver) Events() run.EventSink       { return nil }
-func (noopObserver) Summary(*workflow.Workflow, *executor.Report, int) error {
-	return nil
-}
-func (noopObserver) StoreError(error) {}
