@@ -8,7 +8,7 @@ daemon use it to load a workflow, check its parameters, and build a
 loom run                         loom daemon
    |                                  |
    v                                  v
-launcher.Launcher.Prepare      scheduler finds a due schedule
+launcher.Launcher.Prepare      daemon finds a due schedule
    |                                  |
    |                                  v
    |                            launcher.Runner.Launch
@@ -24,7 +24,7 @@ launcher.Launcher.Prepare      scheduler finds a due schedule
         +----------+-----------+
         |                      |
         v                      v
-CLI prints the plan       scheduler opens a log file
+CLI prints the plan       daemon opens a log file
 and runs the request      and records why it ran
         |                      |
         +----------+-----------+
@@ -37,9 +37,9 @@ and runs the request      and records why it ran
 
 ## Why this package exists
 
-The scheduler only needs to say “run this workflow with these parameters.” It
+The daemon only needs to say “run this workflow with these parameters.” It
 does not need to know how workflows are loaded or checked. `Runner` is the
-small interface that keeps that boundary clear and makes scheduler tests simple.
+small interface that keeps that boundary clear and makes daemon tests simple.
 
 The CLI calls `Prepare` directly so it can print the plan before starting the
 run. Scheduled runs call `Launch`, which prepares the request, writes output to

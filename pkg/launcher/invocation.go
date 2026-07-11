@@ -17,14 +17,14 @@ type Invocation struct {
 }
 
 // Provenance records why a run was launched. Direct CLI runs leave it empty;
-// the scheduler supplies its schedule ID, trigger, and fire time.
+// the daemon supplies its schedule ID, trigger, and fire time.
 type Provenance struct {
 	ScheduleID  string
 	TriggeredBy string
 	FireTime    time.Time
 }
 
-// Runner is the small port the scheduler uses to start a workflow run.
+// Runner is the small port the daemon uses to start a workflow run.
 type Runner interface {
 	Launch(context.Context, Invocation, Provenance) (string, error)
 }

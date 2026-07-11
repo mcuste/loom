@@ -9,18 +9,18 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/internal/daemoninstall"
+	"github.com/mcuste/loom/pkg/daemon"
 	"github.com/mcuste/loom/pkg/launcher"
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/schedule"
-	"github.com/mcuste/loom/pkg/scheduler"
 	"github.com/mcuste/loom/pkg/tui"
 )
 
 func newDaemonCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
-		Short: "Run the scheduler loop that fires scheduled workflows",
-		Long: "Run the scheduler loop in the foreground. It reads schedules from " +
+		Short: "Run the daemon that fires scheduled workflows",
+		Long: "Run the daemon in the foreground. It reads schedules from " +
 			"$LOOM_HOME/schedules and fires each workflow at its cron time or one-off " +
 			"instant, recording every run in the normal run store. Use a process " +
 			"supervisor (launchd/systemd) to keep it alive across reboots.",
@@ -37,7 +37,7 @@ func newDaemonCmd(env *cliEnv) *cobra.Command {
 				},
 				LogRoot: filepath.Join(schedule.SchedulesDir(env.home), "logs"),
 			}
-			d := scheduler.New(env.home, env.cwd, runLauncher, cmd.OutOrStdout())
+			d := daemon.New(env.home, env.cwd, runLauncher, cmd.OutOrStdout())
 			return d.Run(ctx)
 		},
 	}

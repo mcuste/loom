@@ -20,7 +20,7 @@ import (
 type ObserverFactory func(io.Writer) runner.Observer
 
 // Launcher resolves workflow references and prepares them for the runner.
-// Schedulers call it only through Runner, while CLI wiring supplies the runtime
+// The daemon calls it only through Runner, while CLI wiring supplies the runtime
 // catalog and observer factory.
 type Launcher struct {
 	// Home is Loom's data directory.

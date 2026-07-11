@@ -6,7 +6,7 @@ import "time"
 // the record after firing, the next NextFire to persist, and any error.
 // firstScan distinguishes a tick that is due now from one that was missed
 // while the daemon was down (only honored for catch-up). This encapsulates
-// the firing decision next to the Record type so the scheduler daemon needs
+// the firing decision next to the Record type so the daemon needs
 // only policy and side-effects, not timing logic.
 func (r Record) Due(now time.Time, firstScan bool) (fire, remove bool, next time.Time, err error) {
 	if r.Trigger.IsCron() {

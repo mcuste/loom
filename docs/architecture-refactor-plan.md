@@ -360,7 +360,8 @@ moving code only when it removes confusion.
 ```text
 pkg/launcher/          workflow loading, validation, and launch setup
 pkg/runtime/           runtime contracts and catalog
-pkg/scheduler/         schedule domain, store, daemon, sync use cases
+pkg/schedule/          schedule domain, store, timing, and sync use cases
+pkg/daemon/            scan, overlap, and scheduled launch loop
 pkg/store/             run/state persistence, if still cohesive after cleanup
 pkg/tui/               TUI/plain renderers, or move under adapters if clearer
 cmd/loom/              CLI wiring only

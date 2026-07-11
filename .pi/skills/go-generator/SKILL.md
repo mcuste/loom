@@ -65,7 +65,7 @@ Discover the exact current boundary before editing, but use these defaults:
 - `pkg/store`: persisted runs, state, cache records, run ids, and atomic file
   updates.
 - `pkg/registry`: workflow discovery, roots, and extension resolution.
-- `pkg/plan`, `pkg/run`, `pkg/schedule`, `pkg/scheduler`, and `pkg/tui`: keep
+- `pkg/daemon`, `pkg/plan`, `pkg/run`, `pkg/schedule`, and `pkg/tui`: keep
   their focused presentation/planning/scheduling/event responsibilities.
 - `internal/...`: implementation details that should not become public package
   APIs.
