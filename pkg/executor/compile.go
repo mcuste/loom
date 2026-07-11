@@ -22,8 +22,8 @@ func compileProgram(wf *workflow.Workflow) (*program, error) {
 func compileProgramFromDefinition(wf *workflow.Workflow, def workflow.Definition, pl *plan.Plan) *program {
 	loops := compileLoopsFromPlan(pl)
 	p := &program{
-		wf:       wf,
 		def:      def,
+		env:      runtimeEnvFromWorkflow(wf, def),
 		plan:     pl,
 		nodes:    compileNodesFromDefinition(def, pl),
 		loops:    loops,
@@ -31,6 +31,18 @@ func compileProgramFromDefinition(wf *workflow.Workflow, def workflow.Definition
 	}
 	p.units = compileUnits(p.order(), p.memberOf, p.loops)
 	return p
+}
+
+func runtimeEnvFromWorkflow(wf *workflow.Workflow, def workflow.Definition) runtimeEnv {
+	env := runtimeEnv{
+		budget:       def.Policies.Budget,
+		cacheDefault: def.Policies.Cache,
+		workingDir:   def.Defaults.WorkingDir,
+	}
+	if wf != nil {
+		env.subs = wf.Subs
+	}
+	return env
 }
 
 func workflowOrder(order []plan.StepID) []workflow.TaskID {

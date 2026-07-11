@@ -10,12 +10,10 @@ import (
 )
 
 func TestProgramPhaseOneSkeleton(t *testing.T) {
-	wf := &workflow.Workflow{}
 	pl := &plan.Plan{Order: []plan.StepID{"build", "test"}}
 	memberOf := map[workflow.TaskID]int{"loop-body": 0}
 
 	prog := program{
-		wf:       wf,
 		plan:     pl,
 		units:    []unit{skeletonUnit{}},
 		memberOf: memberOf,

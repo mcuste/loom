@@ -21,7 +21,7 @@ func newReport(order []workflow.TaskID, opts Options) *Report {
 // sub-workflow runs through its own public Run call, so it gets an independent
 // report and root store even when it inherits options like state, cache, and
 // working directory from its parent.
-func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, opts Options) *frame {
+func newRootFrame(workflowWorkDir string, rep *Report, order []workflow.TaskID, opts Options) *frame {
 	gates := make(map[workflow.TaskID]chan struct{}, len(order))
 	for _, tid := range order {
 		gates[tid] = make(chan struct{})
@@ -44,8 +44,8 @@ func newRootFrame(wf *workflow.Workflow, rep *Report, order []workflow.TaskID, o
 
 	var mu sync.Mutex
 	workDir := opts.WorkDir
-	if wf.WorkingDir != "" {
-		workDir = wf.WorkingDir
+	if workflowWorkDir != "" {
+		workDir = workflowWorkDir
 	}
 
 	return &frame{

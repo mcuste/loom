@@ -7,16 +7,30 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// program is executor-local IR compiled from a parsed workflow. It carries the
-// deterministic schedule metadata the executor needs before interpretation.
+// program is executor-local IR compiled from a parsed workflow definition. It
+// carries the deterministic schedule metadata the interpreter needs plus the
+// runtime bindings that are not part of the Definition yet, such as linked
+// child workflows.
 type program struct {
-	wf       *workflow.Workflow
 	def      workflow.Definition
+	env      runtimeEnv
 	plan     *plan.Plan
 	nodes    map[workflow.TaskID]*node
 	loops    []*loopProgram
 	units    []unit
 	memberOf map[workflow.TaskID]int
+}
+
+// runtimeEnv is the executor-facing projection of workflow-level runtime state.
+// Keeping it beside the compiled Definition avoids reaching back into the
+// legacy Workflow materialized view for cache, budget, and working-dir during
+// interpretation. Linked children remain compatibility data until linking also
+// moves to the Definition model.
+type runtimeEnv struct {
+	budget       *workflow.Budget
+	cacheDefault bool
+	workingDir   string
+	subs         map[workflow.TaskID]*workflow.Workflow
 }
 
 func (p *program) order() []workflow.TaskID {

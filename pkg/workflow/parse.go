@@ -17,10 +17,11 @@
 //  2. parseDeclarations validates identifiers and lowers raw syntax into
 //     parser declarations, parsing local semantic blocks such as retry:,
 //     budget:, schema:, schedule:, and with: into workflow-owned values.
-//  3. validateDeclarationGraph validates cross-declaration invariants such as
-//     task uniqueness, loop namespaces, loop membership, and loop convergence.
-//  4. lowerCheckedDefinition builds the semantic WorkflowDefinition, parsing
-//     templates, conditions, and dependency references from the checked graph.
+//  3. analyzeDeclaration validates cross-declaration invariants such as task
+//     uniqueness, loop namespaces, loop membership, dependency references,
+//     conditions, and loop convergence.
+//  4. lowerAnalyzedDefinition builds the semantic WorkflowDefinition from the
+//     already-analyzed graph without reaching back into YAML syntax.
 //  5. Parse materializes the legacy Workflow view from that definition for
 //     existing callers; ParseDefinition exposes the semantic model directly.
 //  6. Invocation-time checks that need resolved params, linked sub-workflows, or
@@ -140,10 +141,10 @@ func (p *parser) parseDefinition() (Definition, error) {
 		return WorkflowDefinition{}, err
 	}
 
-	checked, err := validateDeclarationGraph(decl)
+	analyzed, err := analyzeDeclaration(decl)
 	if err != nil {
 		return WorkflowDefinition{}, err
 	}
 
-	return lowerCheckedDefinition(checked)
+	return lowerAnalyzedDefinition(analyzed)
 }

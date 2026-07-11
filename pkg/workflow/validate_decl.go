@@ -1,48 +1,58 @@
 package workflow
 
-// checkedWorkflowDecl is the validated declaration graph ready to lower into
-// the workflow semantic model. It keeps graph/loop lookup tables beside the
-// declarations so the lowering step does not reach back into syntax.Document.
-type checkedWorkflowDecl struct {
+// workflowAnalysis is the validated declaration graph ready to lower into the
+// workflow semantic model. It keeps graph/loop lookup tables and per-task
+// analysis beside the declarations so the lowering step does not reach back
+// into syntax.Document or re-run validation.
+type workflowAnalysis struct {
 	decl         workflowDecl
 	tasks        []taskDecl
-	ids          map[TaskID]struct{}
 	loops        []LoopGroup
 	memberByLoop map[LoopID]map[TaskID]bool
 	asByLoop     map[LoopID]string
+	taskByID     map[TaskID]taskAnalysis
 }
 
-func validateDeclarationGraph(decl workflowDecl) (checkedWorkflowDecl, error) {
+func analyzeDeclaration(decl workflowDecl) (workflowAnalysis, error) {
 	allTasks, ids, err := flattenLoopTasks(decl.topTasks, decl.rawLoops)
 	if err != nil {
-		return checkedWorkflowDecl{}, err
+		return workflowAnalysis{}, err
 	}
 
 	if err := validateLoopNamespace(decl.rawLoops, ids, decl.paramIdx); err != nil {
-		return checkedWorkflowDecl{}, err
+		return workflowAnalysis{}, err
 	}
 
 	loops, memberByLoop, err := buildLoopGroups(decl.rawLoops, ids, decl.paramSet)
 	if err != nil {
-		return checkedWorkflowDecl{}, err
+		return workflowAnalysis{}, err
 	}
 
 	// asByLoop maps each loop id to its for_each loop variable ("" for a while
-	// loop), so the per-task build below can exempt a member's {{as}}
-	// placeholder from the depends_on check (it is bound per iteration, not via
-	// the DAG).
+	// loop), so per-task analysis can exempt a member's {{as}} placeholder from
+	// depends_on checks: it is bound per iteration, not via the DAG.
 	asByLoop := make(map[LoopID]string, len(loops))
 	for i := range loops {
 		asByLoop[loops[i].ID] = loops[i].As
 	}
 
-	return checkedWorkflowDecl{
+	scope := analysisScope{
+		ids:      ids,
+		paramSet: decl.paramSet,
+		asByLoop: asByLoop,
+	}
+	taskByID, err := analyzeTaskDeclarations(&scope, allTasks)
+	if err != nil {
+		return workflowAnalysis{}, err
+	}
+
+	return workflowAnalysis{
 		decl:         decl,
 		tasks:        allTasks,
-		ids:          ids,
 		loops:        loops,
 		memberByLoop: memberByLoop,
 		asByLoop:     asByLoop,
+		taskByID:     taskByID,
 	}, nil
 }
 

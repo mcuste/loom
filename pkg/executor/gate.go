@@ -19,13 +19,13 @@ type Gate interface {
 // The interpreter attaches its private frame so built-in gates can read run
 // state without exposing executor internals across package boundaries.
 type GateContext struct {
-	Workflow  *workflow.Workflow
 	Task      *workflow.Task
 	Condition *workflow.Condition
 	Iteration int
 	Output    string
 	ExitCode  int
 	Schema    *workflow.Schema
+	Budget    *workflow.Budget
 
 	state *frame
 }
@@ -57,7 +57,7 @@ func (whenConditionGate) Evaluate(_ context.Context, gc GateContext) GateDecisio
 }
 
 func (budgetPolicyGate) Evaluate(ctx context.Context, gc GateContext) GateDecision {
-	release, err := gc.state.admitBudget(ctx, gc.Workflow)
+	release, err := gc.state.admitBudget(ctx, gc.Budget)
 	if err != nil {
 		return GateDecision{Err: err}
 	}
@@ -79,7 +79,7 @@ func (i *interpreter) preStepGates(n *node) []Gate {
 	if n.when() != nil {
 		gates = append(gates, whenConditionGate{})
 	}
-	if i.program.wf.Budget != nil {
+	if i.program.env.budget != nil {
 		gates = append(gates, budgetPolicyGate{})
 	}
 	return gates
@@ -99,10 +99,10 @@ func (i *interpreter) evaluatePreStepGates(ctx context.Context, st *frame, n *no
 	}
 	for _, gate := range i.preStepGates(n) {
 		decision := gate.Evaluate(ctx, GateContext{
-			Workflow:  i.program.wf,
 			Task:      n.taskPayload(),
 			Condition: n.when(),
 			Iteration: st.iteration,
+			Budget:    i.program.env.budget,
 			state:     st,
 		})
 		if decision.Err != nil {

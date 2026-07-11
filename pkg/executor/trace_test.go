@@ -97,7 +97,7 @@ func TestInterpreterTraceNodeLifecycle(t *testing.T) {
 	prog := mustCompileProgram(t, wf)
 	order := prog.order()
 	rep := newReport(order, Options{})
-	st := newRootFrame(wf, rep, order, Options{})
+	st := newRootFrame(prog.env.workingDir, rep, order, Options{})
 	trace := &recordingTraceSink{}
 	var (
 		started  []workflow.TaskID
@@ -171,7 +171,7 @@ func TestInterpreterTraceLoopPassLifecycle(t *testing.T) {
 	prog := mustCompileProgram(t, wf)
 	order := prog.order()
 	rep := newReport(order, Options{})
-	st := newRootFrame(wf, rep, order, Options{})
+	st := newRootFrame(prog.env.workingDir, rep, order, Options{})
 	trace := &recordingTraceSink{}
 
 	interp := newInterpreterWithTrace(prog, Hooks{}, Options{}, trace)

@@ -18,7 +18,7 @@ func (subWorkflowOp) eval(ctx context.Context, i *interpreter, st *frame, n *nod
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "sub-workflow call")
 	}
-	child := i.program.wf.Subs[t.ID]
+	child := i.program.env.subs[t.ID]
 	if child == nil {
 		return TaskResult{}, nil, fmt.Errorf("task %q: sub-workflow %q not linked", t.ID, action.Ref)
 	}

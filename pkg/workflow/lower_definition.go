@@ -1,18 +1,15 @@
 package workflow
 
-func lowerCheckedDefinition(checked checkedWorkflowDecl) (Definition, error) {
-	def := checked.decl.newDefinition()
-	st := &parseState{
-		ids:      checked.ids,
-		paramSet: checked.decl.paramSet,
-		asByLoop: checked.asByLoop,
-	}
-	tasks, err := lowerTaskNodes(st, checked.tasks)
+import "fmt"
+
+func lowerAnalyzedDefinition(analyzed workflowAnalysis) (Definition, error) {
+	def := analyzed.decl.newDefinition()
+	tasks, err := lowerTaskNodes(analyzed.tasks, analyzed.taskByID, analyzed.asByLoop)
 	if err != nil {
 		return WorkflowDefinition{}, err
 	}
-	def.Nodes = workflowNodesFromTasks(tasks, checked.loops)
-	return finalizeDefinition(def, checked)
+	def.Nodes = workflowNodesFromTasks(tasks, analyzed.loops)
+	return finalizeDefinition(def, analyzed)
 }
 
 func (d workflowDecl) newDefinition() Definition {
@@ -34,13 +31,14 @@ func (d workflowDecl) newDefinition() Definition {
 	}
 }
 
-func lowerTaskNodes(st *parseState, allTasks []taskDecl) ([]TaskNode, error) {
+func lowerTaskNodes(allTasks []taskDecl, taskByID map[TaskID]taskAnalysis, asByLoop map[LoopID]string) ([]TaskNode, error) {
 	tasks := make([]TaskNode, 0, len(allTasks))
 	for _, lt := range allTasks {
-		task, err := buildTaskNode(st, lt)
-		if err != nil {
-			return nil, err
+		analysis, ok := taskByID[lt.id]
+		if !ok {
+			return nil, fmt.Errorf("task %q: semantic analysis missing", lt.id)
 		}
+		task := buildTaskNode(lt, analysis, asByLoop[lt.loop])
 		tasks = append(tasks, task)
 	}
 	return tasks, nil
@@ -73,8 +71,8 @@ func workflowNodesFromTasks(tasks []TaskNode, loops []LoopGroup) []WorkflowNode 
 	return nodes
 }
 
-func finalizeDefinition(def Definition, checked checkedWorkflowDecl) (Definition, error) {
-	decl := checked.decl
+func finalizeDefinition(def Definition, analyzed workflowAnalysis) (Definition, error) {
+	decl := analyzed.decl
 	if decl.output != "" {
 		outputTask := TaskID(decl.output)
 		if !definitionHasTask(def, outputTask) {
@@ -83,7 +81,7 @@ func finalizeDefinition(def Definition, checked checkedWorkflowDecl) (Definition
 		def.Output = OutputSelector{Task: outputTask}
 	}
 
-	if err := checkPrevPlaceholdersDefinition(def, checked.memberByLoop); err != nil {
+	if err := checkPrevPlaceholdersDefinition(def, analyzed.memberByLoop); err != nil {
 		return WorkflowDefinition{}, err
 	}
 

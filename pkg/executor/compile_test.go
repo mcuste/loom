@@ -287,6 +287,40 @@ tasks:
 	}
 }
 
+func TestCompileProgramUsesParsedDefinitionForRuntimeEnv(t *testing.T) {
+	t.Parallel()
+
+	wf, err := workflow.Parse([]byte(`
+name: wf
+runtime: exec-echo
+model: m1
+cache: true
+working_dir: /tmp/original
+budget:
+  max_cost_usd: 1.5
+tasks:
+  - id: a
+    prompt: original
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	wf.Cache = false
+	wf.WorkingDir = "/tmp/mutated"
+	wf.Budget = &workflow.Budget{MaxCostUSD: 99}
+
+	prog := mustCompileProgram(t, wf)
+	if !prog.env.cacheDefault {
+		t.Fatalf("prog.env.cacheDefault = false, want true")
+	}
+	if got := prog.env.workingDir; got != "/tmp/original" {
+		t.Fatalf("prog.env.workingDir = %q, want /tmp/original", got)
+	}
+	if prog.env.budget == nil || prog.env.budget.MaxCostUSD != 1.5 {
+		t.Fatalf("prog.env.budget = %#v, want max 1.5", prog.env.budget)
+	}
+}
+
 func TestCompileProgramCompilesBodyOpByKind(t *testing.T) {
 	t.Parallel()
 

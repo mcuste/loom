@@ -69,12 +69,12 @@ func invalidActionError(n *node, want string) error {
 	return fmt.Errorf("task %q: compiled action %T is not %s", n.id(), n.step.Action, want)
 }
 
-func cacheEnabled(wf *workflow.Workflow, n *node) bool {
+func cacheEnabled(env runtimeEnv, n *node) bool {
 	policy := n.policy()
 	if policy.Cache != nil {
 		return *policy.Cache
 	}
-	return wf.Cache
+	return env.cacheDefault
 }
 
 func (shellOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
@@ -119,7 +119,6 @@ func (scriptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 
 func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, baseDelay time.Duration) (TaskResult, error, error) {
 	t := n.taskPayload()
-	wf := i.program.wf
 	action, ok := n.action().(plan.AskModel)
 	if !ok {
 		return TaskResult{}, nil, invalidActionError(n, "model prompt")
@@ -155,7 +154,7 @@ func (promptOp) eval(ctx context.Context, i *interpreter, st *frame, n *node, ba
 		res    TaskResult
 		runErr error
 	)
-	if i.opts.Cache != nil && cacheEnabled(wf, n) {
+	if i.opts.Cache != nil && cacheEnabled(i.program.env, n) {
 		res, runErr = runCached(i.opts.Cache, t, rt, model, effort, sysPrompt, body, send)
 	} else {
 		res, runErr = send()

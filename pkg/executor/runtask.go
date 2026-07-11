@@ -142,10 +142,13 @@ func (st *frame) evalWhen(_ workflow.TaskID, cond *workflow.Condition) (bool, er
 // admitBudget delegates to the run's [budgetGate], passing a closure that
 // reads the cumulative cost under the gate's lock. See [budgetGate.admit] for
 // the full serialization protocol.
-func (st *frame) admitBudget(ctx context.Context, wf *workflow.Workflow) (func(), error) {
+func (st *frame) admitBudget(ctx context.Context, budget *workflow.Budget) (func(), error) {
+	if budget == nil {
+		return func() {}, nil
+	}
 	return st.budget.admit(ctx, func() float64 {
 		return st.rep.Usage.TotalCostUSD
-	}, wf.Budget.MaxCostUSD)
+	}, budget.MaxCostUSD)
 }
 
 // recordSkip publishes a `when:`-guarded task that was skipped: it fires

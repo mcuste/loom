@@ -228,7 +228,7 @@ func Run(ctx context.Context, wf *workflow.Workflow, hooks Hooks, opts Options) 
 	}
 	order := prog.order()
 	rep := newReport(order, opts)
-	st := newRootFrame(wf, rep, order, opts)
+	st := newRootFrame(prog.env.workingDir, rep, order, opts)
 	interp := newInterpreter(prog, hooks, opts)
 	return rep, interp.run(ctx, st)
 }

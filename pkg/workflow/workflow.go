@@ -123,7 +123,10 @@ func (e *InvalidParamNameError) Error() string {
 	return fmt.Sprintf("invalid param name %q: must match [A-Za-z0-9_]+", e.Value)
 }
 
-// Workflow is the validated, in-memory representation of a workflow YAML file.
+// Workflow is the legacy materialized view of a parsed workflow YAML file.
+// New parser, planner, and executor code should prefer Definition, TaskNode,
+// and Action; Workflow stays as the compatibility surface for callers and
+// stores that still expect flat task fields.
 type Workflow struct {
 	// ID uniquely identifies the workflow.
 	ID WorkflowID
