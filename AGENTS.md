@@ -71,21 +71,21 @@ Examples:
 [examples] add deploy.yaml using new params syntax
 ```
 
-## Deriving areas
+### Deriving areas
 
 Don't memorize a list. Discover it. For a given commit:
 
 1. **Run `git log --oneline -50`** and scan the bracket prefixes
    already in use. Reuse an existing name if one fits.
 2. **Otherwise derive from the changed paths**:
-   * `pkg/<name>/...` → `[<name>]` (e.g. `pkg/workflow/` → `[workflow]`).
-   * `cmd/<name>/...` → `[cli]` (or `[<name>]` if more than one CLI exists).
-   * Nested packages collapse to the parent unless the sub-package is
+   - `pkg/<name>/...` → `[<name>]` (e.g. `pkg/workflow/` → `[workflow]`).
+   - `cmd/<name>/...` → `[cli]` (or `[<name>]` if more than one CLI exists).
+   - Nested packages collapse to the parent unless the sub-package is
      itself the unit of change, e.g. `pkg/runtime/claudecode/` →
      `[runtime/claude-code]`.
-   * Top-level dirs map to their name (`workflows/` → `[workflows]`,
+   - Top-level dirs map to their name (`workflows/` → `[workflows]`,
      `.claude/skills/loom/` → `[skill]`).
-   * Build/config files (`go.mod`, `Makefile`, `.gitignore`) → `[build]`.
+   - Build/config files (`go.mod`, `Makefile`, `.gitignore`) → `[build]`.
 3. **When unsure**, pick the lowest-level identifier that uniquely
    names the changed surface. Coining a new area is fine; once it
    lands in history, step 1 will surface it for the next commit.
