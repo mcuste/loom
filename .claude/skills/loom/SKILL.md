@@ -16,7 +16,7 @@ loom resume    <run-id|latest>        # resume a specific run
 loom runs                      # browse past runs (TUI); `ls`, `show <id>`
 loom workflows ls              # list registry workflows runnable by name
 
-loom schedule cron <wf> --expr "0 15 * * *" [--tz Area/City] [--overlap skip|queue|allow] [--catchup] [-p k=v]
+loom schedule cron <wf> --expr "0 15 * * *" [--tz Area/City] [--overlap skip|queue|allow] [-p k=v]
 loom schedule at   <wf> --time 15:00 [--date YYYY-MM-DD] [--tz Area/City] [-p k=v]   # one-off
 loom schedule ls | rm <id> | enable <id> | disable <id>
 loom schedule sync [wf]        # reconcile inline `schedule:` blocks into the store
@@ -158,7 +158,7 @@ jq '.tasks[] | {id, model, usage, elapsed_ms}' .loom/runs/<wf_id>/latest.json
 
 - Recurring: `loom schedule cron <wf> --expr "0 15 * * *" [--tz Area/City]`, or declare an inline `schedule:` block and run `loom schedule sync`.
 - One-off: `loom schedule at <wf> --time 15:00` (rolls to tomorrow if the time already passed today; `--date` pins an explicit day). Removed after its run starts.
-- `--overlap skip|queue|allow` (default `skip`) governs a due run while the prior run is still going. `--catchup` starts one run on daemon startup for a tick missed while it was down; without it, missed ticks are skipped.
+- `--overlap skip|queue|allow` (default `skip`) governs a due run while the prior run is still going. Times missed while the daemon is stopped are skipped; elapsed one-offs are removed.
 
 ## Authoring
 

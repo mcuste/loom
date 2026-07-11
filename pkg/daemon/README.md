@@ -19,7 +19,7 @@ schedule.Record.Due(now, firstScan)                          |
     |                                                        |
     +-- not due --------------------> persist NextRunAt -------+
     |                                                        |
-    +-- missed one-off, no catch-up -> remove record --------+
+    +-- missed one-off on startup -> remove record ----------+
     |                                                        |
     `-- due                                                  |
           |                                                  |
@@ -62,7 +62,7 @@ or cancellation                                              |
 
 `pkg/schedule` owns durable records and the pure `Record.Due` timing decision.
 The daemon owns the long-running coordination around that decision: scan
-cadence, catch-up behavior, overlap handling, in-flight state, and completion
+cadence, missed-time handling, overlap policy, in-flight state, and completion
 updates.
 
 An accepted due occurrence becomes an opaque workflow run request. The daemon

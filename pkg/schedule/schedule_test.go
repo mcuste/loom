@@ -281,7 +281,7 @@ func TestParseAtTimeRejectsInvalidInput(t *testing.T) {
 }
 
 func TestNewRecordDefaults(t *testing.T) {
-	rec := schedule.NewRecord("mywf", "mywf", "/abs/mywf.yaml", map[string]string{"k": "v"}, true)
+	rec := schedule.NewRecord("mywf", "mywf", "/abs/mywf.yaml", map[string]string{"k": "v"})
 	if rec.WorkflowID != "mywf" {
 		t.Errorf("WorkflowID = %q, want %q", rec.WorkflowID, "mywf")
 	}
@@ -294,9 +294,6 @@ func TestNewRecordDefaults(t *testing.T) {
 	if !rec.Enabled {
 		t.Error("Enabled = false, want true")
 	}
-	if !rec.Catchup {
-		t.Error("Catchup = false, want true")
-	}
 	if rec.Params["k"] != "v" {
 		t.Errorf("Params[k] = %q, want %q", rec.Params["k"], "v")
 	}
@@ -304,7 +301,7 @@ func TestNewRecordDefaults(t *testing.T) {
 
 func TestNewCronRecordSetsTriggerAndOverlap(t *testing.T) {
 	tr := schedule.Trigger{Cron: "0 9 * * 1", TZ: "UTC"}
-	rec := schedule.NewCronRecord("deploy", "deploy", "/abs/deploy.yaml", nil, false, tr, schedule.OverlapQueue)
+	rec := schedule.NewCronRecord("deploy", "deploy", "/abs/deploy.yaml", nil, tr, schedule.OverlapQueue)
 	if rec.Trigger.Cron != "0 9 * * 1" {
 		t.Errorf("Trigger.Cron = %q, want %q", rec.Trigger.Cron, "0 9 * * 1")
 	}
@@ -322,7 +319,7 @@ func TestNewCronRecordSetsTriggerAndOverlap(t *testing.T) {
 func TestNewAtRecordSetsTrigger(t *testing.T) {
 	at := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
 	tr := schedule.Trigger{At: at, TZ: "UTC"}
-	rec := schedule.NewAtRecord("deploy", "deploy", "/abs/deploy.yaml", nil, true, tr)
+	rec := schedule.NewAtRecord("deploy", "deploy", "/abs/deploy.yaml", nil, tr)
 	if !rec.Trigger.At.Equal(at) {
 		t.Errorf("Trigger.At = %v, want %v", rec.Trigger.At, at)
 	}
@@ -331,9 +328,6 @@ func TestNewAtRecordSetsTrigger(t *testing.T) {
 	}
 	if rec.Overlap != "" {
 		t.Errorf("Overlap = %q, want empty (default skip)", rec.Overlap)
-	}
-	if !rec.Catchup {
-		t.Error("Catchup = false, want true")
 	}
 }
 
@@ -498,13 +492,12 @@ func TestTriggerSummary(t *testing.T) {
 	}
 }
 
-func cronRec(next time.Time, catchup bool) schedule.Record {
+func cronRec(next time.Time) schedule.Record {
 	return schedule.Record{
 		ID:         "wf_cron_x",
 		WorkflowID: "wf",
 		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
 		Enabled:    true,
-		Catchup:    catchup,
 		NextRunAt:  next,
 	}
 }
@@ -513,14 +506,14 @@ func TestDueCron(t *testing.T) {
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 
 	t.Run("not due", func(t *testing.T) {
-		rec := cronRec(base.Add(time.Minute), false)
+		rec := cronRec(base.Add(time.Minute))
 		run, remove, _, err := rec.Due(base, false)
 		if err != nil || run || remove {
 			t.Fatalf("run=%v remove=%v err=%v, want all false/nil", run, remove, err)
 		}
 	})
 	t.Run("due steady state runs and advances", func(t *testing.T) {
-		rec := cronRec(base, false)
+		rec := cronRec(base)
 		run, remove, next, err := rec.Due(base.Add(time.Second), false)
 		if err != nil || !run || remove {
 			t.Fatalf("run=%v remove=%v err=%v, want run=true", run, remove, err)
@@ -529,21 +522,14 @@ func TestDueCron(t *testing.T) {
 			t.Fatalf("next %v not advanced past %v", next, base)
 		}
 	})
-	t.Run("missed tick on first scan without catchup advances without running", func(t *testing.T) {
-		rec := cronRec(base, false)
+	t.Run("missed tick on first scan advances without running", func(t *testing.T) {
+		rec := cronRec(base)
 		run, _, next, err := rec.Due(base.Add(10*time.Minute), true)
 		if err != nil || run {
 			t.Fatalf("run=%v err=%v, want run=false", run, err)
 		}
 		if !next.After(base.Add(10 * time.Minute).Add(-time.Minute)) {
 			t.Fatalf("next %v not advanced", next)
-		}
-	})
-	t.Run("missed tick on first scan with catchup runs", func(t *testing.T) {
-		rec := cronRec(base, true)
-		run, _, _, err := rec.Due(base.Add(10*time.Minute), true)
-		if err != nil || !run {
-			t.Fatalf("run=%v err=%v, want run=true", run, err)
 		}
 	})
 }
@@ -554,7 +540,7 @@ func TestDueCron(t *testing.T) {
 // is in the future, so the record is not due and the computed tick is returned.
 func TestDueCronZeroNextRunAt(t *testing.T) {
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
-	rec := cronRec(time.Time{}, false) // NextRunAt unset
+	rec := cronRec(time.Time{}) // NextRunAt unset
 
 	run, remove, next, err := rec.Due(base, false)
 	if err != nil || run || remove {
@@ -600,7 +586,7 @@ func TestDueOneOff(t *testing.T) {
 			t.Fatalf("run=%v remove=%v, want both true", run, remove)
 		}
 	})
-	t.Run("missed on first scan without catchup drops", func(t *testing.T) {
+	t.Run("missed on first scan drops", func(t *testing.T) {
 		run, remove, _, _ := rec.Due(at.Add(time.Hour), true)
 		if run || !remove {
 			t.Fatalf("run=%v remove=%v, want run=false remove=true", run, remove)

@@ -15,22 +15,17 @@ import (
 )
 
 // triggerCommon holds the schedule flags shared by `schedule cron` and
-// `schedule at`: the timezone the trigger is interpreted in, the catch-up
-// policy, and the repeatable -p params. Embedded into cronOpts and atOpts;
-// addTriggerFlags binds -p / --tz / --catchup once for both builders.
+// `schedule at`: the timezone and repeatable -p params. Embedded into cronOpts
+// and atOpts; addTriggerFlags binds the shared flags once for both builders.
 type triggerCommon struct {
 	tz        string
-	catchup   bool
 	paramArgs []string
 }
 
-// addTriggerFlags binds the flags shared by every trigger builder: the
-// repeatable -p params and the --tz / --catchup pair. Each builder passes its
-// own help strings so cron and at can describe their semantics precisely.
-func addTriggerFlags(cmd *cobra.Command, c *triggerCommon, tzHelp, catchupHelp string) {
+// addTriggerFlags binds the flags shared by every trigger builder.
+func addTriggerFlags(cmd *cobra.Command, c *triggerCommon, tzHelp string) {
 	addParamFlags(cmd, &c.paramArgs)
 	cmd.Flags().StringVar(&c.tz, "tz", "", tzHelp)
-	cmd.Flags().BoolVar(&c.catchup, "catchup", false, catchupHelp)
 }
 
 // cronOpts bundles the trigger-shaping flags of `schedule cron` so the handler
@@ -61,7 +56,7 @@ func doScheduleCron(w io.Writer, home, cwd string, catalog runtime.Catalog, ref 
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewCronRecord(string(wf.ID), ref, path, params, o.catchup,
+	rec := schedule.NewCronRecord(string(wf.ID), ref, path, params,
 		schedule.Trigger{Cron: o.expr, TZ: o.tz}, overlap)
 	return addAndReport(w, home, rec)
 }
@@ -85,7 +80,7 @@ func doScheduleAt(w io.Writer, home, cwd string, catalog runtime.Catalog, ref st
 	if err != nil {
 		return err
 	}
-	rec := schedule.NewAtRecord(string(wf.ID), ref, path, params, o.catchup,
+	rec := schedule.NewAtRecord(string(wf.ID), ref, path, params,
 		schedule.Trigger{At: at, TZ: o.tz})
 	return addAndReport(w, home, rec)
 }

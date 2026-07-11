@@ -206,10 +206,9 @@ func (o *scheduleObserver) recordMissing(id string) bool {
 func TestDueCronLaunchesWithScheduleProvenance(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	added := addCron(t, home, "due-cron", createdAt, schedule.OverlapSkip, true, true)
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	running := startDaemon(t, home, clock, runner)
+	running, observer, _ := startReadyDaemon(t, home, clock, runner, "due-cron-sentinel")
+	added := addCron(t, home, "due-cron", createdAt, schedule.OverlapSkip, true)
 
 	call := awaitLaunch(t, runner)
 	if call.request.Ref != filepath.Join(home, "due-cron.yaml") {
@@ -241,15 +240,9 @@ func TestDueCronLaunchesWithScheduleProvenance(t *testing.T) {
 func TestScheduleAddedWhileRunningLaunches(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	sentinel := addCron(t, home, "startup-sentinel", createdAt, schedule.OverlapSkip, false, true)
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	startDaemon(t, home, clock, runner)
-
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextRunAt.Equal(mustTime("2026-06-28T10:02:00Z"))
-	})
-	added := addOneOff(t, home, "added-one-off", createdAt, firstRun.Add(-time.Second), false, true)
+	startReadyDaemon(t, home, clock, runner, "startup-sentinel")
+	added := addOneOff(t, home, "added-one-off", createdAt, firstRun.Add(-time.Second), true)
 
 	call := awaitLaunch(t, runner)
 	if call.provenance.ScheduleID != added.ID {
@@ -261,16 +254,11 @@ func TestScheduleAddedWhileRunningLaunches(t *testing.T) {
 func TestSkipOverlapConsumesDueOccurrence(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	main := addCron(t, home, "skip-main", createdAt, schedule.OverlapSkip, true, true)
-	sentinel := addHourlySentinel(t, home, "skip-sentinel")
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	startDaemon(t, home, clock, runner)
+	_, observer, sentinel := startReadyDaemon(t, home, clock, runner, "skip-sentinel")
+	main := addCron(t, home, "skip-main", createdAt, schedule.OverlapSkip, true)
 
 	first := awaitLaunch(t, runner)
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
-	})
 	clock.Set(secondRun)
 	resetNextRunAt(t, home, sentinel.ID)
 
@@ -288,16 +276,11 @@ func TestSkipOverlapConsumesDueOccurrence(t *testing.T) {
 func TestQueueOverlapWaitsForActiveLaunch(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	main := addCron(t, home, "queue-main", createdAt, schedule.OverlapQueue, true, true)
-	sentinel := addHourlySentinel(t, home, "queue-sentinel")
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	startDaemon(t, home, clock, runner)
+	_, observer, sentinel := startReadyDaemon(t, home, clock, runner, "queue-sentinel")
+	main := addCron(t, home, "queue-main", createdAt, schedule.OverlapQueue, true)
 
 	first := awaitLaunch(t, runner)
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
-	})
 	clock.Set(secondRun)
 	resetNextRunAt(t, home, sentinel.ID)
 
@@ -321,16 +304,11 @@ func TestQueueOverlapWaitsForActiveLaunch(t *testing.T) {
 func TestAllowOverlapStartsConcurrentLaunch(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	addCron(t, home, "allow-main", createdAt, schedule.OverlapAllow, true, true)
-	sentinel := addHourlySentinel(t, home, "allow-sentinel")
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	startDaemon(t, home, clock, runner)
+	_, _, sentinel := startReadyDaemon(t, home, clock, runner, "allow-sentinel")
+	addCron(t, home, "allow-main", createdAt, schedule.OverlapAllow, true)
 
 	first := awaitLaunch(t, runner)
-	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
-	})
 	clock.Set(secondRun)
 	resetNextRunAt(t, home, sentinel.ID)
 
@@ -342,8 +320,8 @@ func TestAllowOverlapStartsConcurrentLaunch(t *testing.T) {
 func TestDisabledScheduleDoesNotLaunch(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	addCron(t, home, "disabled", createdAt, schedule.OverlapSkip, true, false)
-	sentinel := addCron(t, home, "disabled-sentinel", createdAt.Add(-time.Minute), schedule.OverlapSkip, false, true)
+	addCron(t, home, "disabled", createdAt, schedule.OverlapSkip, false)
+	sentinel := addCron(t, home, "disabled-sentinel", createdAt.Add(-time.Minute), schedule.OverlapSkip, true)
 	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
 	startDaemon(t, home, clock, runner)
@@ -357,20 +335,19 @@ func TestDisabledScheduleDoesNotLaunch(t *testing.T) {
 func TestDueOneOffLaunchesOnceAndIsRemoved(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	added := addOneOff(t, home, "due-one-off", createdAt, firstRun.Add(-time.Second), true, true)
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	startDaemon(t, home, clock, runner)
+	_, observer, _ := startReadyDaemon(t, home, clock, runner, "due-one-off-sentinel")
+	added := addOneOff(t, home, "due-one-off", createdAt, firstRun.Add(-time.Second), true)
 
 	call := awaitLaunch(t, runner)
 	observer.awaitRemoved(added.ID)
 	call.respond("run-one-off", nil)
 }
 
-func TestMissedOneOffWithoutCatchupIsRemoved(t *testing.T) {
+func TestMissedOneOffIsRemoved(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	added := addOneOff(t, home, "missed-one-off", createdAt, firstRun.Add(-time.Second), false, true)
+	added := addOneOff(t, home, "missed-one-off", createdAt, firstRun.Add(-time.Second), true)
 	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
 	startDaemon(t, home, clock, runner)
@@ -382,10 +359,9 @@ func TestMissedOneOffWithoutCatchupIsRemoved(t *testing.T) {
 func TestLauncherFailureDoesNotBlockNextOccurrence(t *testing.T) {
 	home := t.TempDir()
 	clock := newTestClock(firstRun)
-	added := addCron(t, home, "retry-after-failure", createdAt, schedule.OverlapQueue, true, true)
-	observer := newScheduleObserver(t, home)
 	runner := newControlledLauncher()
-	startDaemon(t, home, clock, runner)
+	_, observer, _ := startReadyDaemon(t, home, clock, runner, "failure-sentinel")
+	added := addCron(t, home, "retry-after-failure", createdAt, schedule.OverlapQueue, true)
 
 	first := awaitLaunch(t, runner)
 	clock.Set(secondRun)
@@ -401,7 +377,18 @@ func TestLauncherFailureDoesNotBlockNextOccurrence(t *testing.T) {
 	}
 }
 
-func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.OverlapPolicy, catchup, enabled bool) schedule.Record {
+func startReadyDaemon(t *testing.T, home string, clock *testClock, runner *controlledLauncher, sentinelID string) (*runningDaemon, *scheduleObserver, schedule.Record) {
+	t.Helper()
+	sentinel := addHourlySentinel(t, home, sentinelID)
+	observer := newScheduleObserver(t, home)
+	running := startDaemon(t, home, clock, runner)
+	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
+	})
+	return running, observer, sentinel
+}
+
+func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.OverlapPolicy, enabled bool) schedule.Record {
 	t.Helper()
 	return addSchedule(t, home, schedule.Record{
 		ID:         id,
@@ -410,7 +397,6 @@ func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.Over
 		Path:       filepath.Join(home, id+".yaml"),
 		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
 		Overlap:    overlap,
-		Catchup:    catchup,
 		Enabled:    enabled,
 	}, now)
 }
@@ -428,7 +414,7 @@ func addHourlySentinel(t *testing.T, home, id string) schedule.Record {
 	}, createdAt.Add(-time.Minute))
 }
 
-func addOneOff(t *testing.T, home, id string, now, at time.Time, catchup, enabled bool) schedule.Record {
+func addOneOff(t *testing.T, home, id string, now, at time.Time, enabled bool) schedule.Record {
 	t.Helper()
 	return addSchedule(t, home, schedule.Record{
 		ID:         id,
@@ -436,7 +422,6 @@ func addOneOff(t *testing.T, home, id string, now, at time.Time, catchup, enable
 		Ref:        id + ".yaml",
 		Path:       filepath.Join(home, id+".yaml"),
 		Trigger:    schedule.Trigger{At: at},
-		Catchup:    catchup,
 		Enabled:    enabled,
 	}, now)
 }

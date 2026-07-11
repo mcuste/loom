@@ -294,8 +294,7 @@ type Schedule struct {
     Trigger   Trigger
     Enabled   bool
     Overlap   OverlapPolicy
-    Catchup   CatchupPolicy
-    NextRunAt  time.Time
+    NextRunAt time.Time
     LastRunAt  *time.Time
     LastRunID *RunID
     CreatedAt time.Time
@@ -338,11 +337,10 @@ type RunRequest struct {
 Daemon responsibilities:
 
 1. Load enabled schedules.
-2. Compute due runs.
-3. Apply catchup policy.
-4. Apply overlap policy.
-5. Launch runs through a small interpreter port.
-6. Persist `NextRunAt`, `LastRunAt`, and `LastRunID`.
+2. Compute due runs and skip times missed during downtime.
+3. Apply overlap policy.
+4. Launch runs through a small interpreter port.
+5. Persist `NextRunAt`, `LastRunAt`, and `LastRunID`.
 
 Port into the interpreter/application layer:
 

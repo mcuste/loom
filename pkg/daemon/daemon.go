@@ -65,8 +65,8 @@ type wakeSources struct {
 	results chan launchResult
 }
 
-// Run drives the scan/wake loop until ctx is cancelled. The first scan
-// applies catch-up handling for ticks missed while the daemon was down.
+// Run drives the scan/wake loop until ctx is cancelled. The first scan skips
+// cron times missed while the daemon was down and removes missed one-offs.
 // results carries completions back so the loop can clear the running flag and
 // persist LastRunAt/LastRunID without racing the scan's NextRunAt writes.
 func (d *Daemon) Run(ctx context.Context) error {
@@ -219,8 +219,8 @@ func (d *Daemon) processRecord(ctx context.Context, rec schedule.Record, now tim
 		return time.Time{}
 	}
 	if remove && !run {
-		// A one-off whose instant was missed while the daemon was down and that
-		// opted out of catch-up: drop it without running.
+		// A one-off whose instant was missed while the daemon was down is dropped
+		// without running.
 		d.logf("schedule %s: one-off time passed while daemon was down, dropping", rec.ID)
 		d.removeRecord(rec.ID)
 		return time.Time{}

@@ -37,8 +37,7 @@ func newScheduleCronCmd(env *cliEnv) *cobra.Command {
 		},
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
-		"IANA timezone the expression is evaluated in (default: daemon local time)",
-		"run once on daemon startup if a scheduled tick was missed")
+		"IANA timezone the expression is evaluated in (default: daemon local time)")
 	cmd.Flags().StringVar(&o.expr, "expr", "", "cron expression, e.g. \"0 15 * * *\" (required)")
 	cmd.Flags().StringVar(&o.overlap, "overlap", "skip", "policy when a prior run is still in flight: skip|queue|allow")
 	_ = cmd.MarkFlagRequired("expr")
@@ -57,8 +56,7 @@ func newScheduleAtCmd(env *cliEnv) *cobra.Command {
 		},
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
-		"IANA timezone the time is interpreted in (default: daemon local time)",
-		"run even if the daemon was down when the instant passed")
+		"IANA timezone the time is interpreted in (default: daemon local time)")
 	cmd.Flags().StringVar(&o.timeStr, "time", "", "clock time HH:MM (required)")
 	cmd.Flags().StringVar(&o.dateStr, "date", "", "calendar date YYYY-MM-DD (default: today, or tomorrow if the time already passed)")
 	_ = cmd.MarkFlagRequired("time")

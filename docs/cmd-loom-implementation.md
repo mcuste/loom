@@ -322,7 +322,7 @@ Handles:
 `pkg/daemon` owns daemon behavior:
 
 - schedule-file watch and next-run timer loop
-- catch-up handling
+- missed-time skipping on startup
 - overlap policy
 - scheduled workflow run requests through `launcher.RunLauncher`
 

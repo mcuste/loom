@@ -10,13 +10,13 @@
 // where id is "<workflow_id>_<kind>_<6 random hex>" and kind is "cron" or
 // "at". A record names the workflow to run (by its original ref and its
 // resolved absolute path), the trigger (a cron expression or a one-off
-// instant), the parameters to pass, and the overlap/catch-up policy. Files are
+// instant), the parameters to pass, and the overlap policy. Files are
 // rewritten atomically (write to .tmp, rename) so a crash mid-write never
 // leaves a half-written schedule on disk, mirroring the run store in
 // [github.com/mcuste/loom/pkg/store].
 //
 // The package owns storage, validation, and scheduled-time computation; the
-// run policy (overlap handling, catch-up on startup) lives in the daemon.
+// overlap policy and run coordination live in the daemon.
 package schedule
 
 import (
@@ -41,10 +41,6 @@ type ScheduleID string
 // OverlapPolicy determines what happens when a scheduled run becomes due while
 // the schedule's previous run is still in flight.
 type OverlapPolicy string
-
-// CatchupPolicy records whether a missed scheduled time should start a run on
-// daemon startup. It aliases bool because the current policy is binary.
-type CatchupPolicy bool
 
 const (
 	// OverlapSkip drops the due run if the previous run is still running. The
@@ -143,9 +139,6 @@ type Record struct {
 	Enabled bool `json:"enabled"`
 	// Overlap is the in-flight-run policy; empty means OverlapSkip.
 	Overlap OverlapPolicy `json:"overlap,omitempty"`
-	// Catchup, when true, starts one cron run on daemon startup if a scheduled
-	// time was missed, and runs a past-due one-off rather than dropping it.
-	Catchup bool `json:"catchup,omitempty"`
 	// NextRunAt is the next instant this schedule is due (UTC). Maintained by the
 	// daemon; Add seeds it from the trigger.
 	NextRunAt time.Time `json:"next_run_at,omitzero"`
@@ -238,9 +231,9 @@ func (r Record) NextRunAfter(t time.Time) (time.Time, error) {
 
 // Due reports whether the schedule should run at now, whether to remove the
 // record afterward, the next scheduled time to persist, and any error.
-// firstScan distinguishes a tick that is due now from one that was missed
-// while the daemon was down (only honored for catch-up). This keeps the timing
-// decision next to Record so the daemon owns only policy and side effects.
+// On the first scan, it skips elapsed cron times and removes elapsed one-offs
+// so downtime never causes delayed runs. This keeps the timing decision next
+// to Record so the daemon owns only policy and side effects.
 func (r Record) Due(now time.Time, firstScan bool) (run, remove bool, next time.Time, err error) {
 	if r.Trigger.IsCron() {
 		nf := r.NextRunAt
@@ -256,7 +249,7 @@ func (r Record) Due(now time.Time, firstScan bool) (run, remove bool, next time.
 		if err != nil {
 			return false, false, time.Time{}, err
 		}
-		if firstScan && !r.Catchup {
+		if firstScan {
 			// Missed tick(s) while down; advance without starting a run.
 			return false, false, advanced, nil
 		}
@@ -268,7 +261,7 @@ func (r Record) Due(now time.Time, firstScan bool) (run, remove bool, next time.
 	if now.Before(at) {
 		return false, false, at, nil // not due
 	}
-	if firstScan && !r.Catchup {
+	if firstScan {
 		return false, true, time.Time{}, nil // missed while down, drop
 	}
 	return true, true, time.Time{}, nil // run then remove
@@ -371,18 +364,17 @@ func Validate(rec Record) error {
 }
 
 // NewRecord builds a Record with the trigger-independent defaults shared by
-// every schedule creation path: WorkflowID, Ref, Path, Params, Enabled=true,
-// and Catchup. The caller sets Trigger (and, for inline records, ID; for cron
-// records, Overlap) before persisting. path must already be absolute; the
-// caller resolves it via filepath.Abs.
-func NewRecord(workflowID, ref, path string, params map[string]string, catchup bool) Record {
+// every schedule creation path: WorkflowID, Ref, Path, Params, and Enabled=true.
+// The caller sets Trigger (and, for inline records, ID; for cron records,
+// Overlap) before persisting. path must already be absolute; the caller resolves
+// it via filepath.Abs.
+func NewRecord(workflowID, ref, path string, params map[string]string) Record {
 	return Record{
 		WorkflowID: workflowID,
 		Ref:        ref,
 		Path:       path,
 		Params:     params,
 		Enabled:    true,
-		Catchup:    catchup,
 	}
 }
 
@@ -390,8 +382,8 @@ func NewRecord(workflowID, ref, path string, params map[string]string, catchup b
 // schedule. It extends [NewRecord] by setting Trigger and Overlap so the
 // caller does not mutate fields after construction. path must already be
 // absolute.
-func NewCronRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger, overlap OverlapPolicy) Record {
-	rec := NewRecord(workflowID, ref, path, params, catchup)
+func NewCronRecord(workflowID, ref, path string, params map[string]string, trigger Trigger, overlap OverlapPolicy) Record {
+	rec := NewRecord(workflowID, ref, path, params)
 	rec.Trigger = trigger
 	rec.Overlap = overlap
 	return rec
@@ -400,8 +392,8 @@ func NewCronRecord(workflowID, ref, path string, params map[string]string, catch
 // NewAtRecord builds a fully-initialized Record for a one-off schedule. It
 // extends [NewRecord] by setting Trigger so the caller does not mutate fields
 // after construction. path must already be absolute.
-func NewAtRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger) Record {
-	rec := NewRecord(workflowID, ref, path, params, catchup)
+func NewAtRecord(workflowID, ref, path string, params map[string]string, trigger Trigger) Record {
+	rec := NewRecord(workflowID, ref, path, params)
 	rec.Trigger = trigger
 	return rec
 }
@@ -551,7 +543,7 @@ func SyncInline(home string, wf *workflow.Workflow, path, ref string) (SyncResul
 		return SyncResult{Action: SyncNoOp}, nil
 	}
 
-	rec := NewRecord(string(wf.ID), ref, path, nil, false)
+	rec := NewRecord(string(wf.ID), ref, path, nil)
 	rec.ID = id
 	rec.Trigger = Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ}
 	if err := Validate(rec); err != nil {
