@@ -401,7 +401,7 @@ func TestLauncherFailureDoesNotBlockNextOccurrence(t *testing.T) {
 	}
 }
 
-func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.Overlap, catchup, enabled bool) schedule.Record {
+func addCron(t *testing.T, home, id string, now time.Time, overlap schedule.OverlapPolicy, catchup, enabled bool) schedule.Record {
 	t.Helper()
 	return addSchedule(t, home, schedule.Record{
 		ID:         id,

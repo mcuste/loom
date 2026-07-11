@@ -38,12 +38,9 @@ import (
 // ScheduleID identifies a persisted schedule.
 type ScheduleID string
 
-// Overlap is the policy when a scheduled run becomes due while the schedule's
-// previous run is still in flight.
-type Overlap string
-
-// OverlapPolicy is the architecture-level name for overlap handling.
-type OverlapPolicy = Overlap
+// OverlapPolicy determines what happens when a scheduled run becomes due while
+// the schedule's previous run is still in flight.
+type OverlapPolicy string
 
 // CatchupPolicy records whether a missed scheduled time should start a run on
 // daemon startup. It aliases bool because the current policy is binary.
@@ -52,21 +49,21 @@ type CatchupPolicy bool
 const (
 	// OverlapSkip drops the due run if the previous run is still running. The
 	// default is safest for workflows that carry cross-run state.
-	OverlapSkip Overlap = "skip"
+	OverlapSkip OverlapPolicy = "skip"
 	// OverlapQueue serializes runs per schedule: the due run waits for the
 	// previous run to finish.
-	OverlapQueue Overlap = "queue"
+	OverlapQueue OverlapPolicy = "queue"
 	// OverlapAllow starts runs concurrently regardless of any in-flight run.
-	OverlapAllow Overlap = "allow"
+	OverlapAllow OverlapPolicy = "allow"
 )
 
 // ParseOverlap validates an overlap policy token and returns its typed value.
 // The accepted set is the single authority for what `--overlap` and any other
 // caller may supply, so a new policy is added here rather than in the CLI.
-func ParseOverlap(s string) (Overlap, error) {
-	switch Overlap(s) {
+func ParseOverlap(s string) (OverlapPolicy, error) {
+	switch OverlapPolicy(s) {
 	case OverlapSkip, OverlapQueue, OverlapAllow:
-		return Overlap(s), nil
+		return OverlapPolicy(s), nil
 	default:
 		return "", fmt.Errorf("invalid overlap %q: want skip, queue, or allow", s)
 	}
@@ -145,7 +142,7 @@ type Record struct {
 	// Enabled gates runs: a disabled schedule is retained but never started.
 	Enabled bool `json:"enabled"`
 	// Overlap is the in-flight-run policy; empty means OverlapSkip.
-	Overlap Overlap `json:"overlap,omitempty"`
+	Overlap OverlapPolicy `json:"overlap,omitempty"`
 	// Catchup, when true, starts one cron run on daemon startup if a scheduled
 	// time was missed, and runs a past-due one-off rather than dropping it.
 	Catchup bool `json:"catchup,omitempty"`
@@ -206,7 +203,7 @@ func (r Record) RunRequest(defaultCwd string) launcher.RunRequest {
 
 // EffectiveOverlap returns the record's overlap policy, defaulting an empty
 // value to OverlapSkip.
-func (r Record) EffectiveOverlap() Overlap {
+func (r Record) EffectiveOverlap() OverlapPolicy {
 	if r.Overlap == "" {
 		return OverlapSkip
 	}
@@ -393,7 +390,7 @@ func NewRecord(workflowID, ref, path string, params map[string]string, catchup b
 // schedule. It extends [NewRecord] by setting Trigger and Overlap so the
 // caller does not mutate fields after construction. path must already be
 // absolute.
-func NewCronRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger, overlap Overlap) Record {
+func NewCronRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger, overlap OverlapPolicy) Record {
 	rec := NewRecord(workflowID, ref, path, params, catchup)
 	rec.Trigger = trigger
 	rec.Overlap = overlap
