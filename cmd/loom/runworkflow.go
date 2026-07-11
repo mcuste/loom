@@ -47,7 +47,7 @@ func doRun(w io.Writer, home, cwd string, catalog runtime.Catalog, path string, 
 	if err != nil {
 		return err
 	}
-	req, err := (launcher.Launcher{Home: home, Cwd: cwd, Catalog: catalog}).Prepare(launcher.Invocation{
+	req, err := (launcher.Launcher{Home: home, Cwd: cwd, Catalog: catalog}).Prepare(launcher.RunRequest{
 		Ref:    path,
 		Params: params,
 		Cwd:    cwd,

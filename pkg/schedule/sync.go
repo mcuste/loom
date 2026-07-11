@@ -33,7 +33,7 @@ type SyncResult struct {
 	Action SyncAction
 	// ID is the schedule id that was affected. Empty for SyncNoOp.
 	ID string
-	// NextFire is the next fire instant for SyncAdded and SyncUpdated.
+	// NextFire is the next scheduled instant for SyncAdded and SyncUpdated.
 	// Zero for SyncRemoved and SyncNoOp.
 	NextFire time.Time
 }

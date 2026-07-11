@@ -12,8 +12,8 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// FormatFireTime renders an instant for display, or "-" when unset.
-func FormatFireTime(t time.Time) string {
+// FormatScheduledTime renders an instant for display, or "-" when unset.
+func FormatScheduledTime(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
@@ -30,7 +30,7 @@ func pick(cond bool, yes, no string) string {
 }
 
 // SchedulesTable writes the plain, pipe-safe index of schedules to w: one row
-// per record with its id, workflow, trigger summary, next fire time, enabled
+// per record with its id, workflow, trigger summary, next scheduled time, enabled
 // state, and overlap policy. An empty slice prints a single "no schedules"
 // line so a fresh install reports cleanly.
 func SchedulesTable(w io.Writer, recs []schedule.Record) error {
@@ -39,10 +39,10 @@ func SchedulesTable(w io.Writer, recs []schedule.Record) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT FIRE\tENABLED\tOVERLAP")
+	_, _ = fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT RUN\tENABLED\tOVERLAP")
 	for _, r := range recs {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.ID, r.WorkflowID, r.Trigger.Summary(), FormatFireTime(r.NextFire),
+			r.ID, r.WorkflowID, r.Trigger.Summary(), FormatScheduledTime(r.NextFire),
 			pick(r.Enabled, "yes", "no"), r.EffectiveOverlap())
 	}
 	return tw.Flush()

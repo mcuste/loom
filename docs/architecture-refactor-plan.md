@@ -290,7 +290,7 @@ Built-in gates:
 ```go
 type Schedule struct {
     ID        ScheduleID
-    Target    WorkflowInvocation
+    Target    RunRequest
     Trigger   Trigger
     Enabled   bool
     Overlap   OverlapPolicy
@@ -321,12 +321,12 @@ type OneShotTrigger struct {
 }
 ```
 
-### WorkflowInvocation
+### RunRequest
 
-Opaque interpreter request stored by the scheduler.
+Opaque workflow request stored by the scheduler.
 
 ```go
-type WorkflowInvocation struct {
+type RunRequest struct {
     Ref    WorkflowRef
     Params map[string]string
     Cwd    string
@@ -348,7 +348,7 @@ Port into the interpreter/application layer:
 
 ```go
 type RunLauncher interface {
-    Launch(context.Context, WorkflowInvocation, Provenance) (RunID, error)
+    Launch(context.Context, RunRequest, Provenance) (RunID, error)
 }
 ```
 

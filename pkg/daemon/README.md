@@ -3,7 +3,7 @@
 `daemon` runs the loop that turns persisted schedule records into
 workflow runs. It scans enabled records, decides which are due, applies the
 overlap policy, and turns each accepted occurrence into a run through
-`launcher.Runner`.
+`launcher.RunLauncher`.
 
 ```text
 loom daemon
@@ -41,7 +41,7 @@ schedule.Record.Due(now, firstScan)                          |
           Daemon.launchScheduledRun                          |
                   |                                          |
                   v                                          |
-          launcher.Runner.Launch                             |
+          launcher.RunLauncher.Launch                             |
                   |                                          |
                   v                                          |
           launch result                                      |
@@ -52,7 +52,7 @@ schedule.Record.Due(now, firstScan)                          |
           - persist LastFire and LastRunID for cron           |
                   |                                          |
                   v                                          |
-wait for the next fire, schedule change, completion,         |
+wait for the next scheduled run, schedule change, completion, |
 or cancellation                                              |
     |                                                        |
     +--------------------------------------------------------+
@@ -65,8 +65,8 @@ The daemon owns the long-running coordination around that decision: scan
 cadence, catch-up behavior, overlap handling, in-flight state, and completion
 updates.
 
-An accepted due occurrence becomes an opaque workflow invocation. The daemon
-passes it with schedule provenance to `launcher.Runner`; loading workflow
+An accepted due occurrence becomes an opaque workflow run request. The daemon
+passes it with schedule provenance to `launcher.RunLauncher`; loading workflow
 YAML, validating parameters, selecting runtimes, and running tasks stay outside
 this package. The daemon watches `$LOOM_HOME/schedules` and rescans as soon as
 a schedule record changes. A 10-minute reconciliation timer catches filesystem

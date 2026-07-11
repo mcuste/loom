@@ -37,7 +37,7 @@ type Request struct {
 	Prov     Provenance
 }
 
-// RunMeta carries the per-run facts an observer prints in its header block
+// RunMeta carries the per-run facts a run output prints in its header block
 // before execution: the run-record path, the invocation cwd, and the seeded
 // task count (0 on a plain run). Total is the progress denominator for the
 // per-task lines (the expected task count, i.e. total tasks minus seeded ones);
@@ -49,10 +49,10 @@ type RunMeta struct {
 	Total   int
 }
 
-// Observer is runner's presentation seam. Callers own observer construction
+// RunOutput is runner's presentation seam. Callers own output construction
 // and teardown; the execution core only drives the run header, execution event
 // stream, summary, and best-effort store-error reporting.
-type Observer interface {
+type RunOutput interface {
 	Header(meta RunMeta) error
 	Events() run.EventSink
 	Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error
@@ -68,7 +68,7 @@ type Observer interface {
 // error is reported independently so a write failure after a successful run does
 // not mask the nil return value. ctx should be a signal-aware context created by
 // the caller; Run cancels execution on ctx cancellation.
-func Run(ctx context.Context, obs Observer, req Request) (string, error) {
+func Run(ctx context.Context, output RunOutput, req Request) (string, error) {
 	// The plan was already printed by the check phase in the caller (doRun /
 	// runFromRecord), which validates and prints before any execution. Here we
 	// only need the seed material the executor will actually honor.
@@ -88,20 +88,20 @@ func Run(ctx context.Context, obs Observer, req Request) (string, error) {
 		return "", err
 	}
 
-	x := &runExec{obs: obs, req: req, state: state}
+	x := &runExec{output: output, req: req, state: state}
 	return x.execute(ctx, cwd, rs)
 }
 
 // runExec bundles the context that travels unchanged through the run pipeline's
-// execute/finalize hops: the observer the caller owns, the parsed run request,
+// execute/finalize hops: the output the caller owns, the parsed run request,
 // and the cross-run state map (read for substitution, written back in place).
 // The per-run locals the executor produces as it goes (cwd, the resolved seed,
 // the expected task count) stay as method arguments rather than fields, since
 // they are only known partway through.
 type runExec struct {
-	obs   Observer
-	req   Request
-	state map[string]string
+	output RunOutput
+	req    Request
+	state  map[string]string
 }
 
 // execute executes the DAG: it opens a fresh run record, stamps any seeded
@@ -113,7 +113,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	record, err := store.Open(wf.ID, x.req.Manifest, store.Config{
 		Root:        x.req.Home,
 		Cwd:         cwd,
-		OnError:     x.obs.StoreError,
+		OnError:     x.output.StoreError,
 		Params:      stringifyParams(x.req.Resolved),
 		ScheduleID:  x.req.Prov.ScheduleID,
 		TriggeredBy: x.req.Prov.TriggeredBy,
@@ -131,7 +131,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	var rep *executor.Report
 	defer func() {
 		if closeErr := record.Close(summaryFor(rep), runErr); closeErr != nil {
-			x.obs.StoreError(closeErr)
+			x.output.StoreError(closeErr)
 		}
 	}()
 
@@ -139,7 +139,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	// neither creates nor closes it. Header resets the progress counter and
 	// records the denominator.
 	expected := len(wf.Tasks) - len(rs.set)
-	if err := x.obs.Header(RunMeta{
+	if err := x.output.Header(RunMeta{
 		RunFile: record.Path(),
 		Cwd:     cwd,
 		Seeded:  len(rs.set),
@@ -155,7 +155,7 @@ func (x *runExec) execute(ctx context.Context, cwd string, rs resolvedSeed) (run
 	seedExit := seededExitCodes(rs)
 
 	rep, runErr = executor.Run(ctx, wf, run.HooksFromSink(run.JoinSinks(
-		x.obs.Events(),
+		x.output.Events(),
 		storeEvents(record),
 	)), executor.Options{
 		Params:        x.req.Resolved,
@@ -178,7 +178,7 @@ func (x *runExec) finalize(rep *executor.Report, expected int, runErr error) err
 		return runErr
 	}
 	wf := x.req.Wf
-	if err := x.obs.Summary(wf, rep, expected); err != nil && runErr == nil {
+	if err := x.output.Summary(wf, rep, expected); err != nil && runErr == nil {
 		runErr = err
 	}
 	// Persist write-backs: each task with `writes_state` records its trimmed
@@ -186,7 +186,7 @@ func (x *runExec) finalize(rep *executor.Report, expected int, runErr error) err
 	// a partial run carries over what it managed to produce.
 	if persistState(x.state, wf, rep) {
 		if err := store.SaveState(x.req.Home, wf.ID, x.state); err != nil {
-			x.obs.StoreError(err)
+			x.output.StoreError(err)
 		}
 	}
 	return runErr

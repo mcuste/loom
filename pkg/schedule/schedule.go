@@ -134,7 +134,7 @@ type Record struct {
 	WorkflowID string `json:"workflow_id"`
 	// Ref is the original CLI workflow argument (a registry name or a path).
 	Ref string `json:"ref"`
-	// Path is the resolved absolute YAML path the daemon loads at fire time, so
+	// Path is the resolved absolute YAML path the daemon loads at run time, so
 	// a cwd-relative registry lookup is not repeated from the daemon's cwd.
 	Path string `json:"path"`
 	// Trigger is the timing rule (cron or one-off).
@@ -162,10 +162,10 @@ type Record struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Invocation returns the opaque workflow request this schedule fires. The
-// daemon passes this value to a launcher.Runner without inspecting the
+// RunRequest returns the opaque workflow request this schedule fires. The
+// daemon passes this value to a launcher.RunLauncher without inspecting the
 // referenced workflow's tasks, graph, runtimes, or reports.
-func (r Record) Invocation(defaultCwd string) launcher.Invocation {
+func (r Record) RunRequest(defaultCwd string) launcher.RunRequest {
 	ref := r.Path
 	if ref == "" {
 		ref = r.Ref
@@ -174,7 +174,7 @@ func (r Record) Invocation(defaultCwd string) launcher.Invocation {
 	for k, v := range r.Params {
 		params[k] = v
 	}
-	return launcher.Invocation{
+	return launcher.RunRequest{
 		Ref:    ref,
 		Params: params,
 		Cwd:    defaultCwd,

@@ -11,18 +11,18 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// testObserver reproduces the plain run lines the runner tests assert on
+// testOutput reproduces the plain run lines the runner tests assert on
 // without importing pkg/tui back into pkg/runner's test binary.
-type testObserver struct {
+type testOutput struct {
 	w     io.Writer
 	total int
 	step  int
 	mu    sync.Mutex
 }
 
-func newTestObserver(w io.Writer) Observer { return &testObserver{w: w} }
+func newTestOutput(w io.Writer) RunOutput { return &testOutput{w: w} }
 
-func (o *testObserver) Header(meta RunMeta) error {
+func (o *testOutput) Header(meta RunMeta) error {
 	o.total = meta.Total
 	o.step = 0
 	if _, err := fmt.Fprintf(o.w, "Run file : %s\nCwd      : %s\n\n", meta.RunFile, meta.Cwd); err != nil {
@@ -35,7 +35,7 @@ func (o *testObserver) Header(meta RunMeta) error {
 	return err
 }
 
-func (o *testObserver) Events() run.EventSink {
+func (o *testOutput) Events() run.EventSink {
 	return run.SinkFromHooks(executor.Hooks{
 		OnStart: func(t workflow.Task, iter int, _ runtime.Name, _ runtime.Model, _ runtime.Effort) {
 			o.mu.Lock()
@@ -58,7 +58,7 @@ func (o *testObserver) Events() run.EventSink {
 	})
 }
 
-func (o *testObserver) Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error {
+func (o *testOutput) Summary(wf *workflow.Workflow, rep *executor.Report, expected int) error {
 	done := len(distinctTaskIDs(rep))
 	if done == expected {
 		_, err := fmt.Fprintf(o.w, "✓ workflow %q complete\n", wf.ID)
@@ -68,7 +68,7 @@ func (o *testObserver) Summary(wf *workflow.Workflow, rep *executor.Report, expe
 	return err
 }
 
-func (o *testObserver) StoreError(err error) {
+func (o *testOutput) StoreError(err error) {
 	_, _ = fmt.Fprintf(o.w, "  store: %v\n", err)
 }
 

@@ -92,7 +92,7 @@ func doScheduleAt(w io.Writer, home, cwd string, catalog runtime.Catalog, ref st
 
 // loadAndResolve loads the workflow and resolves its params, returning the
 // CLI-supplied param map (not the defaults) so the daemon resolves fresh
-// against the then-current workflow at fire time. ResolveAndValidateParams is
+// against the then-current workflow at run time. ResolveAndValidateParams is
 // still called here to reject missing required params and bad routing up front.
 func loadAndResolve(home, cwd string, catalog runtime.Catalog, ref string, paramArgs []string) (*workflow.Workflow, string, map[string]string, error) {
 	wf, _, path, err := workflowload.Load(home, cwd, ref)
@@ -117,7 +117,7 @@ func addAndReport(w io.Writer, home string, rec schedule.Record) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "scheduled %s (%s), next fire %s\n",
-		stored.ID, stored.Trigger.Summary(), tui.FormatFireTime(stored.NextFire))
+	_, err = fmt.Fprintf(w, "scheduled %s (%s), next run %s\n",
+		stored.ID, stored.Trigger.Summary(), tui.FormatScheduledTime(stored.NextFire))
 	return err
 }

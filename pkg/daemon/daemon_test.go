@@ -49,7 +49,7 @@ type launchReply struct {
 }
 
 type launchCall struct {
-	invocation launcher.Invocation
+	request    launcher.RunRequest
 	provenance launcher.Provenance
 	reply      chan launchReply
 }
@@ -66,9 +66,9 @@ func newControlledLauncher() *controlledLauncher {
 	return &controlledLauncher{calls: make(chan launchCall, 8)}
 }
 
-func (l *controlledLauncher) Launch(ctx context.Context, invocation launcher.Invocation, provenance launcher.Provenance) (string, error) {
+func (l *controlledLauncher) Launch(ctx context.Context, request launcher.RunRequest, provenance launcher.Provenance) (string, error) {
 	call := launchCall{
-		invocation: invocation,
+		request:    request,
 		provenance: provenance,
 		reply:      make(chan launchReply, 1),
 	}
@@ -91,7 +91,7 @@ type runningDaemon struct {
 	once   sync.Once
 }
 
-func startDaemon(t *testing.T, home string, clock *testClock, runLauncher launcher.Runner) *runningDaemon {
+func startDaemon(t *testing.T, home string, clock *testClock, runLauncher launcher.RunLauncher) *runningDaemon {
 	t.Helper()
 	sut := New(home, "/daemon-cwd", runLauncher, io.Discard)
 	sut.now = clock.Now
@@ -212,17 +212,17 @@ func TestDueCronLaunchesWithScheduleProvenance(t *testing.T) {
 	running := startDaemon(t, home, clock, runner)
 
 	call := awaitLaunch(t, runner)
-	if call.invocation.Ref != filepath.Join(home, "due-cron.yaml") {
-		t.Errorf("workflow ref = %q, want schedule path", call.invocation.Ref)
+	if call.request.Ref != filepath.Join(home, "due-cron.yaml") {
+		t.Errorf("workflow ref = %q, want schedule path", call.request.Ref)
 	}
-	if call.invocation.Cwd != "/daemon-cwd" {
-		t.Errorf("workflow cwd = %q, want /daemon-cwd", call.invocation.Cwd)
+	if call.request.Cwd != "/daemon-cwd" {
+		t.Errorf("workflow cwd = %q, want /daemon-cwd", call.request.Cwd)
 	}
 	if call.provenance.ScheduleID != added.ID || call.provenance.TriggeredBy != "schedule" {
 		t.Errorf("provenance = %q/%q, want %q/schedule", call.provenance.ScheduleID, call.provenance.TriggeredBy, added.ID)
 	}
-	if !call.provenance.FireTime.Equal(firstRun) {
-		t.Errorf("fire time = %v, want %v", call.provenance.FireTime, firstRun)
+	if !call.provenance.ScheduledAt.Equal(firstRun) {
+		t.Errorf("scheduled time = %v, want %v", call.provenance.ScheduledAt, firstRun)
 	}
 	call.respond("run-1", nil)
 
@@ -312,8 +312,8 @@ func TestQueueOverlapWaitsForActiveLaunch(t *testing.T) {
 	first.respond("run-queue-1", nil)
 
 	second := awaitLaunch(t, runner)
-	if !second.provenance.FireTime.Equal(secondRun) {
-		t.Errorf("queued fire time = %v, want %v", second.provenance.FireTime, secondRun)
+	if !second.provenance.ScheduledAt.Equal(secondRun) {
+		t.Errorf("queued scheduled time = %v, want %v", second.provenance.ScheduledAt, secondRun)
 	}
 	second.respond("run-queue-2", nil)
 }

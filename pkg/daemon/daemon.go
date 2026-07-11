@@ -29,7 +29,7 @@ const minWait = time.Second
 type Daemon struct {
 	home     string
 	cwd      string
-	launcher launcher.Runner
+	launcher launcher.RunLauncher
 	out      io.Writer
 	now      func() time.Time
 	running  *runningSet
@@ -38,7 +38,7 @@ type Daemon struct {
 // New returns a daemon ready to run. home is the loom data directory that owns
 // the schedules and run records; cwd is the daemon process working directory.
 // launcher is the application port used to start runs.
-func New(home, cwd string, launcher launcher.Runner, out io.Writer) *Daemon {
+func New(home, cwd string, launcher launcher.RunLauncher, out io.Writer) *Daemon {
 	return &Daemon{
 		home:     home,
 		cwd:      cwd,
@@ -51,11 +51,11 @@ func New(home, cwd string, launcher launcher.Runner, out io.Writer) *Daemon {
 
 // launchResult carries a completed scheduled launch back to the loop.
 type launchResult struct {
-	scheduleID string
-	oneOff     bool
-	fireTime   time.Time
-	runID      string
-	err        error
+	scheduleID  string
+	oneOff      bool
+	scheduledAt time.Time
+	runID       string
+	err         error
 }
 
 // wakeSources groups the channels that can wake the daemon between scans.
@@ -276,11 +276,11 @@ func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Record, now
 	return true
 }
 
-// launchScheduledRun sends the schedule's opaque workflow invocation through
-// the launcher port. The daemon does not load workflow YAML, validate params,
+// launchScheduledRun sends the schedule's opaque workflow request through the
+// launcher port. The daemon does not load workflow YAML, validate params,
 // inspect tasks, or configure runtimes here; those are launcher concerns.
-func (d *Daemon) launchScheduledRun(ctx context.Context, rec schedule.Record, fireTime time.Time, results chan<- launchResult) {
-	res := launchResult{scheduleID: rec.ID, oneOff: !rec.Trigger.IsCron(), fireTime: fireTime}
+func (d *Daemon) launchScheduledRun(ctx context.Context, rec schedule.Record, scheduledAt time.Time, results chan<- launchResult) {
+	res := launchResult{scheduleID: rec.ID, oneOff: !rec.Trigger.IsCron(), scheduledAt: scheduledAt}
 	defer func() { results <- res }()
 
 	if d.launcher == nil {
@@ -288,8 +288,8 @@ func (d *Daemon) launchScheduledRun(ctx context.Context, rec schedule.Record, fi
 		d.logf("schedule %s: %v", rec.ID, res.err)
 		return
 	}
-	prov := launcher.Provenance{ScheduleID: rec.ID, TriggeredBy: "schedule", FireTime: fireTime}
-	runID, err := d.launcher.Launch(ctx, rec.Invocation(d.cwd), prov)
+	prov := launcher.Provenance{ScheduleID: rec.ID, TriggeredBy: "schedule", ScheduledAt: scheduledAt}
+	runID, err := d.launcher.Launch(ctx, rec.RunRequest(d.cwd), prov)
 	res.runID = string(runID)
 	res.err = err
 	if err != nil {
@@ -311,7 +311,7 @@ func (d *Daemon) complete(res launchResult) {
 	if err != nil {
 		return // schedule removed meanwhile; nothing to update
 	}
-	rec.LastFire = res.fireTime.UTC()
+	rec.LastFire = res.scheduledAt.UTC()
 	if res.runID != "" {
 		rec.LastRunID = res.runID
 	}

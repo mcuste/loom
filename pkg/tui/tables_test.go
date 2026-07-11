@@ -40,7 +40,7 @@ func TestSchedulesTableColumns(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"ID", "WORKFLOW", "TRIGGER", "NEXT FIRE", "ENABLED", "OVERLAP",
+		"ID", "WORKFLOW", "TRIGGER", "NEXT RUN", "ENABLED", "OVERLAP",
 		"shellwf_cron_abc123", "shellwf", "0 15 * * *",
 	} {
 		if !strings.Contains(out, want) {
@@ -71,19 +71,19 @@ func TestSchedulesTableDisabledRow(t *testing.T) {
 	}
 }
 
-// TestFormatFireTimeZero pins "-" for the zero time.
-func TestFormatFireTimeZero(t *testing.T) {
-	if got := FormatFireTime(time.Time{}); got != "-" {
-		t.Errorf("FormatFireTime(zero) = %q, want -", got)
+// TestFormatScheduledTimeZero pins "-" for the zero time.
+func TestFormatScheduledTimeZero(t *testing.T) {
+	if got := FormatScheduledTime(time.Time{}); got != "-" {
+		t.Errorf("FormatScheduledTime(zero) = %q, want -", got)
 	}
 }
 
-// TestFormatFireTimeNonZero pins the display layout for a concrete instant.
-func TestFormatFireTimeNonZero(t *testing.T) {
+// TestFormatScheduledTimeNonZero pins the display layout for a concrete instant.
+func TestFormatScheduledTimeNonZero(t *testing.T) {
 	ts := time.Date(2026, 6, 30, 15, 0, 0, 0, time.UTC)
-	got := FormatFireTime(ts)
+	got := FormatScheduledTime(ts)
 	if !strings.HasPrefix(got, "2026-06-30 15:00") {
-		t.Errorf("FormatFireTime = %q, want prefix 2026-06-30 15:00", got)
+		t.Errorf("FormatScheduledTime = %q, want prefix 2026-06-30 15:00", got)
 	}
 }
 

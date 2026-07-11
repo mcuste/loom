@@ -217,7 +217,7 @@ Validates workflow and params before writing schedule record.
 
 `loadAndResolve` loads workflow, parses CLI params, resolves and validates
 params, then stores CLI-supplied params in schedule record. Daemon resolves
-them again at fire time against current workflow.
+them again at run time against the current workflow.
 
 ### `schedule_manage.go`
 
@@ -316,15 +316,15 @@ Handles:
 
 - schedule JSON files
 - cron/one-off trigger validation
-- next-fire computation
+- next-run computation
 - inline schedule sync
 
 `pkg/daemon` owns daemon behavior:
 
-- schedule-file watch and next-fire timer loop
+- schedule-file watch and next-run timer loop
 - catch-up handling
 - overlap policy
-- scheduled workflow invocations through `launcher.Runner`
+- scheduled workflow run requests through `launcher.RunLauncher`
 
 `pkg/launcher` owns shared launch setup:
 
@@ -391,7 +391,7 @@ sequenceDiagram
   participant CLI as cmd/loom
   participant Sched as pkg/schedule
   participant Daemon as pkg/daemon
-  participant Launch as launcher.Runner
+  participant Launch as launcher.RunLauncher
 
   User->>CLI: loom schedule cron workflow --expr "0 15 * * *"
   CLI->>Sched: Add(record)
@@ -399,7 +399,7 @@ sequenceDiagram
   CLI->>Daemon: Run(ctx)
   Daemon->>Sched: List()
   Daemon->>Daemon: decide due fires
-  Daemon->>Launch: Launch(invocation, provenance)
+  Daemon->>Launch: Launch(run request, provenance)
   Launch-->>Daemon: run id
   Daemon->>Sched: update LastFire / LastRunID / NextFire
 ```

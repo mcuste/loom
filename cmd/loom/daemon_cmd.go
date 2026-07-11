@@ -32,7 +32,7 @@ func newDaemonCmd(env *cliEnv) *cobra.Command {
 				Home:    env.home,
 				Cwd:     env.cwd,
 				Catalog: env.catalog,
-				NewObserver: func(w io.Writer) runner.Observer {
+				NewOutput: func(w io.Writer) runner.RunOutput {
 					return tui.New(w)
 				},
 				LogRoot: filepath.Join(schedule.SchedulesDir(env.home), "logs"),

@@ -11,7 +11,7 @@ loom run                         loom daemon
 launcher.Launcher.Prepare      daemon finds a due schedule
    |                                  |
    |                                  v
-   |                            launcher.Runner.Launch
+   |                            launcher.RunLauncher.Launch
    |                                  |
    +---------------+------------------+
                    v
@@ -38,9 +38,17 @@ and runs the request      and records why it ran
 ## Why this package exists
 
 The daemon only needs to say “run this workflow with these parameters.” It
-does not need to know how workflows are loaded or checked. `Runner` is the
-small interface that keeps that boundary clear and makes daemon tests simple.
+does not need to know how workflows are loaded or checked. `RunLauncher` is
+the small interface that keeps that boundary clear and makes daemon tests simple.
 
 The CLI calls `Prepare` directly so it can print the plan before starting the
 run. Scheduled runs call `Launch`, which prepares the request, writes output to
-one log file per fire, and passes schedule details to the runner.
+one log file per scheduled run, and passes schedule details to the runner.
+
+## Run output
+
+`runner.RunOutput` is the presentation seam for a run's header, task events,
+summary, and store errors. `Launcher.NewOutput` is a `RunOutputFactory` that
+creates it for a destination writer. For scheduled runs, the launcher opens the
+per-run log file and passes it to `NewOutput`; for launches without a schedule,
+it uses `io.Discard`.
