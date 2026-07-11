@@ -16,7 +16,9 @@ flowchart TD
   B --> SC["schedule"]
   B --> D["daemon"]
 
-  R --> L["workflowload.Load"]
+  R --> PREP["launcher.Launcher.Prepare"]
+  PREP --> L["workflowload.Load"]
+  PREP --> P
   CH --> L
   RE --> ST["store.LoadByRunID"]
   RE --> RR["runner.ResumeRequest"]
@@ -39,11 +41,11 @@ flowchart TD
 
   SC --> SCHED["pkg/schedule<br/>JSON records"]
   D --> IS["pkg/scheduler"]
-  D --> INT["interpreter.FileRunLauncher"]
+  D --> LAUNCH["launcher.Launcher"]
   IS --> SCHED
-  IS --> INT
-  INT --> L
-  INT --> RUN
+  IS --> LAUNCH
+  LAUNCH --> L
+  LAUNCH --> RUN
 ```
 
 ## Command Surface
@@ -322,9 +324,9 @@ Handles:
 - scan/sleep loop
 - catch-up handling
 - overlap policy
-- scheduled workflow invocations through `interpreter.RunLauncher`
+- scheduled workflow invocations through `launcher.Runner`
 
-`pkg/interpreter` owns launch adapters:
+`pkg/launcher` owns shared launch setup:
 
 - workflow ref loading
 - param and routing validation
@@ -389,7 +391,7 @@ sequenceDiagram
   participant CLI as cmd/loom
   participant Sched as pkg/schedule
   participant Daemon as pkg/scheduler
-  participant Interp as interpreter.RunLauncher
+  participant Launch as launcher.Runner
 
   User->>CLI: loom schedule cron workflow --expr "0 15 * * *"
   CLI->>Sched: Add(record)

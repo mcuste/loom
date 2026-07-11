@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mcuste/loom/pkg/interpreter"
+	"github.com/mcuste/loom/pkg/launcher"
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
 	"github.com/mcuste/loom/pkg/schedule"
@@ -17,7 +17,7 @@ import (
 )
 
 func newTestDaemon(home, cwd string, catalog runtime.Catalog, out io.Writer) *daemon {
-	launcher := interpreter.FileRunLauncher{
+	runLauncher := launcher.Launcher{
 		Home:    home,
 		Cwd:     cwd,
 		Catalog: catalog,
@@ -26,7 +26,7 @@ func newTestDaemon(home, cwd string, catalog runtime.Catalog, out io.Writer) *da
 		},
 		LogRoot: filepath.Join(schedule.SchedulesDir(home), "logs"),
 	}
-	return New(home, cwd, launcher, out)
+	return New(home, cwd, runLauncher, out)
 }
 
 // fixedClock returns a deterministic clock so the daemon's firing decision is

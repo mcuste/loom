@@ -358,7 +358,7 @@ Do not treat this as a mandate to create every directory immediately. Prefer
 moving code only when it removes confusion.
 
 ```text
-pkg/interpreter/       workflow domain, compiler, engine, events, gates
+pkg/launcher/          workflow loading, validation, and launch setup
 pkg/runtime/           runtime contracts and catalog
 pkg/scheduler/         schedule domain, store, daemon, sync use cases
 pkg/store/             run/state persistence, if still cohesive after cleanup

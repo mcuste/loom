@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mcuste/loom/internal/daemoninstall"
-	"github.com/mcuste/loom/pkg/interpreter"
+	"github.com/mcuste/loom/pkg/launcher"
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/schedule"
 	"github.com/mcuste/loom/pkg/scheduler"
@@ -28,7 +28,7 @@ func newDaemonCmd(env *cliEnv) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, stop := interruptContext()
 			defer stop()
-			launcher := interpreter.FileRunLauncher{
+			runLauncher := launcher.Launcher{
 				Home:    env.home,
 				Cwd:     env.cwd,
 				Catalog: env.catalog,
@@ -37,7 +37,7 @@ func newDaemonCmd(env *cliEnv) *cobra.Command {
 				},
 				LogRoot: filepath.Join(schedule.SchedulesDir(env.home), "logs"),
 			}
-			d := scheduler.New(env.home, env.cwd, launcher, cmd.OutOrStdout())
+			d := scheduler.New(env.home, env.cwd, runLauncher, cmd.OutOrStdout())
 			return d.Run(ctx)
 		},
 	}

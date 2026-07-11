@@ -31,7 +31,7 @@ import (
 
 	"github.com/adhocore/gronx"
 
-	"github.com/mcuste/loom/pkg/interpreter"
+	"github.com/mcuste/loom/pkg/launcher"
 )
 
 // ScheduleID identifies a persisted schedule.
@@ -163,9 +163,9 @@ type Record struct {
 }
 
 // Invocation returns the opaque workflow request this schedule fires. The
-// daemon passes this value to an interpreter.RunLauncher without inspecting the
+// daemon passes this value to a launcher.Runner without inspecting the
 // referenced workflow's tasks, graph, runtimes, or reports.
-func (r Record) Invocation(defaultCwd string) interpreter.WorkflowInvocation {
+func (r Record) Invocation(defaultCwd string) launcher.Invocation {
 	ref := r.Path
 	if ref == "" {
 		ref = r.Ref
@@ -174,8 +174,8 @@ func (r Record) Invocation(defaultCwd string) interpreter.WorkflowInvocation {
 	for k, v := range r.Params {
 		params[k] = v
 	}
-	return interpreter.WorkflowInvocation{
-		Ref:    interpreter.WorkflowRef(ref),
+	return launcher.Invocation{
+		Ref:    ref,
 		Params: params,
 		Cwd:    defaultCwd,
 	}

@@ -5,9 +5,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mcuste/loom/pkg/runner"
+	"github.com/mcuste/loom/pkg/launcher"
 	"github.com/mcuste/loom/pkg/runtime"
-	"github.com/mcuste/loom/pkg/workflowload"
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // newRunCmd is the parent for executing a workflow. Invoked with a workflow
@@ -43,9 +43,17 @@ func newRunCmd(env *cliEnv) *cobra.Command {
 // if it passes, executes the whole workflow fresh. home is resolved up front (as
 // the resume paths do) so a home-resolution failure surfaces before the plan.
 func doRun(w io.Writer, home, cwd string, catalog runtime.Catalog, path string, paramArgs []string) error {
-	wf, manifest, _, err := workflowload.Load(home, cwd, path)
+	params, err := workflow.ParseParamArgs(paramArgs)
 	if err != nil {
 		return err
 	}
-	return renderCheckRun(w, runner.Request{Wf: wf, Manifest: manifest, Catalog: catalog, Home: home}, paramInputs{cli: paramArgs}, nil)
+	req, err := (launcher.Launcher{Home: home, Cwd: cwd, Catalog: catalog}).Prepare(launcher.Invocation{
+		Ref:    path,
+		Params: params,
+		Cwd:    cwd,
+	})
+	if err != nil {
+		return err
+	}
+	return renderPreparedRun(w, req, params, nil)
 }

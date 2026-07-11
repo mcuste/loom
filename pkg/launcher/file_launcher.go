@@ -1,4 +1,4 @@
-package interpreter
+package launcher
 
 import (
 	"context"
@@ -21,11 +21,10 @@ import (
 // ObserverFactory builds the presentation adapter for one launched run.
 type ObserverFactory func(io.Writer) runner.Observer
 
-// FileRunLauncher resolves workflow refs from disk/registry and executes them
-// through the runner pipeline. It is an interpreter adapter: schedulers call it
-// only through RunLauncher, while CLI wiring supplies the runtime catalog and
-// observer factory.
-type FileRunLauncher struct {
+// Launcher resolves workflow references and prepares them for the runner.
+// Schedulers call it only through Runner, while CLI wiring supplies the runtime
+// catalog and observer factory.
+type Launcher struct {
 	Home        string
 	Cwd         string
 	Catalog     runtime.Catalog
@@ -34,9 +33,9 @@ type FileRunLauncher struct {
 	Now         func() time.Time
 }
 
-// Launch loads, validates, and runs inv, returning the persisted run id when a
-// run record was opened. Errors before execution return an empty RunID.
-func (l FileRunLauncher) Launch(ctx context.Context, inv WorkflowInvocation, prov Provenance) (RunID, error) {
+// Prepare loads and validates inv, returning a runner request. It does not
+// start the run, so the CLI can show the plan before execution.
+func (l Launcher) Prepare(inv Invocation) (runner.Request, error) {
 	cwd := inv.Cwd
 	if cwd == "" {
 		cwd = l.Cwd
@@ -45,44 +44,48 @@ func (l FileRunLauncher) Launch(ctx context.Context, inv WorkflowInvocation, pro
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("resolve working directory: %w", err)
+			return runner.Request{}, fmt.Errorf("resolve working directory: %w", err)
 		}
 	}
 
-	wf, manifest, _, err := workflowload.Load(l.Home, cwd, string(inv.Ref))
+	wf, manifest, _, err := workflowload.Load(l.Home, cwd, inv.Ref)
 	if err != nil {
-		return "", fmt.Errorf("load %s: %w", inv.Ref, err)
+		return runner.Request{}, fmt.Errorf("load %s: %w", inv.Ref, err)
 	}
 	resolved, err := workflowcheck.ResolveAndValidateParams(wf, inv.Params, nil, catalogValidator(l.Catalog))
 	if err != nil {
 		if isParamResolutionError(err) {
-			return "", fmt.Errorf("resolve params: %w", err)
+			return runner.Request{}, fmt.Errorf("resolve params: %w", err)
 		}
-		return "", fmt.Errorf("validate routing: %w", err)
+		return runner.Request{}, fmt.Errorf("validate routing: %w", err)
 	}
-
-	obs, closeLog, err := l.observer(prov)
-	if err != nil {
-		return "", err
-	}
-	defer closeLog()
-
-	runID, err := runner.Run(ctx, obs, runner.Request{
+	return runner.Request{
 		Wf:       wf,
 		Manifest: manifest,
 		Resolved: resolved,
 		Catalog:  l.Catalog,
 		Home:     l.Home,
 		Cwd:      cwd,
-		Prov: runner.Provenance{
-			ScheduleID:  prov.ScheduleID,
-			TriggeredBy: prov.TriggeredBy,
-		},
-	})
-	return RunID(runID), err
+	}, nil
 }
 
-func (l FileRunLauncher) observer(prov Provenance) (runner.Observer, func(), error) {
+// Launch prepares and runs inv, returning the persisted run ID. Scheduled runs
+// get their own log file when LogRoot and a schedule ID are configured.
+func (l Launcher) Launch(ctx context.Context, inv Invocation, prov Provenance) (string, error) {
+	req, err := l.Prepare(inv)
+	if err != nil {
+		return "", err
+	}
+	obs, closeLog, err := l.observer(prov)
+	if err != nil {
+		return "", err
+	}
+	defer closeLog()
+	req.Prov = runner.Provenance{ScheduleID: prov.ScheduleID, TriggeredBy: prov.TriggeredBy}
+	return runner.Run(ctx, obs, req)
+}
+
+func (l Launcher) observer(prov Provenance) (runner.Observer, func(), error) {
 	factory := l.NewObserver
 	if factory == nil {
 		return noopObserver{}, func() {}, nil

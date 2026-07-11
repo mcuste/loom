@@ -81,9 +81,9 @@ func validateAndPlan(r tui.Renderer, wf *workflow.Workflow, params paramInputs, 
 }
 
 // renderCheckRun runs the shared check phase (validate + print the plan) against
-// a single renderer and, only if it passes, executes req. doRun and runFromRecord
-// share this tail: one renderer drives both the check and the run that follows, so
-// a stateful display spans both. params carries the CLI and (lower-precedence)
+// a single renderer and, only if it passes, executes req. Resume paths use this
+// tail: one renderer drives both the check and the run that follows, so a
+// stateful display spans both. params carries the CLI and (lower-precedence)
 // file tiers; seeded annotates the plan with carried-over tasks. The caller
 // fills req.Wf, req.Manifest, req.Home, req.Cwd, and any seed plan; the
 // resolved params come from the check done here.
@@ -109,6 +109,24 @@ func renderCheckRun(w io.Writer, req runner.Request, params paramInputs, seeded 
 		return err
 	}
 	req.Resolved = resolved
+	ctx, stop := interruptContext()
+	defer stop()
+	_, err = runner.Run(ctx, r, req)
+	return err
+}
+
+// renderPreparedRun prints the plan for a request already validated by the
+// launcher, then starts it with the same renderer. The CLI owns this step so it
+// can show the plan before execution, unlike scheduled runs.
+func renderPreparedRun(w io.Writer, req runner.Request, cliParams map[string]string, seeded map[workflow.TaskID]bool) (err error) {
+	r, finish := newRenderer(w)
+	defer finish(&err)
+	if err := r.Plan(req.Wf, req.Resolved, cliParams, seeded); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
 	ctx, stop := interruptContext()
 	defer stop()
 	_, err = runner.Run(ctx, r, req)
