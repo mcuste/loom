@@ -107,7 +107,7 @@ type Config struct {
 	// later resume can restore it before re-running shell tasks and relative
 	// paths. Empty means it is not recorded.
 	Cwd string
-	// ScheduleID links a run to the schedule that fired it; empty for a run
+	// ScheduleID links a run to the schedule that started it; empty for a run
 	// launched directly from the CLI.
 	ScheduleID string
 	// TriggeredBy records what initiated the run ("cli" or "schedule"). Empty

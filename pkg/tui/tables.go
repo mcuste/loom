@@ -42,7 +42,7 @@ func SchedulesTable(w io.Writer, recs []schedule.Record) error {
 	_, _ = fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT RUN\tENABLED\tOVERLAP")
 	for _, r := range recs {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.ID, r.WorkflowID, r.Trigger.Summary(), FormatScheduledTime(r.NextFire),
+			r.ID, r.WorkflowID, r.Trigger.Summary(), FormatScheduledTime(r.NextRunAt),
 			pick(r.Enabled, "yes", "no"), r.EffectiveOverlap())
 	}
 	return tw.Flush()

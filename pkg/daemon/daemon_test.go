@@ -229,11 +229,11 @@ func TestDueCronLaunchesWithScheduleProvenance(t *testing.T) {
 	got := observer.awaitRecord(added.ID, func(rec schedule.Record) bool {
 		return rec.LastRunID == "run-1"
 	})
-	if !got.LastFire.Equal(firstRun) {
-		t.Errorf("LastFire = %v, want %v", got.LastFire, firstRun)
+	if !got.LastRunAt.Equal(firstRun) {
+		t.Errorf("LastRunAt = %v, want %v", got.LastRunAt, firstRun)
 	}
-	if !got.NextFire.Equal(mustTime("2026-06-28T10:02:00Z")) {
-		t.Errorf("NextFire = %v, want 2026-06-28 10:02:00 UTC", got.NextFire)
+	if !got.NextRunAt.Equal(mustTime("2026-06-28T10:02:00Z")) {
+		t.Errorf("NextRunAt = %v, want 2026-06-28 10:02:00 UTC", got.NextRunAt)
 	}
 	running.stop(t)
 }
@@ -247,7 +247,7 @@ func TestScheduleAddedWhileRunningLaunches(t *testing.T) {
 	startDaemon(t, home, clock, runner)
 
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T10:02:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T10:02:00Z"))
 	})
 	added := addOneOff(t, home, "added-one-off", createdAt, firstRun.Add(-time.Second), false, true)
 
@@ -269,17 +269,17 @@ func TestSkipOverlapConsumesDueOccurrence(t *testing.T) {
 
 	first := awaitLaunch(t, runner)
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T11:00:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	clock.Set(secondRun)
-	resetNextFire(t, home, sentinel.ID)
+	resetNextRunAt(t, home, sentinel.ID)
 
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T11:00:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	got := requireSchedule(t, home, main.ID)
-	if !got.NextFire.Equal(mustTime("2026-06-28T10:03:00Z")) {
-		t.Errorf("NextFire = %v, want skipped occurrence consumed", got.NextFire)
+	if !got.NextRunAt.Equal(mustTime("2026-06-28T10:03:00Z")) {
+		t.Errorf("NextRunAt = %v, want skipped occurrence consumed", got.NextRunAt)
 	}
 	assertNoLaunch(t, runner)
 	first.respond("run-skip", nil)
@@ -296,17 +296,17 @@ func TestQueueOverlapWaitsForActiveLaunch(t *testing.T) {
 
 	first := awaitLaunch(t, runner)
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T11:00:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	clock.Set(secondRun)
-	resetNextFire(t, home, sentinel.ID)
+	resetNextRunAt(t, home, sentinel.ID)
 
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T11:00:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	got := requireSchedule(t, home, main.ID)
-	if !got.NextFire.Equal(mustTime("2026-06-28T10:02:00Z")) {
-		t.Errorf("NextFire = %v, want queued occurrence held", got.NextFire)
+	if !got.NextRunAt.Equal(mustTime("2026-06-28T10:02:00Z")) {
+		t.Errorf("NextRunAt = %v, want queued occurrence held", got.NextRunAt)
 	}
 	assertNoLaunch(t, runner)
 	first.respond("run-queue-1", nil)
@@ -329,10 +329,10 @@ func TestAllowOverlapStartsConcurrentLaunch(t *testing.T) {
 
 	first := awaitLaunch(t, runner)
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T11:00:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T11:00:00Z"))
 	})
 	clock.Set(secondRun)
-	resetNextFire(t, home, sentinel.ID)
+	resetNextRunAt(t, home, sentinel.ID)
 
 	second := awaitLaunch(t, runner)
 	first.respond("run-allow-1", nil)
@@ -349,7 +349,7 @@ func TestDisabledScheduleDoesNotLaunch(t *testing.T) {
 	startDaemon(t, home, clock, runner)
 
 	observer.awaitRecord(sentinel.ID, func(rec schedule.Record) bool {
-		return rec.NextFire.Equal(mustTime("2026-06-28T10:02:00Z"))
+		return rec.NextRunAt.Equal(mustTime("2026-06-28T10:02:00Z"))
 	})
 	assertNoLaunch(t, runner)
 }
@@ -396,8 +396,8 @@ func TestLauncherFailureDoesNotBlockNextOccurrence(t *testing.T) {
 	got := observer.awaitRecord(added.ID, func(rec schedule.Record) bool {
 		return rec.LastRunID == "run-after-failure"
 	})
-	if !got.LastFire.Equal(secondRun) {
-		t.Errorf("LastFire = %v, want %v", got.LastFire, secondRun)
+	if !got.LastRunAt.Equal(secondRun) {
+		t.Errorf("LastRunAt = %v, want %v", got.LastRunAt, secondRun)
 	}
 }
 
@@ -450,12 +450,12 @@ func addSchedule(t *testing.T, home string, rec schedule.Record, now time.Time) 
 	return added
 }
 
-func resetNextFire(t *testing.T, home, id string) {
+func resetNextRunAt(t *testing.T, home, id string) {
 	t.Helper()
 	rec := requireSchedule(t, home, id)
-	rec.NextFire = time.Time{}
+	rec.NextRunAt = time.Time{}
 	if err := schedule.Update(home, rec); err != nil {
-		t.Fatalf("reset NextFire for %q: %v", id, err)
+		t.Fatalf("reset NextRunAt for %q: %v", id, err)
 	}
 }
 

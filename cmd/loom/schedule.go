@@ -7,11 +7,11 @@ import (
 // newScheduleCmd is the parent for managing workflow schedules. Its `cron` and
 // `at` subcommands create schedules (recurring and one-off); `ls`, `rm`,
 // `enable`, and `disable` inspect and edit them. The records are read by
-// `loom daemon`, which fires the runs.
+// `loom daemon`, which starts the runs.
 func newScheduleCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "schedule",
-		Short: "Manage workflow schedules fired by `loom daemon`",
+		Short: "Manage workflow runs started by `loom daemon`",
 	}
 	cmd.AddCommand(
 		newScheduleCronCmd(env),
@@ -38,7 +38,7 @@ func newScheduleCronCmd(env *cliEnv) *cobra.Command {
 	}
 	addTriggerFlags(cmd, &o.triggerCommon,
 		"IANA timezone the expression is evaluated in (default: daemon local time)",
-		"fire once on daemon startup if a scheduled tick was missed")
+		"run once on daemon startup if a scheduled tick was missed")
 	cmd.Flags().StringVar(&o.expr, "expr", "", "cron expression, e.g. \"0 15 * * *\" (required)")
 	cmd.Flags().StringVar(&o.overlap, "overlap", "skip", "policy when a prior run is still in flight: skip|queue|allow")
 	_ = cmd.MarkFlagRequired("expr")

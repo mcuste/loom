@@ -10,7 +10,7 @@ two separate products:
 
 The scheduler must not know about workflow internals such as tasks, DAGs,
 runtimes, gates, reports, or loop execution. It should only know that a schedule
-fires a workflow invocation.
+starts a workflow run.
 
 ## Design principles
 
@@ -295,8 +295,8 @@ type Schedule struct {
     Enabled   bool
     Overlap   OverlapPolicy
     Catchup   CatchupPolicy
-    NextFire  time.Time
-    LastFire  *time.Time
+    NextRunAt  time.Time
+    LastRunAt  *time.Time
     LastRunID *RunID
     CreatedAt time.Time
 }
@@ -338,11 +338,11 @@ type RunRequest struct {
 Daemon responsibilities:
 
 1. Load enabled schedules.
-2. Compute due fires.
+2. Compute due runs.
 3. Apply catchup policy.
 4. Apply overlap policy.
 5. Launch runs through a small interpreter port.
-6. Persist `NextFire`, `LastFire`, and `LastRunID`.
+6. Persist `NextRunAt`, `LastRunAt`, and `LastRunID`.
 
 Port into the interpreter/application layer:
 
@@ -407,7 +407,7 @@ package does, not which architecture diagram box it came from.
 7. **Isolate scheduler**
    - Move schedule-specific state and daemon behavior out of workflow domain.
    - Make daemon call a `RunLauncher` port.
-   - Keep schedule storage and next-fire computation in scheduler packages.
+   - Keep schedule storage and next-run computation in scheduler packages.
 
 8. **Cleanup pass after each phase**
    - Run `go test ./...` or `make lint-test`.

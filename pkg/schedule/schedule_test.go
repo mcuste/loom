@@ -1,6 +1,7 @@
 package schedule_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -11,7 +12,7 @@ import (
 )
 
 // fixedClock returns a deterministic timestamp so tests can pin CreatedAt and
-// the seeded NextFire without depending on wall-clock behavior.
+// the seeded NextRunAt without depending on wall-clock behavior.
 func fixedClock(ts string) func() time.Time {
 	t, err := time.Parse(time.RFC3339, ts)
 	if err != nil {
@@ -41,7 +42,7 @@ func cronRecord() schedule.Record {
 	}
 }
 
-func TestAddAssignsIDAndNextFire(t *testing.T) {
+func TestAddAssignsIDAndNextRunAt(t *testing.T) {
 	root := t.TempDir()
 	cfg := schedule.Config{Now: fixedClock("2026-06-28T10:00:00Z"), Rand: counterRand(0xa1b2c3)}
 
@@ -57,8 +58,8 @@ func TestAddAssignsIDAndNextFire(t *testing.T) {
 	}
 	// 10:00 UTC seed -> next 15:00 the same day.
 	want := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)
-	if !got.NextFire.Equal(want) {
-		t.Fatalf("NextFire = %v, want %v", got.NextFire, want)
+	if !got.NextRunAt.Equal(want) {
+		t.Fatalf("NextRunAt = %v, want %v", got.NextRunAt, want)
 	}
 }
 
@@ -89,6 +90,45 @@ func TestAddListGetRemoveRoundTrip(t *testing.T) {
 	}
 	if _, err := schedule.Get(root, added.ID); err == nil {
 		t.Fatal("Get after Remove: want error, got nil")
+	}
+}
+
+func TestRecordAcceptsLegacyScheduledTimeKeys(t *testing.T) {
+	data := []byte(`{
+		"next_fire": "2026-06-28T15:00:00Z",
+		"last_fire": "2026-06-27T15:00:00Z"
+	}`)
+
+	var got schedule.Record
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal legacy record: %v", err)
+	}
+	if want := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC); !got.NextRunAt.Equal(want) {
+		t.Errorf("NextRunAt = %v, want %v", got.NextRunAt, want)
+	}
+	if want := time.Date(2026, 6, 27, 15, 0, 0, 0, time.UTC); !got.LastRunAt.Equal(want) {
+		t.Errorf("LastRunAt = %v, want %v", got.LastRunAt, want)
+	}
+
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal migrated record: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("Unmarshal migrated fields: %v", err)
+	}
+	if _, ok := fields["next_run_at"]; !ok {
+		t.Errorf("migrated record = %s, want next_run_at", encoded)
+	}
+	if _, ok := fields["last_run_at"]; !ok {
+		t.Errorf("migrated record = %s, want last_run_at", encoded)
+	}
+	if _, ok := fields["next_fire"]; ok {
+		t.Errorf("migrated record = %s, legacy next_fire still present", encoded)
+	}
+	if _, ok := fields["last_fire"]; ok {
+		t.Errorf("migrated record = %s, legacy last_fire still present", encoded)
 	}
 }
 
@@ -161,23 +201,23 @@ func TestValidateRejectsBadTriggers(t *testing.T) {
 	}
 }
 
-func TestNextFireAfterOneOff(t *testing.T) {
+func TestNextRunAfterOneOff(t *testing.T) {
 	at := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)
 	rec := schedule.Record{Trigger: schedule.Trigger{At: at}}
 
-	next, err := rec.NextFireAfter(at.Add(-time.Hour))
+	next, err := rec.NextRunAfter(at.Add(-time.Hour))
 	if err != nil {
-		t.Fatalf("NextFireAfter before: %v", err)
+		t.Fatalf("NextRunAfter before: %v", err)
 	}
 	if !next.Equal(at) {
-		t.Fatalf("NextFire = %v, want %v", next, at)
+		t.Fatalf("NextRunAt = %v, want %v", next, at)
 	}
-	past, err := rec.NextFireAfter(at.Add(time.Hour))
+	past, err := rec.NextRunAfter(at.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("NextFireAfter after: %v", err)
+		t.Fatalf("NextRunAfter after: %v", err)
 	}
 	if !past.IsZero() {
-		t.Fatalf("past one-off NextFire = %v, want zero", past)
+		t.Fatalf("past one-off NextRunAt = %v, want zero", past)
 	}
 }
 
@@ -324,8 +364,8 @@ func TestSyncInlineAdds(t *testing.T) {
 	if res.ID != "mywf_inline" {
 		t.Fatalf("ID = %q, want %q", res.ID, "mywf_inline")
 	}
-	if res.NextFire.IsZero() {
-		t.Error("NextFire is zero after add")
+	if res.NextRunAt.IsZero() {
+		t.Error("NextRunAt is zero after add")
 	}
 	rec, err := schedule.Get(home, "mywf_inline")
 	if err != nil {
@@ -348,8 +388,8 @@ func TestSyncInlineUpdatePreservesFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after add: %v", err)
 	}
-	// Simulate a fire event and a manual disable.
-	before.LastFire = time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC)
+	// Simulate a completed run and a manual disable.
+	before.LastRunAt = time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC)
 	before.LastRunID = "run_abc"
 	before.Enabled = false
 	if err := schedule.Update(home, before); err != nil {
@@ -368,8 +408,8 @@ func TestSyncInlineUpdatePreservesFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after update: %v", err)
 	}
-	if !after.LastFire.Equal(before.LastFire) {
-		t.Errorf("LastFire = %v, want %v (not preserved)", after.LastFire, before.LastFire)
+	if !after.LastRunAt.Equal(before.LastRunAt) {
+		t.Errorf("LastRunAt = %v, want %v (not preserved)", after.LastRunAt, before.LastRunAt)
 	}
 	if after.LastRunID != "run_abc" {
 		t.Errorf("LastRunID = %q, want %q (not preserved)", after.LastRunID, "run_abc")
@@ -456,4 +496,114 @@ func TestTriggerSummary(t *testing.T) {
 			}
 		})
 	}
+}
+
+func cronRec(next time.Time, catchup bool) schedule.Record {
+	return schedule.Record{
+		ID:         "wf_cron_x",
+		WorkflowID: "wf",
+		Trigger:    schedule.Trigger{Cron: "* * * * *", TZ: "UTC"},
+		Enabled:    true,
+		Catchup:    catchup,
+		NextRunAt:  next,
+	}
+}
+
+func TestDueCron(t *testing.T) {
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+
+	t.Run("not due", func(t *testing.T) {
+		rec := cronRec(base.Add(time.Minute), false)
+		run, remove, _, err := rec.Due(base, false)
+		if err != nil || run || remove {
+			t.Fatalf("run=%v remove=%v err=%v, want all false/nil", run, remove, err)
+		}
+	})
+	t.Run("due steady state runs and advances", func(t *testing.T) {
+		rec := cronRec(base, false)
+		run, remove, next, err := rec.Due(base.Add(time.Second), false)
+		if err != nil || !run || remove {
+			t.Fatalf("run=%v remove=%v err=%v, want run=true", run, remove, err)
+		}
+		if !next.After(base) {
+			t.Fatalf("next %v not advanced past %v", next, base)
+		}
+	})
+	t.Run("missed tick on first scan without catchup advances without running", func(t *testing.T) {
+		rec := cronRec(base, false)
+		run, _, next, err := rec.Due(base.Add(10*time.Minute), true)
+		if err != nil || run {
+			t.Fatalf("run=%v err=%v, want run=false", run, err)
+		}
+		if !next.After(base.Add(10 * time.Minute).Add(-time.Minute)) {
+			t.Fatalf("next %v not advanced", next)
+		}
+	})
+	t.Run("missed tick on first scan with catchup runs", func(t *testing.T) {
+		rec := cronRec(base, true)
+		run, _, _, err := rec.Due(base.Add(10*time.Minute), true)
+		if err != nil || !run {
+			t.Fatalf("run=%v err=%v, want run=true", run, err)
+		}
+	})
+}
+
+// TestDueCronZeroNextRunAt pins the bootstrap branch: a cron record with an
+// unset NextRunAt computes its first tick from now rather than treating the
+// zero time as due. With now on a minute boundary the next "* * * * *" tick
+// is in the future, so the record is not due and the computed tick is returned.
+func TestDueCronZeroNextRunAt(t *testing.T) {
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	rec := cronRec(time.Time{}, false) // NextRunAt unset
+
+	run, remove, next, err := rec.Due(base, false)
+	if err != nil || run || remove {
+		t.Fatalf("run=%v remove=%v err=%v, want all false/nil", run, remove, err)
+	}
+	if !next.After(base) {
+		t.Fatalf("next %v not computed forward from %v", next, base)
+	}
+}
+
+// TestDueCronBadExpr pins that an unparseable cron expression surfaces as an
+// error from Due (via NextRunAfter) rather than silently skipping.
+func TestDueCronBadExpr(t *testing.T) {
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	rec := schedule.Record{
+		ID:      "wf_cron_bad",
+		Trigger: schedule.Trigger{Cron: "not a cron", TZ: "UTC"},
+		Enabled: true,
+	}
+
+	if _, _, _, err := rec.Due(base, false); err == nil {
+		t.Fatal("Due on a malformed cron returned nil error; want a parse error")
+	}
+}
+
+func TestDueOneOff(t *testing.T) {
+	at := time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)
+	rec := schedule.Record{
+		ID:      "wf_at_x",
+		Trigger: schedule.Trigger{At: at},
+		Enabled: true,
+	}
+
+	t.Run("future not due", func(t *testing.T) {
+		run, remove, _, _ := rec.Due(at.Add(-time.Hour), false)
+		if run || remove {
+			t.Fatalf("run=%v remove=%v, want both false", run, remove)
+		}
+	})
+	t.Run("due runs and removes", func(t *testing.T) {
+		run, remove, _, _ := rec.Due(at.Add(time.Second), false)
+		if !run || !remove {
+			t.Fatalf("run=%v remove=%v, want both true", run, remove)
+		}
+	})
+	t.Run("missed on first scan without catchup drops", func(t *testing.T) {
+		run, remove, _, _ := rec.Due(at.Add(time.Hour), true)
+		if run || !remove {
+			t.Fatalf("run=%v remove=%v, want run=false remove=true", run, remove)
+		}
+	})
 }

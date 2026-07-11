@@ -17,7 +17,7 @@ Daemon.scan: enabled schedule records <---------------------+
     v                                                        |
 schedule.Record.Due(now, firstScan)                          |
     |                                                        |
-    +-- not due --------------------> persist NextFire -------+
+    +-- not due --------------------> persist NextRunAt -------+
     |                                                        |
     +-- missed one-off, no catch-up -> remove record --------+
     |                                                        |
@@ -49,7 +49,7 @@ schedule.Record.Due(now, firstScan)                          |
                   v                                          |
           Daemon.complete                                    |
           - clear in-flight state                            |
-          - persist LastFire and LastRunID for cron           |
+          - persist LastRunAt and LastRunID for cron           |
                   |                                          |
                   v                                          |
 wait for the next scheduled run, schedule change, completion, |

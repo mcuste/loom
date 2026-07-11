@@ -1,5 +1,5 @@
 // Package schedule persists workflow schedules to disk so the loom daemon can
-// fire runs at cron times or one-off instants without the user keeping a shell
+// start runs at cron times or one-off instants without the user keeping a shell
 // open.
 //
 // Each schedule is a single self-contained JSON file under the loom home
@@ -15,8 +15,8 @@
 // leaves a half-written schedule on disk, mirroring the run store in
 // [github.com/mcuste/loom/pkg/store].
 //
-// The package owns storage, validation, and next-fire computation; the firing
-// policy (overlap handling, catch-up on startup) lives in the daemon.
+// The package owns storage, validation, and scheduled-time computation; the
+// run policy (overlap handling, catch-up on startup) lives in the daemon.
 package schedule
 
 import (
@@ -32,30 +32,31 @@ import (
 	"github.com/adhocore/gronx"
 
 	"github.com/mcuste/loom/pkg/launcher"
+	"github.com/mcuste/loom/pkg/workflow"
 )
 
 // ScheduleID identifies a persisted schedule.
 type ScheduleID string
 
-// Overlap is the policy for a fire that arrives while the schedule's previous
-// run is still in flight.
+// Overlap is the policy when a scheduled run becomes due while the schedule's
+// previous run is still in flight.
 type Overlap string
 
 // OverlapPolicy is the architecture-level name for overlap handling.
 type OverlapPolicy = Overlap
 
-// CatchupPolicy records whether missed fires should be caught up on daemon
-// startup. It aliases bool because the current policy is intentionally binary.
+// CatchupPolicy records whether a missed scheduled time should start a run on
+// daemon startup. It aliases bool because the current policy is binary.
 type CatchupPolicy bool
 
 const (
-	// OverlapSkip drops the new fire if the previous run is still running. The
-	// default: safest for workflows that carry cross-run state.
+	// OverlapSkip drops the due run if the previous run is still running. The
+	// default is safest for workflows that carry cross-run state.
 	OverlapSkip Overlap = "skip"
-	// OverlapQueue serializes fires per schedule: the new fire waits for the
-	// previous run to finish, then runs.
+	// OverlapQueue serializes runs per schedule: the due run waits for the
+	// previous run to finish.
 	OverlapQueue Overlap = "queue"
-	// OverlapAllow fires concurrently regardless of any in-flight run.
+	// OverlapAllow starts runs concurrently regardless of any in-flight run.
 	OverlapAllow Overlap = "allow"
 )
 
@@ -83,7 +84,7 @@ type OneShotTrigger struct {
 }
 
 // Trigger is a schedule's timing rule. Exactly one of Cron or At is set: Cron
-// is a recurring gronx expression, At is a one-off fire instant (stored UTC).
+// is a recurring gronx expression, At is a one-off scheduled instant (UTC).
 // TZ is the IANA location name the cron expression is evaluated in; empty means
 // the daemon's local time.
 type Trigger struct {
@@ -141,28 +142,50 @@ type Record struct {
 	Trigger Trigger `json:"trigger"`
 	// Params holds the resolved -p key=val values to pass to each run.
 	Params map[string]string `json:"params,omitempty"`
-	// Enabled gates firing: a disabled schedule is retained but never fired.
+	// Enabled gates runs: a disabled schedule is retained but never started.
 	Enabled bool `json:"enabled"`
 	// Overlap is the in-flight-run policy; empty means OverlapSkip.
 	Overlap Overlap `json:"overlap,omitempty"`
-	// Catchup, when true, fires a cron schedule once on daemon startup if its
-	// previous fire was missed (the daemon was down), and runs a past-due
-	// one-off rather than dropping it.
+	// Catchup, when true, starts one cron run on daemon startup if a scheduled
+	// time was missed, and runs a past-due one-off rather than dropping it.
 	Catchup bool `json:"catchup,omitempty"`
-	// NextFire is the next instant this schedule is due (UTC). Maintained by the
+	// NextRunAt is the next instant this schedule is due (UTC). Maintained by the
 	// daemon; Add seeds it from the trigger.
-	NextFire time.Time `json:"next_fire,omitzero"`
-	// LastFire is the instant the schedule last fired (UTC). Zero until first
-	// fired.
-	LastFire time.Time `json:"last_fire,omitzero"`
-	// LastRunID is the run id of the most recent fire, linking the schedule to a
-	// record in the run store.
+	NextRunAt time.Time `json:"next_run_at,omitzero"`
+	// LastRunAt is the scheduled time of the most recent run (UTC).
+	LastRunAt time.Time `json:"last_run_at,omitzero"`
+	// LastRunID links the schedule to its most recent record in the run store.
 	LastRunID string `json:"last_run_id,omitempty"`
 	// CreatedAt is when the schedule was added (UTC).
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// RunRequest returns the opaque workflow request this schedule fires. The
+// UnmarshalJSON accepts the current scheduled-time keys and the legacy keys
+// written by earlier Loom versions.
+func (r *Record) UnmarshalJSON(data []byte) error {
+	type recordJSON Record
+	var decoded recordJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var legacy struct {
+		NextRunAt time.Time `json:"next_fire"`
+		LastRunAt time.Time `json:"last_fire"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if decoded.NextRunAt.IsZero() {
+		decoded.NextRunAt = legacy.NextRunAt
+	}
+	if decoded.LastRunAt.IsZero() {
+		decoded.LastRunAt = legacy.LastRunAt
+	}
+	*r = Record(decoded)
+	return nil
+}
+
+// RunRequest returns the opaque workflow request for this scheduled run. The
 // daemon passes this value to a launcher.RunLauncher without inspecting the
 // referenced workflow's tasks, graph, runtimes, or reports.
 func (r Record) RunRequest(defaultCwd string) launcher.RunRequest {
@@ -190,14 +213,140 @@ func (r Record) EffectiveOverlap() Overlap {
 	return r.Overlap
 }
 
+// NextRunAfter computes the next instant the schedule is due strictly after t,
+// returned in UTC. For a one-off, it is the trigger instant when that is after
+// t, otherwise the zero time (already past). For a cron, the expression is
+// evaluated in the trigger's timezone (local when TZ is empty).
+func (r Record) NextRunAfter(t time.Time) (time.Time, error) {
+	if !r.Trigger.IsCron() {
+		if r.Trigger.At.After(t) {
+			return r.Trigger.At.UTC(), nil
+		}
+		return time.Time{}, nil
+	}
+	loc := time.Local
+	if r.Trigger.TZ != "" {
+		l, err := time.LoadLocation(r.Trigger.TZ)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("schedule: invalid timezone %q: %w", r.Trigger.TZ, err)
+		}
+		loc = l
+	}
+	next, err := gronx.NextTickAfter(r.Trigger.Cron, t.In(loc), false)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("schedule: compute next tick for %q: %w", r.Trigger.Cron, err)
+	}
+	return next.UTC(), nil
+}
+
+// Due reports whether the schedule should run at now, whether to remove the
+// record afterward, the next scheduled time to persist, and any error.
+// firstScan distinguishes a tick that is due now from one that was missed
+// while the daemon was down (only honored for catch-up). This keeps the timing
+// decision next to Record so the daemon owns only policy and side effects.
+func (r Record) Due(now time.Time, firstScan bool) (run, remove bool, next time.Time, err error) {
+	if r.Trigger.IsCron() {
+		nf := r.NextRunAt
+		if nf.IsZero() {
+			if nf, err = r.NextRunAfter(now); err != nil {
+				return false, false, time.Time{}, err
+			}
+		}
+		if now.Before(nf) {
+			return false, false, nf, nil // not due
+		}
+		advanced, err := r.NextRunAfter(now)
+		if err != nil {
+			return false, false, time.Time{}, err
+		}
+		if firstScan && !r.Catchup {
+			// Missed tick(s) while down; advance without starting a run.
+			return false, false, advanced, nil
+		}
+		return true, false, advanced, nil
+	}
+
+	// One-off.
+	at := r.Trigger.At
+	if now.Before(at) {
+		return false, false, at, nil // not due
+	}
+	if firstScan && !r.Catchup {
+		return false, true, time.Time{}, nil // missed while down, drop
+	}
+	return true, true, time.Time{}, nil // run then remove
+}
+
 // Config is the optional configuration for [Add]. The zero value is valid.
 type Config struct {
-	// Now overrides the clock used for CreatedAt and the initial NextFire; nil
+	// Now overrides the clock used for CreatedAt and the initial NextRunAt; nil
 	// uses time.Now. Tests inject a fixed clock for determinism.
 	Now func() time.Time
 	// Rand returns the random suffix appended to a generated id. nil uses
 	// crypto/rand; tests inject a deterministic source.
 	Rand func() (string, error)
+}
+
+// SyncAction describes the outcome of a [SyncInline] call.
+type SyncAction int
+
+const (
+	// SyncNoOp means the workflow has no inline schedule and none was stored.
+	SyncNoOp SyncAction = iota
+	// SyncAdded means a new inline schedule record was created.
+	SyncAdded
+	// SyncUpdated means an existing inline schedule record was updated in place.
+	SyncUpdated
+	// SyncRemoved means a previously synced inline schedule was deleted because
+	// the workflow's `schedule:` block was dropped.
+	SyncRemoved
+)
+
+// SyncResult is the outcome of a [SyncInline] call.
+type SyncResult struct {
+	// Action classifies what happened.
+	Action SyncAction
+	// ID is the schedule id that was affected. Empty for SyncNoOp.
+	ID string
+	// NextRunAt is the next scheduled instant for SyncAdded and SyncUpdated.
+	// Zero for SyncRemoved and SyncNoOp.
+	NextRunAt time.Time
+}
+
+// ParseAtTime turns a clock time (and optional date) in loc into a concrete
+// instant. Without a date it uses today in loc; if that instant has already
+// passed it rolls to the next day, so "at 15:00" means the next 15:00. A
+// supplied date is honored verbatim (no rollover).
+//
+// The optional labels argument customises the field names used in error
+// messages: labels[0] replaces "time" (e.g. "--time") and labels[1] replaces
+// "date" (e.g. "--date"). Callers that surface CLI flag names pass them here
+// so format errors name the offending flag directly.
+func ParseAtTime(timeStr, dateStr string, loc *time.Location, now time.Time, labels ...string) (time.Time, error) {
+	timeLabel, dateLabel := "time", "date"
+	if len(labels) > 0 && labels[0] != "" {
+		timeLabel = labels[0]
+	}
+	if len(labels) > 1 && labels[1] != "" {
+		dateLabel = labels[1]
+	}
+	hm, err := time.Parse("15:04", timeStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("schedule: invalid %s %q: want HH:MM", timeLabel, timeStr)
+	}
+	if dateStr != "" {
+		d, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("schedule: invalid %s %q: want YYYY-MM-DD", dateLabel, dateStr)
+		}
+		return time.Date(d.Year(), d.Month(), d.Day(), hm.Hour(), hm.Minute(), 0, 0, loc), nil
+	}
+	nowLoc := now.In(loc)
+	at := time.Date(nowLoc.Year(), nowLoc.Month(), nowLoc.Day(), hm.Hour(), hm.Minute(), 0, 0, loc)
+	if !at.After(now) {
+		at = at.AddDate(0, 0, 1)
+	}
+	return at, nil
 }
 
 // Validate checks a record's trigger before it is written: exactly one of cron
@@ -224,8 +373,44 @@ func Validate(rec Record) error {
 	return nil
 }
 
+// NewRecord builds a Record with the trigger-independent defaults shared by
+// every schedule creation path: WorkflowID, Ref, Path, Params, Enabled=true,
+// and Catchup. The caller sets Trigger (and, for inline records, ID; for cron
+// records, Overlap) before persisting. path must already be absolute; the
+// caller resolves it via filepath.Abs.
+func NewRecord(workflowID, ref, path string, params map[string]string, catchup bool) Record {
+	return Record{
+		WorkflowID: workflowID,
+		Ref:        ref,
+		Path:       path,
+		Params:     params,
+		Enabled:    true,
+		Catchup:    catchup,
+	}
+}
+
+// NewCronRecord builds a fully-initialized Record for a recurring cron
+// schedule. It extends [NewRecord] by setting Trigger and Overlap so the
+// caller does not mutate fields after construction. path must already be
+// absolute.
+func NewCronRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger, overlap Overlap) Record {
+	rec := NewRecord(workflowID, ref, path, params, catchup)
+	rec.Trigger = trigger
+	rec.Overlap = overlap
+	return rec
+}
+
+// NewAtRecord builds a fully-initialized Record for a one-off schedule. It
+// extends [NewRecord] by setting Trigger so the caller does not mutate fields
+// after construction. path must already be absolute.
+func NewAtRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger) Record {
+	rec := NewRecord(workflowID, ref, path, params, catchup)
+	rec.Trigger = trigger
+	return rec
+}
+
 // Add validates rec, assigns its id (when empty), CreatedAt, and initial
-// NextFire, then writes it atomically under root. It returns the stored record.
+// NextRunAt, then writes it atomically under root. It returns the stored record.
 func Add(root string, rec Record, cfg Config) (Record, error) {
 	if err := Validate(rec); err != nil {
 		return Record{}, err
@@ -246,11 +431,11 @@ func Add(root string, rec Record, cfg Config) (Record, error) {
 		}
 		rec.ID = rec.WorkflowID + "_" + triggerKind(rec.Trigger) + "_" + suffix
 	}
-	next, err := rec.NextFireAfter(rec.CreatedAt)
+	next, err := rec.NextRunAfter(rec.CreatedAt)
 	if err != nil {
 		return Record{}, err
 	}
-	rec.NextFire = next
+	rec.NextRunAt = next
 	if err := write(root, rec); err != nil {
 		return Record{}, err
 	}
@@ -341,40 +526,67 @@ func List(root, workflowFilter string) ([]Record, error) {
 	return recs, nil
 }
 
-// NewRecord builds a Record with the trigger-independent defaults shared by
-// every schedule creation path: WorkflowID, Ref, Path, Params, Enabled=true,
-// and Catchup. The caller sets Trigger (and, for inline records, ID; for cron
-// records, Overlap) before persisting. path must already be absolute; the
-// caller resolves it via filepath.Abs.
-func NewRecord(workflowID, ref, path string, params map[string]string, catchup bool) Record {
-	return Record{
-		WorkflowID: workflowID,
-		Ref:        ref,
-		Path:       path,
-		Params:     params,
-		Enabled:    true,
-		Catchup:    catchup,
+// inlineIDSuffix marks schedule IDs that originate from a workflow's inline
+// `schedule:` block. It is the single authority for the naming convention so
+// a re-sync upserts the same record and a dropped block can find and remove
+// its prior record.
+const inlineIDSuffix = "_inline"
+
+// SyncInline upserts or removes the inline schedule for wf and returns a
+// SyncResult describing the change. path must be the absolute workflow file
+// path. ref is the display name recorded on the schedule record and shown in
+// messages.
+//
+// Field-preservation rule on update: CreatedAt, LastRunAt, LastRunID, and
+// Enabled from the existing record survive the re-sync; NextRunAt is
+// recomputed from the (possibly updated) cron expression.
+func SyncInline(home string, wf *workflow.Workflow, path, ref string) (SyncResult, error) {
+	id := string(wf.ID) + inlineIDSuffix
+	existing, getErr := Get(home, id)
+
+	if wf.Schedule == nil {
+		if getErr == nil {
+			if err := Remove(home, id); err != nil {
+				return SyncResult{}, err
+			}
+			return SyncResult{Action: SyncRemoved, ID: id}, nil
+		}
+		return SyncResult{Action: SyncNoOp}, nil
 	}
+
+	rec := NewRecord(string(wf.ID), ref, path, nil, false)
+	rec.ID = id
+	rec.Trigger = Trigger{Cron: wf.Schedule.Cron, TZ: wf.Schedule.TZ}
+	if err := Validate(rec); err != nil {
+		return SyncResult{}, err
+	}
+	if getErr == nil {
+		rec.CreatedAt = existing.CreatedAt
+		rec.LastRunAt = existing.LastRunAt
+		rec.LastRunID = existing.LastRunID
+		rec.Enabled = existing.Enabled
+		next, err := rec.NextRunAfter(time.Now())
+		if err != nil {
+			return SyncResult{}, err
+		}
+		rec.NextRunAt = next
+		if err := Update(home, rec); err != nil {
+			return SyncResult{}, err
+		}
+		return SyncResult{Action: SyncUpdated, ID: id, NextRunAt: rec.NextRunAt}, nil
+	}
+	stored, err := Add(home, rec, Config{})
+	if err != nil {
+		return SyncResult{}, err
+	}
+	return SyncResult{Action: SyncAdded, ID: stored.ID, NextRunAt: stored.NextRunAt}, nil
 }
 
-// NewCronRecord builds a fully-initialized Record for a recurring cron
-// schedule. It extends [NewRecord] by setting Trigger and Overlap so the
-// caller does not mutate fields after construction. path must already be
-// absolute.
-func NewCronRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger, overlap Overlap) Record {
-	rec := NewRecord(workflowID, ref, path, params, catchup)
-	rec.Trigger = trigger
-	rec.Overlap = overlap
-	return rec
-}
-
-// NewAtRecord builds a fully-initialized Record for a one-off schedule. It
-// extends [NewRecord] by setting Trigger so the caller does not mutate fields
-// after construction. path must already be absolute.
-func NewAtRecord(workflowID, ref, path string, params map[string]string, catchup bool, trigger Trigger) Record {
-	rec := NewRecord(workflowID, ref, path, params, catchup)
-	rec.Trigger = trigger
-	return rec
+// SchedulesDir returns the directory under root where schedule records are
+// stored. It is the single authority for the layout; daemon helpers call this
+// instead of re-encoding the path independently.
+func SchedulesDir(root string) string {
+	return schedulesDir(root)
 }
 
 // write atomically persists rec to <root>/schedules/<id>.json.
@@ -397,13 +609,6 @@ func write(root string, rec Record) error {
 		return fmt.Errorf("schedule: rename %q: %w", rec.ID, err)
 	}
 	return nil
-}
-
-// SchedulesDir returns the directory under root where schedule records are
-// stored. It is the single authority for the layout; daemon helpers call this
-// instead of re-encoding the path independently.
-func SchedulesDir(root string) string {
-	return schedulesDir(root)
 }
 
 func schedulesDir(root string) string {

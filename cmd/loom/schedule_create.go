@@ -118,6 +118,6 @@ func addAndReport(w io.Writer, home string, rec schedule.Record) error {
 		return err
 	}
 	_, err = fmt.Fprintf(w, "scheduled %s (%s), next run %s\n",
-		stored.ID, stored.Trigger.Summary(), tui.FormatScheduledTime(stored.NextFire))
+		stored.ID, stored.Trigger.Summary(), tui.FormatScheduledTime(stored.NextRunAt))
 	return err
 }

@@ -330,7 +330,7 @@ Handles:
 
 - workflow ref loading
 - param and routing validation
-- per-fire logs for scheduled runs
+- per-run logs for scheduled runs
 - runner invocation with provenance
 
 ## Fresh Run Sequence
@@ -398,8 +398,8 @@ sequenceDiagram
   User->>CLI: loom daemon
   CLI->>Daemon: Run(ctx)
   Daemon->>Sched: List()
-  Daemon->>Daemon: decide due fires
+  Daemon->>Daemon: decide due runs
   Daemon->>Launch: Launch(run request, provenance)
   Launch-->>Daemon: run id
-  Daemon->>Sched: update LastFire / LastRunID / NextFire
+  Daemon->>Sched: update LastRunAt / LastRunID / NextRunAt
 ```

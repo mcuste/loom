@@ -51,9 +51,9 @@ func TestSchedulesTableColumns(t *testing.T) {
 	if !strings.Contains(out, "yes") {
 		t.Errorf("enabled=true should render as 'yes'; got:\n%s", out)
 	}
-	// NextFire zero → "-".
+	// NextRunAt zero → "-".
 	if !strings.Contains(out, "-") {
-		t.Errorf("zero NextFire should render as '-'; got:\n%s", out)
+		t.Errorf("zero NextRunAt should render as '-'; got:\n%s", out)
 	}
 }
 

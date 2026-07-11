@@ -19,9 +19,9 @@ import (
 func newDaemonCmd(env *cliEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
-		Short: "Run the daemon that fires scheduled workflows",
+		Short: "Run the daemon that starts scheduled workflows",
 		Long: "Run the daemon in the foreground. It reads schedules from " +
-			"$LOOM_HOME/schedules and fires each workflow at its cron time or one-off " +
+			"$LOOM_HOME/schedules and starts each workflow at its cron time or one-off " +
 			"instant, recording every run in the normal run store. Use a process " +
 			"supervisor (launchd/systemd) to keep it alive across reboots.",
 		Args: cobra.NoArgs,

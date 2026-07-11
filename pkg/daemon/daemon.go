@@ -1,4 +1,4 @@
-// Package daemon implements the loop that fires scheduled workflows.
+// Package daemon implements the loop that starts scheduled workflow runs.
 package daemon
 
 import (
@@ -23,9 +23,9 @@ const reconcileInterval = 10 * time.Minute
 // queued run) does not spin the loop.
 const minWait = time.Second
 
-// Daemon owns the schedule-firing loop. now is injectable so tests drive the
-// firing decision deterministically; running tracks in-flight fires per
-// schedule id so the overlap policy can skip or serialize them.
+// Daemon owns the scheduled-run loop. now is injectable so tests drive due-time
+// decisions deterministically; running tracks in-flight runs per schedule id so
+// the overlap policy can skip or serialize them.
 type Daemon struct {
 	home     string
 	cwd      string
@@ -68,7 +68,7 @@ type wakeSources struct {
 // Run drives the scan/wake loop until ctx is cancelled. The first scan
 // applies catch-up handling for ticks missed while the daemon was down.
 // results carries completions back so the loop can clear the running flag and
-// persist LastFire/LastRunID without racing the scan's NextFire writes.
+// persist LastRunAt/LastRunID without racing the scan's NextRunAt writes.
 func (d *Daemon) Run(ctx context.Context) error {
 	watcher, err := d.newScheduleWatcher()
 	if err != nil {
@@ -173,9 +173,9 @@ func isScheduleChange(event fsnotify.Event) bool {
 	return event.Op&changes != 0
 }
 
-// scan evaluates every enabled schedule once and fires those that are due,
-// returning the soonest future NextFire so the caller knows how long to sleep.
-// It owns all NextFire writes; LastFire/LastRunID writes happen in complete.
+// scan evaluates every enabled schedule once and starts those that are due,
+// returning the soonest future NextRunAt so the caller knows how long to sleep.
+// It owns all NextRunAt writes; LastRunAt/LastRunID writes happen in complete.
 func (d *Daemon) scan(ctx context.Context, firstScan bool, results chan<- launchResult) time.Time {
 	recs, err := schedule.List(d.home, "")
 	if err != nil {
@@ -208,36 +208,35 @@ func earliest(a, b time.Time) time.Time {
 	}
 }
 
-// processRecord evaluates one enabled schedule and acts on the firing
-// decision: it drops a missed one-off, fires (or holds) a due schedule, or
-// persists a freshly computed NextFire for one not yet due. It returns this
-// record's contribution to the scan's soonest-NextFire, or the zero time when
-// it contributes none (a decision error or a dropped one-off).
+// processRecord evaluates one enabled schedule: it drops a missed one-off,
+// starts or holds a due run, or persists a freshly computed NextRunAt. It
+// returns this record's contribution to the next scan time, or zero after a
+// decision error or dropped one-off.
 func (d *Daemon) processRecord(ctx context.Context, rec schedule.Record, now time.Time, firstScan bool, results chan<- launchResult) time.Time {
-	fire, remove, next, err := rec.Due(now, firstScan)
+	run, remove, next, err := rec.Due(now, firstScan)
 	if err != nil {
 		d.logf("schedule %s: %v", rec.ID, err)
 		return time.Time{}
 	}
-	if remove && !fire {
+	if remove && !run {
 		// A one-off whose instant was missed while the daemon was down and that
 		// opted out of catch-up: drop it without running.
 		d.logf("schedule %s: one-off time passed while daemon was down, dropping", rec.ID)
 		d.removeRecord(rec.ID)
 		return time.Time{}
 	}
-	if fire {
+	if run {
 		if !d.startScheduledRun(ctx, rec, now, remove, next, results) {
-			// Blocked by the overlap policy (queue): leave NextFire untouched so
+			// Blocked by the overlap policy (queue): leave NextRunAt untouched so
 			// the next scan retries once the in-flight run completes.
 			return now.Add(minWait)
 		}
 		return next
 	}
-	// Not due yet: persist the (possibly freshly computed) NextFire so the
+	// Not due yet: persist the (possibly freshly computed) NextRunAt so the
 	// table and the next scan agree.
-	if !next.Equal(rec.NextFire) {
-		rec.NextFire = next
+	if !next.Equal(rec.NextRunAt) {
+		rec.NextRunAt = next
 		d.updateRecord(rec)
 	}
 	return next
@@ -251,7 +250,7 @@ func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Record, now
 	switch rec.EffectiveOverlap() {
 	case schedule.OverlapSkip:
 		if d.running.contains(rec.ID) {
-			d.logf("schedule %s: previous run still in flight, skipping this fire", rec.ID)
+			d.logf("schedule %s: previous run still in flight, skipping this run", rec.ID)
 			// Advance past this tick so skip means skip, not retry.
 			d.advanceCron(rec, next)
 			return true
@@ -261,18 +260,18 @@ func (d *Daemon) startScheduledRun(ctx context.Context, rec schedule.Record, now
 			return false // hold; retry on next scan after the run completes
 		}
 	case schedule.OverlapAllow:
-		// fall through: fire regardless of any in-flight run
+		// fall through: start regardless of any in-flight run
 	}
 
 	d.running.add(rec.ID)
 	// advanceCron persists the next tick for a cron and no-ops for a one-off;
-	// remove is only ever set for a one-off that just fired.
+	// remove is only ever set for a one-off that just started.
 	d.advanceCron(rec, next)
 	if remove {
 		d.removeRecord(rec.ID)
 	}
 	go d.launchScheduledRun(ctx, rec, now, results)
-	d.logf("schedule %s: firing %s", rec.ID, rec.WorkflowID)
+	d.logf("schedule %s: starting %s", rec.ID, rec.WorkflowID)
 	return true
 }
 
@@ -311,7 +310,7 @@ func (d *Daemon) complete(res launchResult) {
 	if err != nil {
 		return // schedule removed meanwhile; nothing to update
 	}
-	rec.LastFire = res.scheduledAt.UTC()
+	rec.LastRunAt = res.scheduledAt.UTC()
 	if res.runID != "" {
 		rec.LastRunID = res.runID
 	}
@@ -319,10 +318,10 @@ func (d *Daemon) complete(res launchResult) {
 }
 
 // advanceCron consumes rec's current cron tick by persisting next as its
-// NextFire; it is a no-op for a one-off, whose firing is recorded by removal.
+// NextRunAt; it is a no-op for a one-off, whose launch is recorded by removal.
 func (d *Daemon) advanceCron(rec schedule.Record, next time.Time) {
 	if rec.Trigger.IsCron() {
-		rec.NextFire = next
+		rec.NextRunAt = next
 		d.updateRecord(rec)
 	}
 }
