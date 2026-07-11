@@ -57,6 +57,24 @@ func TestSchedulesTableColumns(t *testing.T) {
 	}
 }
 
+func TestSchedulesTableDisplaysNextRunInTriggerTimezone(t *testing.T) {
+	recs := []schedule.Schedule{{
+		ID:         "berlin-cron",
+		WorkflowID: "workflow",
+		Trigger:    schedule.Trigger{Cron: "0 15 * * *", TZ: "Europe/Berlin"},
+		NextRunAt:  time.Date(2026, 6, 30, 13, 0, 0, 0, time.UTC),
+		Enabled:    true,
+	}}
+
+	var buf bytes.Buffer
+	if err := SchedulesTable(&buf, recs); err != nil {
+		t.Fatalf("SchedulesTable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "2026-06-30 15:00 CEST") {
+		t.Errorf("SchedulesTable did not render trigger timezone:\n%s", buf.String())
+	}
+}
+
 // TestSchedulesTableDisabledRow pins that Enabled=false renders as "no".
 func TestSchedulesTableDisabledRow(t *testing.T) {
 	recs := []schedule.Schedule{
@@ -73,17 +91,21 @@ func TestSchedulesTableDisabledRow(t *testing.T) {
 
 // TestFormatScheduledTimeZero pins "-" for the zero time.
 func TestFormatScheduledTimeZero(t *testing.T) {
-	if got := FormatScheduledTime(time.Time{}); got != "-" {
+	if got := FormatScheduledTime(time.Time{}, time.UTC); got != "-" {
 		t.Errorf("FormatScheduledTime(zero) = %q, want -", got)
 	}
 }
 
-// TestFormatScheduledTimeNonZero pins the display layout for a concrete instant.
-func TestFormatScheduledTimeNonZero(t *testing.T) {
-	ts := time.Date(2026, 6, 30, 15, 0, 0, 0, time.UTC)
-	got := FormatScheduledTime(ts)
-	if !strings.HasPrefix(got, "2026-06-30 15:00") {
-		t.Errorf("FormatScheduledTime = %q, want prefix 2026-06-30 15:00", got)
+func TestFormatScheduledTimeUsesLocation(t *testing.T) {
+	ts := time.Date(2026, 6, 30, 13, 0, 0, 0, time.UTC)
+	loc, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+
+	got := FormatScheduledTime(ts, loc)
+	if got != "2026-06-30 15:00 CEST" {
+		t.Errorf("FormatScheduledTime = %q, want 2026-06-30 15:00 CEST", got)
 	}
 }
 

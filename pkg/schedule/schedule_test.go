@@ -62,6 +62,34 @@ func TestAddAssignsIDAndNextRunAt(t *testing.T) {
 	}
 }
 
+func TestAddNormalizesOneOffToUTC(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	at := time.Date(2026, 6, 28, 15, 0, 0, 0, loc)
+	rec := schedule.Schedule{
+		WorkflowID: "deploy",
+		Trigger:    schedule.Trigger{At: at, TZ: "Europe/Berlin"},
+		Enabled:    true,
+	}
+
+	got, err := schedule.Add(t.TempDir(), rec, schedule.Config{
+		Now:  fixedClock("2026-06-28T10:00:00Z"),
+		Rand: counterRand(1),
+	})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	want := time.Date(2026, 6, 28, 13, 0, 0, 0, time.UTC)
+	if !got.Trigger.At.Equal(want) || got.Trigger.At.Location() != time.UTC {
+		t.Fatalf("Trigger.At = %v in %v, want %v in UTC", got.Trigger.At, got.Trigger.At.Location(), want)
+	}
+	if !got.NextRunAt.Equal(want) || got.NextRunAt.Location() != time.UTC {
+		t.Fatalf("NextRunAt = %v in %v, want %v in UTC", got.NextRunAt, got.NextRunAt.Location(), want)
+	}
+}
+
 func TestAddListGetRemoveRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	cfg := schedule.Config{Now: fixedClock("2026-06-28T10:00:00Z"), Rand: counterRand(1)}
@@ -178,6 +206,22 @@ func TestNextRunAfterOneOff(t *testing.T) {
 	}
 	if !past.IsZero() {
 		t.Fatalf("past one-off NextRunAt = %v, want zero", past)
+	}
+}
+
+func TestNextRunAfterUsesTriggerTimezone(t *testing.T) {
+	rec := schedule.Schedule{Trigger: schedule.Trigger{
+		Cron: "0 15 * * *",
+		TZ:   "Europe/Berlin",
+	}}
+
+	next, err := rec.NextRunAfter(time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("NextRunAfter: %v", err)
+	}
+	want := time.Date(2026, 6, 28, 13, 0, 0, 0, time.UTC)
+	if !next.Equal(want) || next.Location() != time.UTC {
+		t.Fatalf("NextRunAfter = %v in %v, want %v in UTC", next, next.Location(), want)
 	}
 }
 
@@ -433,9 +477,12 @@ func TestTriggerSummary(t *testing.T) {
 			`cron "0 15 * * *" Europe/Berlin`,
 		},
 		{
-			"at instant",
-			schedule.Trigger{At: time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC)},
-			"at 2026-06-28 15:00 UTC",
+			"at instant in trigger timezone",
+			schedule.Trigger{
+				At: time.Date(2026, 6, 28, 13, 0, 0, 0, time.UTC),
+				TZ: "Europe/Berlin",
+			},
+			"at 2026-06-28 15:00 CEST",
 		},
 		{
 			"at zero",
@@ -445,7 +492,11 @@ func TestTriggerSummary(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.tr.Summary(); got != tc.want {
+			got, err := tc.tr.Summary()
+			if err != nil {
+				t.Fatalf("Summary(): %v", err)
+			}
+			if got != tc.want {
 				t.Fatalf("Summary() = %q, want %q", got, tc.want)
 			}
 		})

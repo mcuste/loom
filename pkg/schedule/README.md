@@ -35,11 +35,14 @@ exactly one timing form:
 
 - `Cron` is a recurring gronx expression evaluated in `TZ`, or local time when
   `TZ` is empty.
-- `At` is a one-off UTC instant.
+- `At` is interpreted in `TZ`, or local time when `TZ` is empty, then normalized
+  to a UTC instant.
 
 `NextRunAt` is the next scheduled time. `LastRunAt` is the scheduled time of
 the most recent run, and `LastRunID` links that occurrence to the run store.
-Scheduled timestamps use the `next_run_at` and `last_run_at` JSON keys.
+All instants are persisted and compared in UTC. CLI output converts them back
+to the trigger's explicit timezone, or local time when `TZ` is empty. Scheduled
+timestamps use the `next_run_at` and `last_run_at` JSON keys.
 
 ## Timing and policies
 

@@ -12,12 +12,16 @@ import (
 	"github.com/mcuste/loom/pkg/workflow"
 )
 
-// FormatScheduledTime renders an instant for display, or "-" when unset.
-func FormatScheduledTime(t time.Time) string {
+// FormatScheduledTime renders an instant in loc, or local time when loc is nil.
+// It returns "-" when the instant is unset.
+func FormatScheduledTime(t time.Time, loc *time.Location) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.Format("2006-01-02 15:04 MST")
+	if loc == nil {
+		loc = time.Local
+	}
+	return t.In(loc).Format("2006-01-02 15:04 MST")
 }
 
 // pick returns yes when cond holds, no otherwise: a tiny ternary so a
@@ -41,8 +45,16 @@ func SchedulesTable(w io.Writer, recs []schedule.Schedule) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tWORKFLOW\tTRIGGER\tNEXT RUN\tENABLED\tOVERLAP")
 	for _, r := range recs {
+		loc, err := r.Trigger.Location()
+		if err != nil {
+			return err
+		}
+		summary, err := r.Trigger.Summary()
+		if err != nil {
+			return err
+		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.ID, r.WorkflowID, r.Trigger.Summary(), FormatScheduledTime(r.NextRunAt),
+			r.ID, r.WorkflowID, summary, FormatScheduledTime(r.NextRunAt, loc),
 			pick(r.Enabled, "yes", "no"), r.EffectiveOverlap())
 	}
 	return tw.Flush()

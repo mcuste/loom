@@ -70,7 +70,11 @@ func syncOne(home, cwd, loadRef, displayName string) (string, error) {
 	}
 	switch res.Action {
 	case schedule.SyncAdded:
-		return fmt.Sprintf("added inline schedule %s, next run %s", res.ID, tui.FormatScheduledTime(res.NextRunAt)), nil
+		loc, err := (schedule.Trigger{TZ: wf.Schedule.TZ}).Location()
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("added inline schedule %s, next run %s", res.ID, tui.FormatScheduledTime(res.NextRunAt, loc)), nil
 	case schedule.SyncUpdated:
 		return fmt.Sprintf("updated inline schedule %s", res.ID), nil
 	case schedule.SyncRemoved:

@@ -77,9 +77,9 @@ type OneShotTrigger struct {
 }
 
 // Trigger is a schedule's timing rule. Exactly one of Cron or At is set: Cron
-// is a recurring gronx expression, At is a one-off scheduled instant (UTC).
-// TZ is the IANA location name the cron expression is evaluated in; empty means
-// the daemon's local time.
+// is a recurring gronx expression, At is a one-off scheduled instant stored in
+// UTC. TZ is the IANA location used to evaluate cron expressions and display
+// scheduled times; empty means local time.
 type Trigger struct {
 	Cron string    `json:"cron,omitempty"`
 	At   time.Time `json:"at,omitzero"`
@@ -93,28 +93,45 @@ func NewCronTrigger(t CronTrigger) Trigger {
 }
 
 // NewOneShotTrigger adapts the explicit OneShotTrigger value object to the
-// persisted Trigger DTO.
+// persisted Trigger DTO, normalizing its absolute instant to UTC.
 func NewOneShotTrigger(t OneShotTrigger) Trigger {
-	return Trigger{At: t.At}
+	return Trigger{At: t.At.UTC()}
 }
 
 // IsCron reports whether the trigger is a recurring cron rule.
 func (t Trigger) IsCron() bool { return t.Cron != "" }
 
+// Location returns the timezone used to interpret and display this trigger.
+// An empty TZ uses the process-local timezone.
+func (t Trigger) Location() (*time.Location, error) {
+	if t.TZ == "" {
+		return time.Local, nil
+	}
+	loc, err := time.LoadLocation(t.TZ)
+	if err != nil {
+		return nil, fmt.Errorf("schedule: invalid timezone %q: %w", t.TZ, err)
+	}
+	return loc, nil
+}
+
 // Summary renders the trigger for display: "cron <expr>" (with optional TZ)
-// for a recurring trigger, or "at <instant>" for a one-off. The format of
-// the instant matches the canonical "2006-01-02 15:04 MST" display layout.
-func (t Trigger) Summary() string {
+// for a recurring trigger, or "at <instant>" for a one-off. One-off instants
+// are rendered in the trigger's explicit timezone, or local time when unset.
+func (t Trigger) Summary() (string, error) {
 	if t.IsCron() {
 		if t.TZ != "" {
-			return fmt.Sprintf("cron %q %s", t.Cron, t.TZ)
+			return fmt.Sprintf("cron %q %s", t.Cron, t.TZ), nil
 		}
-		return fmt.Sprintf("cron %q", t.Cron)
+		return fmt.Sprintf("cron %q", t.Cron), nil
 	}
 	if t.At.IsZero() {
-		return "at -"
+		return "at -", nil
 	}
-	return "at " + t.At.Format("2006-01-02 15:04 MST")
+	loc, err := t.Location()
+	if err != nil {
+		return "", err
+	}
+	return "at " + t.At.In(loc).Format("2006-01-02 15:04 MST"), nil
 }
 
 // Schedule is a single persisted workflow schedule.
@@ -186,13 +203,9 @@ func (r Schedule) NextRunAfter(t time.Time) (time.Time, error) {
 		}
 		return time.Time{}, nil
 	}
-	loc := time.Local
-	if r.Trigger.TZ != "" {
-		l, err := time.LoadLocation(r.Trigger.TZ)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("schedule: invalid timezone %q: %w", r.Trigger.TZ, err)
-		}
-		loc = l
+	loc, err := r.Trigger.Location()
+	if err != nil {
+		return time.Time{}, err
 	}
 	next, err := gronx.NextTickAfter(r.Trigger.Cron, t.In(loc), false)
 	if err != nil {
@@ -327,10 +340,8 @@ func Validate(rec Schedule) error {
 	if hasCron && !gronx.IsValid(rec.Trigger.Cron) {
 		return fmt.Errorf("schedule: invalid cron expression %q", rec.Trigger.Cron)
 	}
-	if rec.Trigger.TZ != "" {
-		if _, err := time.LoadLocation(rec.Trigger.TZ); err != nil {
-			return fmt.Errorf("schedule: invalid timezone %q: %w", rec.Trigger.TZ, err)
-		}
+	if _, err := rec.Trigger.Location(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -366,6 +377,7 @@ func NewCronSchedule(workflowID, ref, path string, params map[string]string, tri
 // after construction. path must already be absolute.
 func NewAtSchedule(workflowID, ref, path string, params map[string]string, trigger Trigger) Schedule {
 	rec := NewSchedule(workflowID, ref, path, params)
+	trigger.At = trigger.At.UTC()
 	rec.Trigger = trigger
 	return rec
 }
@@ -375,6 +387,9 @@ func NewAtSchedule(workflowID, ref, path string, params map[string]string, trigg
 func Add(root string, rec Schedule, cfg Config) (Schedule, error) {
 	if err := Validate(rec); err != nil {
 		return Schedule{}, err
+	}
+	if !rec.Trigger.At.IsZero() {
+		rec.Trigger.At = rec.Trigger.At.UTC()
 	}
 	now := time.Now
 	if cfg.Now != nil {
@@ -408,6 +423,9 @@ func Add(root string, rec Schedule, cfg Config) (Schedule, error) {
 func Update(root string, rec Schedule) error {
 	if rec.ID == "" {
 		return fmt.Errorf("schedule: update requires a record id")
+	}
+	if !rec.Trigger.At.IsZero() {
+		rec.Trigger.At = rec.Trigger.At.UTC()
 	}
 	if _, err := os.Stat(recordPath(root, rec.ID)); err != nil {
 		if os.IsNotExist(err) {
