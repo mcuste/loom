@@ -107,12 +107,8 @@ type Config struct {
 	// later resume can restore it before re-running shell tasks and relative
 	// paths. Empty means it is not recorded.
 	Cwd string
-	// ScheduleID links a run to the schedule that started it; empty for a run
-	// launched directly from the CLI.
-	ScheduleID string
-	// TriggeredBy records what initiated the run ("cli" or "schedule"). Empty
-	// means it is not recorded.
-	TriggeredBy string
+	// Provenance records what initiated the run.
+	Provenance Provenance
 }
 
 // Open creates a new run JSON file for workflowID under cfg.Root, seeded
@@ -150,15 +146,14 @@ func Open(workflowID workflow.WorkflowID, manifest []byte, cfg Config) (*Run, er
 		clock:        now,
 		errorHandler: cfg.OnError,
 		state: RunRecord{
-			RunID:       id,
-			WorkflowID:  string(workflowID),
-			StartedAt:   started,
-			Status:      StatusRunning,
-			Manifest:    string(manifest),
-			Params:      cfg.Params,
-			Cwd:         cfg.Cwd,
-			ScheduleID:  cfg.ScheduleID,
-			TriggeredBy: cfg.TriggeredBy,
+			RunID:      id,
+			WorkflowID: string(workflowID),
+			Provenance: cfg.Provenance,
+			StartedAt:  started,
+			Status:     StatusRunning,
+			Manifest:   string(manifest),
+			Params:     cfg.Params,
+			Cwd:        cfg.Cwd,
 		},
 		tasks: map[taskKey]int{},
 	}

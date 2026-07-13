@@ -13,6 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/mcuste/loom/pkg/launcher"
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/store"
 )
 
 // reconcileInterval bounds how long the daemon trusts filesystem events before
@@ -287,7 +288,7 @@ func (d *Daemon) launchScheduledRun(ctx context.Context, rec schedule.Schedule, 
 		d.logf("schedule %s: %v", rec.ID, res.err)
 		return
 	}
-	prov := launcher.Provenance{ScheduleID: rec.ID, TriggeredBy: "schedule", ScheduledAt: scheduledAt}
+	prov := store.Provenance{Trigger: store.TriggerSchedule, ScheduleID: rec.ID, ScheduledAt: scheduledAt}
 	runID, err := d.launcher.Launch(ctx, rec.RunRequest(d.cwd), prov)
 	res.runID = string(runID)
 	res.err = err

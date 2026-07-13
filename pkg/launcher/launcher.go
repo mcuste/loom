@@ -11,6 +11,7 @@ import (
 
 	"github.com/mcuste/loom/pkg/runner"
 	"github.com/mcuste/loom/pkg/runtime"
+	"github.com/mcuste/loom/pkg/store"
 	"github.com/mcuste/loom/pkg/workflow"
 	"github.com/mcuste/loom/pkg/workflowcheck"
 	"github.com/mcuste/loom/pkg/workflowload"
@@ -27,17 +28,9 @@ type RunRequest struct {
 	Cwd    string            `json:"cwd,omitempty"`
 }
 
-// Provenance records why a run was launched. Direct CLI runs leave it empty;
-// the daemon supplies its schedule ID, trigger, and scheduled time.
-type Provenance struct {
-	ScheduleID  string
-	TriggeredBy string
-	ScheduledAt time.Time
-}
-
 // RunLauncher is the small port the daemon uses to start a workflow run.
 type RunLauncher interface {
-	Launch(context.Context, RunRequest, Provenance) (string, error)
+	Launch(context.Context, RunRequest, store.Provenance) (string, error)
 }
 
 // Preparer turns a run request into a validated runner request.
@@ -96,12 +89,13 @@ func (l Launcher) Prepare(request RunRequest) (runner.Request, error) {
 		Catalog:  l.Catalog,
 		Home:     l.Home,
 		Cwd:      cwd,
+		Prov:     store.Provenance{Trigger: store.TriggerCLI},
 	}, nil
 }
 
 // Launch prepares and runs request, returning the persisted run ID. Scheduled
 // runs get their own log file when LogRoot and a schedule ID are configured.
-func (l Launcher) Launch(ctx context.Context, request RunRequest, provenance Provenance) (string, error) {
+func (l Launcher) Launch(ctx context.Context, request RunRequest, provenance store.Provenance) (string, error) {
 	req, err := l.Prepare(request)
 	if err != nil {
 		return "", err
@@ -111,11 +105,11 @@ func (l Launcher) Launch(ctx context.Context, request RunRequest, provenance Pro
 		return "", err
 	}
 	defer closeLog()
-	req.Prov = runner.Provenance{ScheduleID: provenance.ScheduleID, TriggeredBy: provenance.TriggeredBy}
+	req.Prov = provenance
 	return runner.Run(ctx, output, req)
 }
 
-func (l Launcher) output(prov Provenance) (runner.RunOutput, func(), error) {
+func (l Launcher) output(prov store.Provenance) (runner.RunOutput, func(), error) {
 	factory := l.NewOutput
 	if factory == nil {
 		return nil, nil, errors.New("launcher run output factory is required")

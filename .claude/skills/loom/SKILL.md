@@ -154,7 +154,7 @@ jq '.tasks[] | {id, model, usage, elapsed_ms}' .loom/runs/<wf_id>/latest.json
 
 ## Scheduling
 
-`loom daemon` is a foreground loop that starts due runs in process (each becomes a normal run record, tagged `triggered_by: schedule`). Keep it alive with `loom daemon install` (launchd on macOS, systemd user unit on Linux). Schedules live under `$LOOM_HOME/schedules/<id>.json`; per-run logs under `$LOOM_HOME/schedules/logs/<id>/`.
+`loom daemon` is a foreground loop that starts due runs in process (each becomes a normal run record, tagged `trigger: schedule`). Keep it alive with `loom daemon install` (launchd on macOS, systemd user unit on Linux). Schedules live under `$LOOM_HOME/schedules/<id>.json`; per-run logs under `$LOOM_HOME/schedules/logs/<id>/`.
 
 - Recurring: `loom schedule cron <wf> --expr "0 15 * * *" [--tz Area/City]`, or declare an inline `schedule:` block and run `loom schedule sync`.
 - One-off: `loom schedule at <wf> --time 15:00` (rolls to tomorrow if the time already passed today; `--date` pins an explicit day). Removed after its run starts.

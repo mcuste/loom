@@ -14,6 +14,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/mcuste/loom/pkg/launcher"
 	"github.com/mcuste/loom/pkg/schedule"
+	"github.com/mcuste/loom/pkg/store"
 )
 
 var (
@@ -50,7 +51,7 @@ type launchReply struct {
 
 type launchCall struct {
 	request    launcher.RunRequest
-	provenance launcher.Provenance
+	provenance store.Provenance
 	reply      chan launchReply
 }
 
@@ -66,7 +67,7 @@ func newControlledLauncher() *controlledLauncher {
 	return &controlledLauncher{calls: make(chan launchCall, 8)}
 }
 
-func (l *controlledLauncher) Launch(ctx context.Context, request launcher.RunRequest, provenance launcher.Provenance) (string, error) {
+func (l *controlledLauncher) Launch(ctx context.Context, request launcher.RunRequest, provenance store.Provenance) (string, error) {
 	call := launchCall{
 		request:    request,
 		provenance: provenance,
@@ -217,8 +218,8 @@ func TestDueCronLaunchesWithScheduleProvenance(t *testing.T) {
 	if call.request.Cwd != "/daemon-cwd" {
 		t.Errorf("workflow cwd = %q, want /daemon-cwd", call.request.Cwd)
 	}
-	if call.provenance.ScheduleID != added.ID || call.provenance.TriggeredBy != "schedule" {
-		t.Errorf("provenance = %q/%q, want %q/schedule", call.provenance.ScheduleID, call.provenance.TriggeredBy, added.ID)
+	if call.provenance.Trigger != store.TriggerSchedule || call.provenance.ScheduleID != added.ID {
+		t.Errorf("provenance = %#v, want schedule %q", call.provenance, added.ID)
 	}
 	if !call.provenance.ScheduledAt.Equal(firstRun) {
 		t.Errorf("scheduled time = %v, want %v", call.provenance.ScheduledAt, firstRun)

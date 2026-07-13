@@ -25,7 +25,7 @@ tasks:
     command: echo hello
 `)
 
-	_, err := sut.Launch(t.Context(), request, launcher.Provenance{})
+	_, err := sut.Launch(t.Context(), request, store.Provenance{})
 
 	if err == nil || err.Error() != "launcher run output factory is required" {
 		t.Fatalf("Launch error = %v, want missing output factory error", err)
@@ -43,9 +43,9 @@ tasks:
 	scheduledAt := time.Date(2026, 7, 11, 12, 30, 0, 0, time.UTC)
 	sut.LogRoot = logRoot
 	sut.NewOutput = func(w io.Writer) runner.RunOutput { return tui.New(w) }
-	provenance := launcher.Provenance{
+	provenance := store.Provenance{
+		Trigger:     store.TriggerSchedule,
 		ScheduleID:  "daily_report",
-		TriggeredBy: "schedule",
 		ScheduledAt: scheduledAt,
 	}
 
@@ -66,8 +66,8 @@ tasks:
 	if err != nil {
 		t.Fatalf("load run record: %v", err)
 	}
-	if record.ScheduleID != "daily_report" || record.TriggeredBy != "schedule" {
-		t.Errorf("run provenance = %q/%q, want daily_report/schedule", record.ScheduleID, record.TriggeredBy)
+	if record.Trigger != store.TriggerSchedule || record.ScheduleID != "daily_report" || !record.ScheduledAt.Equal(scheduledAt) {
+		t.Errorf("run provenance = %#v, want scheduled daily_report at %s", record.Provenance, scheduledAt)
 	}
 }
 
